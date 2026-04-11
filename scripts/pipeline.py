@@ -68,9 +68,12 @@ def compute_embeddings(
     cache_path: Path,
     device: str = DEVICE,
     model_name: str = MODEL_NAME,
-    batch_size: int = BATCH_SIZE,
+    batch_size: int | None = None,
 ) -> np.ndarray:
     """Return L2-normalised CLIP embeddings, using cache when available."""
+    if batch_size is None:
+        batch_size = BATCH_SIZE
+
     if cache_path.exists():
         print(f"Loading cached embeddings from {cache_path}")
         return np.load(str(cache_path))
@@ -102,6 +105,13 @@ def compute_embeddings(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(str(cache_path), embeddings)
     print(f"Saved embeddings to {cache_path}  shape={embeddings.shape}")
+
+    # Free GPU memory before scoring step
+    del model, preprocess
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return embeddings
 
 
@@ -110,9 +120,12 @@ def compute_embeddings(
 # ---------------------------------------------------------------------------
 def cluster_embeddings(
     embeddings: np.ndarray,
-    min_cluster_size: int = CLUSTER_MIN_SIZE,
+    min_cluster_size: int | None = None,
 ) -> dict[int, list[int]]:
     """Cluster embeddings with HDBSCAN. Noise points become singleton clusters."""
+    if min_cluster_size is None:
+        min_cluster_size = CLUSTER_MIN_SIZE
+
     import hdbscan
 
     clusterer = hdbscan.HDBSCAN(
@@ -142,19 +155,62 @@ def cluster_embeddings(
 def score_images(
     paths: list[str],
     device: str = DEVICE,
+    max_pixels: int = 1920 * 1080,
 ) -> list[float]:
-    """Score every image using pyiqa topiq_nr (no-reference quality)."""
+    """Score every image using pyiqa topiq_nr (no-reference quality).
+
+    Large images are resized to fit within *max_pixels* to avoid OOM.
+    """
+    import gc
     import pyiqa
 
-    metric = pyiqa.create_metric("topiq_nr", device=device)
+    # Aggressively free GPU memory from prior steps
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Try GPU first, fall back to CPU on OOM
+    try:
+        metric = pyiqa.create_metric("topiq_nr", device=device)
+        _score_one(metric, paths[0], max_pixels)
+    except (torch.cuda.OutOfMemoryError, RuntimeError):
+        print("GPU OOM during scoring — falling back to CPU")
+        del metric
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        device = "cpu"
+        metric = pyiqa.create_metric("topiq_nr", device=device)
+
     scores: list[float] = []
     for p in tqdm(paths, desc="Scoring images"):
         try:
-            score = metric(p).item()
-        except Exception:
+            score = _score_one(metric, p, max_pixels)
+        except Exception as exc:
+            warnings.warn(f"Scoring failed for {p}: {exc}")
             score = 0.0
         scores.append(score)
     return scores
+
+
+def _score_one(metric, path: str, max_pixels: int) -> float:
+    """Score a single image, resizing if needed to stay within memory budget."""
+    import torchvision.transforms.functional as TF
+    img = Image.open(path).convert("RGB")
+    w, h = img.size
+
+    # Resize large images to keep total pixels under max_pixels
+    if w * h > max_pixels:
+        scale = (max_pixels / (w * h)) ** 0.5
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    tensor = TF.to_tensor(img).unsqueeze(0)
+    if next(metric.parameters(), None) is not None:
+        tensor = tensor.to(next(metric.parameters()).device)
+    with torch.no_grad():
+        score = metric(tensor).item()
+    return score
 
 
 # ---------------------------------------------------------------------------
@@ -202,19 +258,49 @@ def rank_and_save(
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
-def run_pipeline(image_dir: str, output_dir: str = "outputs") -> dict:
+def run_pipeline(
+    image_dir: str,
+    output_dir: str = "outputs",
+    batch_size: int | None = None,
+    min_cluster_size: int | None = None,
+) -> dict:
     """Run the full pipeline: load → embed → cluster → score → rank → save."""
+    import gc
+
     out = Path(output_dir)
+    cache_path = out / "embeddings.npy"
 
-    paths, images = load_images(image_dir)
-    if not paths:
-        raise RuntimeError("No valid images found")
+    if cache_path.exists():
+        # Only need paths, not PIL images
+        paths = _scan_image_paths(image_dir)
+        if not paths:
+            raise RuntimeError("No valid images found")
+        embeddings = compute_embeddings([], cache_path=cache_path, batch_size=batch_size)
+    else:
+        paths, images = load_images(image_dir)
+        if not paths:
+            raise RuntimeError("No valid images found")
+        embeddings = compute_embeddings(images, cache_path=cache_path, batch_size=batch_size)
+        del images
+        gc.collect()
 
-    embeddings = compute_embeddings(images, cache_path=out / "embeddings.npy")
-    clusters = cluster_embeddings(embeddings)
+    clusters = cluster_embeddings(embeddings, min_cluster_size=min_cluster_size)
+
+    # Free embeddings
+    del embeddings
+    gc.collect()
+
     scores = score_images(paths)
     results = rank_and_save(paths, clusters, scores, out)
     return results
+
+
+def _scan_image_paths(image_dir: str) -> list[str]:
+    """Return sorted image paths without loading them."""
+    root = Path(image_dir)
+    return sorted(
+        str(p) for p in root.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +314,12 @@ def main():
     parser.add_argument("--min-cluster-size", type=int, default=CLUSTER_MIN_SIZE)
     args = parser.parse_args()
 
-    global BATCH_SIZE, CLUSTER_MIN_SIZE
-    BATCH_SIZE = args.batch_size
-    CLUSTER_MIN_SIZE = args.min_cluster_size
-
-    run_pipeline(args.image_dir, args.output_dir)
+    run_pipeline(
+        args.image_dir,
+        args.output_dir,
+        batch_size=args.batch_size,
+        min_cluster_size=args.min_cluster_size,
+    )
     print("✅ Pipeline complete")
 
 
