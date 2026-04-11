@@ -1,92 +1,158 @@
-"""📸 Photo Curation Tool — main Streamlit application."""
+"""📸 Photo Curation Tool — main Streamlit application.
+
+Minimal-chrome, photo-maximizing UI.  One cluster at a time; select keepers,
+compare/tournament mode, confirm & advance.
+"""
 
 import os
 import sys
 
 import streamlit as st
 
-# Run from repo root so relative image paths resolve correctly.
-# Also add ui/ to the Python path for local imports.
+# Ensure ui/ is on the import path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from components import (
-    render_auto_select,
-    render_cluster_grid,
-    render_compare_mode,
-    render_keep_best,
+from components import render_cluster_grid, render_cluster_header, render_compare_tournament
+from utils import delete_image_safe, load_results, remove_images_from_results, save_results
+
+# ---------------------------------------------------------------------------
+# Page config & custom CSS (reduce chrome, maximise photos)
+# ---------------------------------------------------------------------------
+st.set_page_config(page_title="📸 Sightread", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown(
+    """
+    <style>
+    /* Shrink default Streamlit top padding */
+    .block-container { padding-top: 1rem !important; padding-bottom: 0.5rem !important; }
+    /* Compact header */
+    header[data-testid="stHeader"] { height: 2.5rem; }
+    /* Tighter image margins */
+    [data-testid="stImage"] { margin-bottom: 0.25rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-from utils import delete_image_safe, load_results
 
-st.set_page_config(page_title="Photo Curation Tool", layout="wide")
-st.title("📸 Photo Curation Tool")
-
-# --- Load data ---
+# ---------------------------------------------------------------------------
+# Load data
+# ---------------------------------------------------------------------------
 RESULTS_PATH = "outputs/results.json"
 
 if not os.path.exists(RESULTS_PATH):
     st.error(
-        f"Results file not found at `{RESULTS_PATH}`. "
-        "Run `python scripts/generate_sample_data.py` first."
+        f"No results file at `{RESULTS_PATH}`.  "
+        "Run the pipeline first:\n\n"
+        "```bash\npython scripts/pipeline.py --image-dir /path/to/photos\n```"
     )
     st.stop()
 
 data = load_results(RESULTS_PATH)
 clusters = data["clusters"]
 
-# --- Sidebar: cluster selector ---
-st.sidebar.header("Clusters")
-cluster_labels = [f"Cluster {c['cluster_id']} ({len(c['images'])} images)" for c in clusters]
-selected_idx = st.sidebar.selectbox(
-    "Select cluster", range(len(clusters)), format_func=lambda i: cluster_labels[i]
-)
+if not clusters:
+    st.success("🎉 All clusters processed! No images left to curate.")
+    st.stop()
 
-cluster = clusters[selected_idx]
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+if "cluster_idx" not in st.session_state:
+    st.session_state.cluster_idx = 0
+
+# Clamp index in case clusters were removed
+st.session_state.cluster_idx = min(st.session_state.cluster_idx, len(clusters) - 1)
+
+cluster_idx = st.session_state.cluster_idx
+cluster = clusters[cluster_idx]
 images = cluster["images"]
 cluster_id = cluster["cluster_id"]
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Best image:** `{cluster['best_image']}`")
+# ---------------------------------------------------------------------------
+# Compact top bar: title + cluster navigation
+# ---------------------------------------------------------------------------
+title_col, nav_col = st.columns([1, 3])
+with title_col:
+    st.markdown("#### 📸 Sightread")
+with nav_col:
+    new_idx = render_cluster_header(cluster, cluster_idx, len(clusters))
+    if new_idx != cluster_idx:
+        st.session_state.cluster_idx = new_idx
+        st.rerun()
 
-# --- Main area: Cluster grid ---
-st.header(f"Cluster {cluster_id}")
-render_cluster_grid(images, cluster_id)
+st.caption(f"{len(images)} images  ·  best: {cluster['best_image'].split('/')[-1]}")
 
-# --- Bulk delete selected ---
-selected_paths = []
-for idx, img in enumerate(images):
-    key = f"select_{cluster_id}_{idx}"
-    if st.session_state.get(key, False):
-        selected_paths.append(img["path"])
+# ---------------------------------------------------------------------------
+# View toggle: Grid vs Compare
+# ---------------------------------------------------------------------------
+view = st.radio("View", ["Grid", "Compare"], horizontal=True, label_visibility="collapsed", key="view_toggle")
 
-if selected_paths:
-    st.warning(f"**{len(selected_paths)}** image(s) marked for deletion.")
-    if st.button("🗑️ Delete Selected Images", type="primary"):
-        moved = []
-        for path in selected_paths:
-            try:
-                dest = delete_image_safe(path)
-                moved.append(dest)
-            except FileNotFoundError:
-                st.error(f"Already missing: {path}")
-        if moved:
-            st.success(f"Moved {len(moved)} image(s) to trash.")
-            # Clear selection state
-            for idx in range(len(images)):
-                key = f"select_{cluster_id}_{idx}"
-                st.session_state[key] = False
+if view == "Grid":
+    render_cluster_grid(images, cluster_id)
+else:
+    render_compare_tournament(images, cluster_id)
+
+# ---------------------------------------------------------------------------
+# Summary + action bar
+# ---------------------------------------------------------------------------
+st.divider()
+
+n_keep = sum(1 for i in range(len(images)) if st.session_state.get(f"keep_{cluster_id}_{i}", False))
+n_delete = len(images) - n_keep
+
+info_col, action_col = st.columns([3, 2])
+with info_col:
+    if n_delete > 0:
+        st.warning(f"Keeping **{n_keep}** of **{len(images)}** — **{n_delete}** will be moved to trash")
+    else:
+        st.info(f"Keeping all **{len(images)}** images")
+
+with action_col:
+    btn_cols = st.columns(3)
+
+    # Keep Best Only
+    with btn_cols[0]:
+        if st.button("🏆 Keep Best", key="keep_best_btn"):
+            for idx, img in enumerate(images):
+                st.session_state[f"keep_{cluster_id}_{idx}"] = img["rank"] == 1
             st.rerun()
 
-st.divider()
+    # Skip
+    with btn_cols[1]:
+        if st.button("⏭ Skip", key="skip_btn"):
+            if cluster_idx < len(clusters) - 1:
+                st.session_state.cluster_idx = cluster_idx + 1
+                st.rerun()
+            else:
+                st.toast("Last cluster — nothing to skip to")
 
-# --- Compare mode ---
-with st.expander("🔍 Compare Mode"):
-    render_compare_mode(images)
+    # Confirm & Next
+    with btn_cols[2]:
+        if st.button("✅ Confirm", type="primary", key="confirm_btn"):
+            paths_to_delete = set()
+            for idx, img in enumerate(images):
+                if not st.session_state.get(f"keep_{cluster_id}_{idx}", False):
+                    paths_to_delete.add(img["path"])
 
-st.divider()
+            if paths_to_delete:
+                moved = 0
+                for p in paths_to_delete:
+                    try:
+                        delete_image_safe(p)
+                        moved += 1
+                    except FileNotFoundError:
+                        pass
+                # Update and save results
+                remove_images_from_results(data, paths_to_delete)
+                save_results(data)
+                st.toast(f"Moved {moved} image(s) to trash")
 
-# --- Auto-select worst ---
-with st.expander("⚡ Auto-select by Score Threshold"):
-    render_auto_select(images, cluster_id)
-
-# --- Keep best only ---
-render_keep_best(images, cluster_id)
+            # Advance to next cluster (or stay if last)
+            clusters_after = data["clusters"]
+            if cluster_idx < len(clusters_after) - 1:
+                st.session_state.cluster_idx = cluster_idx + 1
+            elif clusters_after:
+                st.session_state.cluster_idx = len(clusters_after) - 1
+            else:
+                st.session_state.cluster_idx = 0
+            st.rerun()
