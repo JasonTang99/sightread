@@ -6,18 +6,30 @@
       "images": [
         {
           "path": "demo_photos/DSCF4284.JPG",
-          "score": 0.92,
+          "score": 0.4821,
           "rank": 1
-        },
+        }
+      ]
+    },
+    {
+      "cluster_id": 1,
+      "best_image": "demo_photos/DSCF4285.JPG",
+      "images": [
         {
           "path": "demo_photos/DSCF4285.JPG",
-          "score": 0.85,
-          "rank": 2
-        },
+          "score": 0.5291,
+          "rank": 1
+        }
+      ]
+    },
+    {
+      "cluster_id": 2,
+      "best_image": "demo_photos/DSCF4286.JPG",
+      "images": [
         {
           "path": "demo_photos/DSCF4286.JPG",
-          "score": 0.78,
-          "rank": 3
+          "score": 0.53,
+          "rank": 1
         }
       ]
     }
