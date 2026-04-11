@@ -1,40 +1,55 @@
 # 📸 Sightread — Photo Curation Tool
 
-A local Streamlit web UI for browsing clusters of similar images, comparing them side-by-side, and safely deleting unwanted photos.
+Browse clusters of similar photos, compare them head-to-head, select your keepers, and safely delete the rest.
 
-## Setup
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
+./run.sh /path/to/photos
 ```
 
-## Generate Sample Data
+This runs the clustering/scoring pipeline, then launches the curation UI.
 
-Create a sample `outputs/results.json` from the images in `demo_photos/`:
+## Usage
+
+### 1. Run the pipeline separately
 
 ```bash
-python scripts/generate_sample_data.py
+python scripts/pipeline.py --image-dir /path/to/photos
 ```
 
-## Run the App
+Options:
+- `--output-dir outputs` — where to write results (default: `outputs/`)
+- `--batch-size 32` — CLIP batch size
+- `--min-cluster-size 3` — HDBSCAN minimum cluster size
+
+### 2. Launch the UI separately
 
 ```bash
 streamlit run ui/app.py
 ```
 
-Then open the URL printed in the terminal (usually `http://localhost:8501`).
+Reads `outputs/results.json` produced by the pipeline.
+
+### 3. One command
+
+```bash
+./run.sh /path/to/photos
+```
 
 ## Features
 
-- **Cluster grid** — 4-column layout with rank, score, and ⭐ best-image highlight
-- **Per-image controls** — Mark individual images for deletion
-- **Compare mode** — Side-by-side comparison of any two images
-- **Auto-select** — Score threshold slider to bulk-mark low-scoring images
-- **Keep Best Only** — One-click button to keep only the top-ranked image
-- **Bulk delete** — Delete all marked images at once
-- **Safe deletion** — Images are moved to `outputs/trash/`, never permanently deleted
+- **CLIP + HDBSCAN clustering** — groups visually similar photos automatically
+- **pyiqa quality scoring** — ranks images by aesthetic/technical quality
+- **Select keepers** — click to keep, unselected images get deleted
+- **Tournament compare** — step through head-to-head matchups, pick winners
+- **Manual compare** — choose any two images for side-by-side comparison
+- **Cluster-by-cluster** — navigate with Prev/Next or jump with dropdown
+- **Safe deletion** — images moved to `outputs/trash/`, never permanently deleted
+- **Photo-first UI** — minimal chrome, images fill the screen
 
-## Expected `results.json` Schema
+## `results.json` Schema
 
 ```json
 {
@@ -51,6 +66,12 @@ Then open the URL printed in the terminal (usually `http://localhost:8501`).
 }
 ```
 
-- `score` — float between 0 and 1 (higher is better)
-- `rank` — integer starting at 1 (lower is better)
-- `path` — relative to the repo root (working directory when running the app)
+- `score` — float, higher is better (pyiqa topiq_nr)
+- `rank` — integer starting at 1, lower is better
+- `path` — relative to working directory
+
+## Requirements
+
+- Python 3.10+
+- GPU recommended for pipeline (CLIP + pyiqa); CPU works but is slower
+- See `requirements.txt` for full dependency list
