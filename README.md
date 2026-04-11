@@ -22,7 +22,7 @@ python scripts/pipeline.py --image-dir /path/to/photos
 Options:
 - `--output-dir outputs` — where to write results (default: `outputs/`)
 - `--batch-size 32` — CLIP batch size
-- `--min-cluster-size 3` — HDBSCAN minimum cluster size
+- `--min-cluster-size 2` — HDBSCAN minimum cluster size
 
 ### 2. Launch the UI separately
 
@@ -30,7 +30,7 @@ Options:
 streamlit run ui/app.py
 ```
 
-Reads `outputs/results.json` produced by the pipeline.
+Reads `outputs/results.json` produced by the pipeline. Clusters with only 1 image are skipped automatically.
 
 ### 3. One command
 
@@ -48,6 +48,16 @@ Reads `outputs/results.json` produced by the pipeline.
 - **Cluster-by-cluster** — navigate with Prev/Next or jump with dropdown
 - **Safe deletion** — images moved to `outputs/trash/`, never permanently deleted
 - **Photo-first UI** — minimal chrome, images fill the screen
+
+## Cache
+
+The pipeline caches CLIP embeddings to `outputs/embeddings.npy` so re-runs skip the expensive embedding step. To force a full recomputation:
+
+```bash
+python scripts/clean_cache.py
+```
+
+This removes `embeddings.npy`, `clusters.json`, `results.json`, and empties `outputs/trash/`.
 
 ## `results.json` Schema
 
