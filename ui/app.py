@@ -48,7 +48,8 @@ if not os.path.exists(RESULTS_PATH):
     st.stop()
 
 data = load_results(RESULTS_PATH)
-clusters = data["clusters"]
+# Skip singleton clusters — only show clusters with 2+ images for curation
+clusters = [c for c in data["clusters"] if len(c["images"]) > 1]
 
 if not clusters:
     st.success("🎉 All clusters processed! No images left to curate.")

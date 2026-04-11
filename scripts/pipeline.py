@@ -24,7 +24,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_NAME = "ViT-B-16"
 PRETRAINED = "openai"
 BATCH_SIZE = 32
-CLUSTER_MIN_SIZE = 3
+CLUSTER_MIN_SIZE = 2
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
 
