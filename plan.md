@@ -1,100 +1,45 @@
-# Photo Curation UI — Implementation Plan
+# Sightread — Improvement Plan
 
-## Problem
-Build a local Streamlit web UI that lets a user browse clusters of similar images, compare them side-by-side, see rankings/scores, and safely delete unwanted images (moved to trash, never permanently deleted).
+Updated: 2026-04-29
 
-## Approach
-Create a Streamlit app at `ui/` in the repo root with three modules (`app.py`, `components.py`, `utils.py`), a `requirements.txt`, and a sample-data generator script. The app reads `outputs/results.json` for cluster/ranking data and displays images with full curation controls.
+---
 
-## File Structure (final)
-```
-sightread/
-├── ui/
-│   ├── app.py            # Main Streamlit app
-│   ├── components.py     # Reusable UI components (cluster view, compare mode, etc.)
-│   └── utils.py          # Data loading, safe deletion, helpers
-├── scripts/
-│   └── generate_sample_data.py  # Creates outputs/results.json from demo_photos/
-├── outputs/              # Created by generate script / backend
-│   ├── results.json
-│   └── trash/            # Safe-delete destination
-├── demo_photos/          # Already exists (3 JPGs)
-├── requirements.txt
-└── README.md
-```
+## Bugs fixed this session
 
-## Todos
+- `tests/conftest.py`: `reset_output_dir` fixture didn't clear `curation.json` between tests → state bleed causing cascade failures. Fixed by unlinking it before each test.
+- `tests/test_ui.py`: 3 stale assertions — `test_confirm_removes_cluster_from_results` checked `results.json` but app now uses `curation.json`; `test_completion_shows_rm_command` / `test_completion_code_block_has_copy_button` looked for `rm -rf` but completion screen shows `delete_marked.py`.
+- `webapp/server.py`: Failed to start — `remove_images_from_results` missing from `ui/utils.py`. Added it.
+- `webapp/server.py`: Undo was broken — passed results dict to curation-specific `snapshot_state`/`restore_snapshot`. Rewrote undo to store `{results, delete_paths}` entries and restore both.
 
-### 1. `setup-deps` — Create requirements.txt
-- Add: `streamlit`, `pillow`, `pandas`, `numpy`
-- (Skip `streamlit-image-select` — not needed for core+recommended scope)
+**Test baseline after fixes:**
+- `tests/test_utils.py`: 54/54
+- `tests/test_ui.py` (Streamlit): 33/33
+- `webapp/tests/test_ui.py`: 36/36
 
-### 2. `generate-sample-data` — Sample data generator script
-- `scripts/generate_sample_data.py`
-- Scans `demo_photos/`, creates a single cluster with all 3 images
-- Assigns mock scores (0.92, 0.85, 0.78) and ranks (1, 2, 3)
-- Writes `outputs/results.json` matching the expected schema:
-  ```json
-  {
-    "clusters": [
-      {
-        "cluster_id": 0,
-        "best_image": "demo_photos/DSCF4284.JPG",
-        "images": [
-          { "path": "demo_photos/DSCF4284.JPG", "score": 0.92, "rank": 1 },
-          { "path": "demo_photos/DSCF4285.JPG", "score": 0.85, "rank": 2 },
-          { "path": "demo_photos/DSCF4286.JPG", "score": 0.78, "rank": 3 }
-        ]
-      }
-    ]
-  }
-  ```
-- Depends on: nothing
+---
 
-### 3. `utils-module` — Implement `ui/utils.py`
-- `load_results(path)` — load and return parsed JSON
-- `delete_image_safe(path)` — move file to `outputs/trash/`, never permanent delete
-- `TRASH_DIR = "outputs/trash"`
-- Depends on: nothing
+## Planned improvements (Opus review, 2026-04-29)
 
-### 4. `components-module` — Implement `ui/components.py`
-Reusable Streamlit component functions:
-- `render_cluster_grid(images, on_delete_callback)` — display images in a 4-column grid, highlight best (⭐), show rank/score, per-image keep/delete buttons
-- `render_compare_mode(images)` — side-by-side comparison with two selectboxes
-- `render_auto_select(images)` — slider for score threshold, show auto-selected images
-- `render_keep_best(images, delete_fn)` — "Keep Best Only" button that deletes all but rank 1
-- Depends on: `utils-module`
+### P0 — Security / correctness
 
-### 5. `main-app` — Implement `ui/app.py`
-- `st.set_page_config(layout="wide")`
-- Title: "📸 Photo Curation Tool"
-- Sidebar: cluster selector (selectbox)
-- Main area:
-  - Cluster grid (4 cols max, wrapping for large clusters)
-  - Best image highlighted with ⭐ BEST
-  - Per-image Keep / Delete buttons
-  - Divider
-  - Compare Mode toggle → side-by-side view
-  - Auto-select worst images (score threshold slider)
-  - "Keep Best Only" button
-  - Bulk "Delete Selected Images" button
-- Session state to track selected-for-deletion images across rerenders
-- Depends on: `components-module`, `utils-module`
+- [ ] **Race condition on confirm** — `/api/confirm` does read-modify-write with no locking. Concurrent requests or double-clicks can lose deletions. Fix: `threading.Lock` on all mutating endpoints (`/api/confirm`, `/api/undo`, `/api/restore`). Also make `save_results` atomic via temp-file + `os.replace`.
 
-### 6. `readme` — Create README.md
-- Setup instructions (`pip install -r requirements.txt`)
-- How to generate sample data (`python scripts/generate_sample_data.py`)
-- How to run (`streamlit run ui/app.py`)
-- Expected `results.json` schema
-- Depends on: `main-app`
+- [ ] **Path traversal bypass** — `str(abs_path).startswith(str(PROJECT_ROOT))` is bypassable by sibling directories (e.g. `sightread2/`). Fix: use `abs_path.relative_to(PROJECT_ROOT)` in a try/except; also reject `Path(path).is_absolute()` early.
 
-## Safety Requirements
-- **NEVER** permanently delete images
-- Always `shutil.move()` to `outputs/trash/`
-- Show confirmation in UI after deletion
+### P1 — UX / throughput
 
-## Key Decisions
-- 4-column grid layout (wraps for large clusters, avoids horizontal overflow)
-- Session state for delete selections (Streamlit rerenders lose button state otherwise)
-- Compare mode is a toggle, not a separate page
-- `outputs/` paths in `results.json` are relative to the repo root (CWD when running)
+- [ ] **Keyboard shortcuts** — biggest single win. `1-9` toggle keep/delete for Nth image, `Enter` confirm, `←/→` prev/next cluster, `K` keep-best, `B` skip, `U` undo, `?` help overlay. Show digit on each card's rank badge. Would 3-5× curation throughput.
+
+- [ ] **Auto tab-switch hijacks user** — `setTab("singles")` inside `reload()` runs on every confirm, pulling user off clusters mid-session. Fix: use a `ref` to only auto-switch once on initial mount.
+
+- [ ] **Bulk operations + session progress** — no "X/Y reviewed" counter, no jump-to-unreviewed, no auto-keep-best above threshold. Fix: `reviewed: Set<clusterId>` in client state, show progress in header, add `/api/auto_keep_best` endpoint (one undo entry for all).
+
+### P2 — Performance
+
+- [ ] **Image caching** — thumbnails re-encoded on every request, no `Cache-Control`/`ETag`. Fix: `Cache-Control: public, max-age=86400, immutable` + `ETag` on `(path, mtime, w)`, disk thumbnail cache under `webapp/.thumb_cache/{w}/{hash}.jpg`, `304` on `If-None-Match`.
+
+- [ ] **`load_results` on every API call** — re-parses JSON every `/api/state` GET. Fix: mtime-based in-memory cache; invalidate on confirm/undo.
+
+### P3 — Reliability
+
+- [ ] **Undo stack lost on restart** — in-memory only; server restart silently breaks undo. Fix: persist stack to `outputs/undo.jsonl`, or switch to diff-based undo (store only removed images + cluster indices rather than full snapshots). Document that undo doesn't restore already-trashed files.
