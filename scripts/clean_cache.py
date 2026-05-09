@@ -10,7 +10,15 @@ import argparse
 import shutil
 from pathlib import Path
 
-CACHE_FILES = ["embeddings.npy", "clusters.json", "results.json"]
+CACHE_FILES = [
+    "embeddings_dinov3_mpcls_tta.npy",
+    "embeddings_dinov3_mpcls_tta.paths.json",
+    "embeddings_dinov3_mpcls_tta.hash",  # legacy
+    "scores_ensemble.npz",
+    "scores_ensemble.paths.json",
+    "clusters.json",
+    "results.json",
+]
 
 
 def clean(output_dir: str = "outputs") -> None:

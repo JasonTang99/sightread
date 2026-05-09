@@ -5,8 +5,8 @@ numpy
 torch
 torchvision
 torchaudio
-open_clip_torch
-hdbscan
 scikit-learn
+faiss-cpu
 pyiqa
 tqdm
+transformers

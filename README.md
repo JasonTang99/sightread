@@ -21,8 +21,9 @@ python scripts/pipeline.py --image-dir /path/to/photos
 
 Options:
 - `--output-dir outputs` — where to write results (default: `outputs/`)
-- `--batch-size 32` — CLIP batch size
-- `--min-cluster-size 2` — HDBSCAN minimum cluster size
+- `--batch-size 32` — embedding batch size
+- `--tight 0.18` — near-duplicate threshold (lower = stricter)
+- `--loose 0.35` — same-scene threshold
 
 ### 2. Launch the UI separately
 
@@ -40,8 +41,8 @@ Reads `outputs/results.json` produced by the pipeline. Clusters with only 1 imag
 
 ## Features
 
-- **CLIP + HDBSCAN clustering** — groups visually similar photos automatically
-- **pyiqa quality scoring** — ranks images by aesthetic/technical quality
+- **DINOv3 + agglomerative clustering** — groups visually similar photos automatically
+- **4-metric IQA ensemble** (MUSIQ, NIMA, CLIP-IQA+, LAION-Aes + sharpness/exposure/face) — ranks images by quality
 - **Select keepers** — click to keep, unselected images get deleted
 - **Tournament compare** — step through head-to-head matchups, pick winners
 - **Manual compare** — choose any two images for side-by-side comparison
@@ -51,13 +52,13 @@ Reads `outputs/results.json` produced by the pipeline. Clusters with only 1 imag
 
 ## Cache
 
-The pipeline caches CLIP embeddings to `outputs/embeddings.npy` so re-runs skip the expensive embedding step. To force a full recomputation:
+The pipeline caches DINOv3 embeddings and IQA scores so re-runs skip the expensive compute steps. To force a full recomputation:
 
 ```bash
 python scripts/clean_cache.py
 ```
 
-This removes `embeddings.npy`, `clusters.json`, `results.json`, and empties `outputs/trash/`.
+This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters.json`, `results.json`, and empties `outputs/trash/`.
 
 ## `results.json` Schema
 
@@ -76,12 +77,13 @@ This removes `embeddings.npy`, `clusters.json`, `results.json`, and empties `out
 }
 ```
 
-- `score` — float, higher is better (pyiqa topiq_nr)
+- `score` — float, higher is better (weighted ensemble: MUSIQ/NIMA/CLIP-IQA+/LAION-Aes + sharpness/exposure/face)
 - `rank` — integer starting at 1, lower is better
-- `path` — relative to working directory
+- `centrality` — cosine similarity to cluster centroid
+- `path` — absolute path to image
 
 ## Requirements
 
 - Python 3.10+
-- GPU recommended for pipeline (CLIP + pyiqa); CPU works but is slower
+- GPU recommended for pipeline (DINOv3 + pyiqa); CPU works but is slower
 - See `requirements.txt` for full dependency list
