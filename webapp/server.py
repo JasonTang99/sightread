@@ -1,5 +1,4 @@
 """FastAPI backend for Sightread webapp."""
-import copy
 import io
 import logging
 import os
@@ -51,8 +50,8 @@ def _require_active() -> ProjectContext:
     return _active
 
 
-def _push_undo(results_snap: dict, delete_paths: list[str]) -> None:
-    _undo_stack.append({"results": copy.deepcopy(results_snap), "delete_paths": list(delete_paths)})
+def _push_undo(delete_paths: list[str]) -> None:
+    _undo_stack.append({"delete_paths": list(delete_paths)})
     if len(_undo_stack) > 10:
         _undo_stack.pop(0)
 
@@ -93,16 +92,10 @@ class ConfirmRequest(BaseModel):
 @app.post("/api/confirm")
 def confirm(req: ConfirmRequest):
     ctx = _require_active()
-    results_path = ctx.output_dir / "results.json"
     delete_list_path = ctx.output_dir / "to_delete.txt"
-    data = load_results(results_path)
-    paths_to_remove = set(req.all_paths) if req.all_paths else set(req.delete_paths)
     if req.delete_paths:
         append_to_delete_list(req.delete_paths, delete_list_path)
-    if paths_to_remove:
-        _push_undo(data, req.delete_paths)
-        remove_images_from_results(data, paths_to_remove)
-        save_results(data, results_path)
+        _push_undo(req.delete_paths)
     return {"ok": True}
 
 
@@ -112,9 +105,7 @@ def undo():
     if not _undo_stack:
         raise HTTPException(400, "Nothing to undo")
     entry = _undo_stack.pop()
-    results_path = ctx.output_dir / "results.json"
     delete_list_path = ctx.output_dir / "to_delete.txt"
-    save_results(entry["results"], results_path)
     if entry["delete_paths"]:
         remove_from_delete_list(set(entry["delete_paths"]), delete_list_path)
     return {"ok": True}
@@ -137,6 +128,33 @@ def get_trash():
     ctx = _require_active()
     delete_list_path = ctx.output_dir / "to_delete.txt"
     return {"paths": read_delete_list(delete_list_path)}
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".ts", ".webm"}
+
+
+@app.get("/api/videos")
+def list_videos():
+    ctx = _require_active()
+    paths = sorted(
+        str(p.resolve())
+        for p in ctx.folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+    )
+    return {"paths": paths}
+
+
+@app.get("/api/video")
+def serve_video(path: str = Query(...)):
+    ctx = _require_active()
+    p = Path(path)
+    abs_path = p.resolve() if p.is_absolute() else (ctx.folder / p).resolve()
+    allowed = (ctx.folder, ctx.output_dir, PROJECT_ROOT)
+    if not any(_is_under(abs_path, base) for base in allowed):
+        raise HTTPException(403, "Path outside project")
+    if not abs_path.exists():
+        raise HTTPException(404, "Not found")
+    return FileResponse(abs_path)
 
 
 @app.get("/api/image")
