@@ -4,15 +4,17 @@ import { HelpOverlay } from "./components/HelpOverlay";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { SingletonsView } from "./components/SingletonsView";
 import { TrashPanel } from "./components/TrashPanel";
+import { VideoView } from "./components/VideoView";
 import type { AppState } from "./types";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"clusters" | "singles">("clusters");
+  const [tab, setTab] = useState<"clusters" | "singles" | "videos">("clusters");
   const [undoing, setUndoing] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [videos, setVideos] = useState<string[]>([]);
 
   const reload = useCallback(async () => {
     try {
@@ -31,6 +33,22 @@ export default function App() {
   }, []);
 
   useEffect(() => { reload(); }, [reload]);
+
+  // Fetch videos once when project is open
+  const projectOpen = state !== null && !state.no_project && !state.needs_pipeline;
+  useEffect(() => {
+    if (!projectOpen) return;
+    fetch("/api/videos")
+      .then((r) => r.json())
+      .then((d) => setVideos(d.paths ?? []))
+      .catch(() => {});
+  }, [projectOpen]);
+
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 1000);
+    return () => clearTimeout(t);
+  }, [error]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -56,8 +74,8 @@ export default function App() {
   };
 
   const handleChangeProject = async () => {
-    // Clear active project server-side by reloading — picker shows when no_project
     setState(null);
+    setVideos([]);
     setLoading(false);
   };
 
@@ -69,13 +87,13 @@ export default function App() {
     );
   }
 
-  // No project open — show picker
   if (!state || state.no_project) {
     return <ProjectPicker onProjectOpened={reload} />;
   }
 
   const hasClusters = (state.clusters?.length ?? 0) > 0;
   const hasSingles = (state.singletons?.length ?? 0) > 0;
+  const hasVideos = videos.length > 0;
 
   return (
     <div>
@@ -109,6 +127,16 @@ export default function App() {
             Singles ({state.singletons.length})
           </button>
         )}
+        {hasVideos && (
+          <button
+            onClick={() => setTab("videos")}
+            className={`px-3 py-1 text-sm border-b-2 transition-colors ${
+              tab === "videos" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Videos ({videos.length})
+          </button>
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           {state.pending_delete_count > 0 && (
@@ -132,7 +160,9 @@ export default function App() {
           </div>
         )}
 
-        {!hasClusters && !hasSingles ? (
+        {tab === "videos" ? (
+          <VideoView videos={videos} onError={setError} />
+        ) : !hasClusters && !hasSingles ? (
           <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">
             <p className="text-2xl mb-2">🎉</p>
             <p className="text-gray-700 font-medium">All done!</p>
