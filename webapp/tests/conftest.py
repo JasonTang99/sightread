@@ -84,7 +84,14 @@ def output_dir(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def webapp_server(output_dir, tmp_path_factory):
+def project_folder(tmp_path_factory):
+    # Empty folder: keeps /api/videos deterministic (repo .mts/.webm files would
+    # otherwise show up). Relative image paths fall back to PROJECT_ROOT.
+    return tmp_path_factory.mktemp("sightread_photos")
+
+
+@pytest.fixture(scope="session")
+def webapp_server(output_dir, project_folder, tmp_path_factory):
     log = tmp_path_factory.mktemp("logs") / "server.log"
     env = {**os.environ, "SIGHTREAD_TEST": "1"}
     proc = subprocess.Popen(
@@ -99,7 +106,7 @@ def webapp_server(output_dir, tmp_path_factory):
         _wait_for_server()
         requests.post(
             f"{BASE_URL}/api/_test_set_project",
-            json={"folder": str(PROJECT_ROOT), "output_dir": str(output_dir)},
+            json={"folder": str(project_folder), "output_dir": str(output_dir)},
         )
         yield BASE_URL
     finally:
@@ -108,15 +115,17 @@ def webapp_server(output_dir, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
-def reset_state(output_dir, webapp_server):
+def reset_state(output_dir, project_folder, webapp_server):
     """Restore file state and clear in-memory undo stack before each test."""
     time.sleep(0.1)  # let any in-flight requests from previous test settle
     (output_dir / "results.json").write_text(json.dumps(FIXTURE_RESULTS))
     (output_dir / "to_delete.txt").write_text("")
+    (output_dir / "decisions.json").unlink(missing_ok=True)
+    (output_dir / "favorites.json").unlink(missing_ok=True)
     requests.post(f"{BASE_URL}/api/_test_reset")
     requests.post(
         f"{BASE_URL}/api/_test_set_project",
-        json={"folder": str(PROJECT_ROOT), "output_dir": str(output_dir)},
+        json={"folder": str(project_folder), "output_dir": str(output_dir)},
     )
     yield
 
