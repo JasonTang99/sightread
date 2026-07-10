@@ -4,6 +4,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Optional
 
 _lock = threading.Lock()
 _current: "JobState | None" = None
@@ -29,12 +30,22 @@ class JobState:
         with _lock:
             return self._lines[-1] if self._lines else None
 
+    @property
+    def tail(self) -> list[str]:
+        with _lock:
+            return self._lines[-20:]
+
 
 def current_job() -> "JobState | None":
     return _current
 
 
-def start_pipeline(folder: Path, output_dir: Path, project_root: Path) -> JobState:
+def start_pipeline(
+    folder: Path,
+    output_dir: Path,
+    project_root: Path,
+    on_success: Optional[Callable[[], None]] = None,
+) -> JobState:
     global _current
     output_dir.mkdir(parents=True, exist_ok=True)
     job = JobState(folder=str(folder), output_dir=str(output_dir))
@@ -60,6 +71,11 @@ def start_pipeline(folder: Path, output_dir: Path, project_root: Path) -> JobSta
             proc.wait()
             if proc.returncode != 0:
                 job.error = f"Pipeline exited {proc.returncode}"
+            elif on_success is not None:
+                try:
+                    on_success()
+                except Exception:
+                    pass  # bookkeeping failure must not mark the pipeline as failed
         except Exception as exc:
             job.error = str(exc)
         finally:

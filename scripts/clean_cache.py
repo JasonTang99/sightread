@@ -18,6 +18,7 @@ CACHE_FILES = [
     "scores_ensemble.paths.json",
     "clusters.json",
     "results.json",
+    "video_highlights.json",
 ]
 
 
@@ -35,6 +36,18 @@ def clean(output_dir: str = "outputs") -> None:
         n = sum(1 for _ in trash.iterdir())
         shutil.rmtree(trash)
         removed.append(f"{trash}/ ({n} files)")
+
+    thumb_cache = out / "thumb_cache"
+    if thumb_cache.is_dir():
+        n = sum(1 for _ in thumb_cache.iterdir())
+        shutil.rmtree(thumb_cache)
+        removed.append(f"{thumb_cache}/ ({n} files)")
+
+    vh_cache = out / "video_highlights_cache"
+    if vh_cache.is_dir():
+        n = sum(1 for _ in vh_cache.iterdir())
+        shutil.rmtree(vh_cache)
+        removed.append(f"{vh_cache}/ ({n} entries)")
 
     if removed:
         for r in removed:

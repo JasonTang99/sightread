@@ -1,49 +1,45 @@
 import { useEffect, useRef, useState } from "react";
-import type { Cluster } from "../types";
+import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import type { Cluster, ClusterDecision } from "../types";
 
 interface Props {
   clusters: Cluster[];
+  clusterDecisions: Record<string, ClusterDecision>;
+  favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
   onUndo: () => Promise<void>;
+  onToggleFavorite: (path: string) => Promise<void>;
 }
 
-function imgUrl(path: string, w = 1200) {
+function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
-  const [idx, setIdx] = useState(0);
+export function ClusterView({ clusters, clusterDecisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
+  const [idx, setIdx] = useState(() => {
+    const first = clusters.findIndex((c) => !(String(c.cluster_id) in clusterDecisions));
+    return first === -1 ? 0 : first;
+  });
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   const [cols, setCols] = useState(2);
   const [submitting, setSubmitting] = useState(false);
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
-  // Mutable refs — keyboard handler reads these directly, never re-registers
-  const clusterRef = useRef<typeof cluster | undefined>(undefined);
-  const clustersLenRef = useRef(clusters.length);
-  const keepsRef = useRef(keeps);
-  const submittingRef = useRef(submitting);
-  const focusedImgRef = useRef(focusedImg);
-  const colsRef = useRef(cols);
-  const onRefreshRef = useRef(onRefresh);
-  const onErrorRef = useRef(onError);
-  const onUndoRef = useRef(onUndo);
 
   const clusterIdx = Math.min(idx, clusters.length - 1);
   const cluster = clusters[clusterIdx];
+  const favSet = new Set(favorites);
 
-  // Update refs every render
-  clusterRef.current = cluster;
-  clustersLenRef.current = clusters.length;
-  keepsRef.current = keeps;
-  submittingRef.current = submitting;
-  focusedImgRef.current = focusedImg;
-  colsRef.current = cols;
-  onRefreshRef.current = onRefresh;
-  onErrorRef.current = onError;
-  onUndoRef.current = onUndo;
+  useEffect(() => {
+    for (const c of clusters.slice(clusterIdx + 1, clusterIdx + 3)) {
+      for (const img of c.images) {
+        const el = new Image();
+        el.src = imgUrl(img.path);
+      }
+    }
+  }, [clusterIdx]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!cluster) return;
@@ -52,13 +48,23 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
     if (saved) {
       setKeeps(saved);
     } else {
+      const decision = clusterDecisions[String(clusterId)];
       const init: Record<string, boolean> = {};
-      for (const img of cluster.images) init[img.path] = img.rank === 1;
+      if (decision) {
+        const deletedSet = new Set(decision.deleted);
+        for (const img of cluster.images) init[img.path] = !deletedSet.has(img.path);
+      } else {
+        for (const img of cluster.images) init[img.path] = img.rank === 1;
+      }
       setKeeps(init);
     }
     setFocusedImg(0);
-    return () => { keepsByClusterRef.current[clusterId] = keepsRef.current; };
-  }, [cluster?.cluster_id]);
+  }, [cluster?.cluster_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Remember selections per cluster so navigating back restores them
+  useEffect(() => {
+    if (cluster) keepsByClusterRef.current[cluster.cluster_id] = keeps;
+  }, [keeps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (idx >= clusters.length) setIdx(Math.max(0, clusters.length - 1));
@@ -75,14 +81,21 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
   const confirm = async () => {
     setSubmitting(true);
     try {
-      const deletePaths = cluster.images.filter((img) => !keeps[img.path]).map((img) => img.path);
+      const deletePaths = cluster.images
+        .filter((img) => !(keeps[img.path] ?? img.rank === 1))
+        .map((img) => img.path);
       const res = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_paths: deletePaths }),
+        body: JSON.stringify({
+          cluster_id: cluster.cluster_id,
+          delete_paths: deletePaths,
+          all_paths: cluster.images.map((img) => img.path),
+        }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       setIdx((i) => i + 1);
+      await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -90,107 +103,77 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
     }
   };
 
-  // Register once on mount — reads all state via refs
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-      const c = clusterRef.current;
-      if (!c) return;
+  useWindowKeydown((e) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+    if (!cluster) return;
 
-      // 1–9: toggle image by rank
-      if (/^[1-9]$/.test(e.key)) {
-        const rankIdx = parseInt(e.key) - 1;
-        const img = c.images.find((img) => img.rank === rankIdx + 1);
-        if (img) {
-          e.preventDefault();
-          setKeeps((prev) => ({ ...prev, [img.path]: !prev[img.path] }));
-        }
-        return;
-      }
-
-      switch (e.key) {
-        case "ArrowLeft":
-          e.preventDefault();
-          setIdx((i) => Math.max(0, Math.min(i, clustersLenRef.current - 1) - 1));
-          break;
-        case "ArrowRight":
-        case "b":
-        case "s":
-          e.preventDefault();
-          setIdx((i) => Math.min(clustersLenRef.current - 1, Math.min(i, clustersLenRef.current - 1) + 1));
-          break;
-        case "h":
-          e.preventDefault();
-          setFocusedImg((f) => {
-            const next = Math.max(0, f - 1);
-            imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            return next;
-          });
-          break;
-        case "l":
-          e.preventDefault();
-          setFocusedImg((f) => {
-            const next = Math.min(c.images.length - 1, f + 1);
-            imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            return next;
-          });
-          break;
-        case "j":
-          e.preventDefault();
-          setFocusedImg((f) => {
-            const next = Math.min(c.images.length - 1, f + colsRef.current);
-            imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            return next;
-          });
-          break;
-        case "k":
-          e.preventDefault();
-          setFocusedImg((f) => {
-            const next = Math.max(0, f - colsRef.current);
-            imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            return next;
-          });
-          break;
-        case " ":
-          e.preventDefault();
-          if (c.images[focusedImgRef.current]) {
-            const path = c.images[focusedImgRef.current].path;
-            setKeeps((prev) => ({ ...prev, [path]: !prev[path] }));
-          }
-          break;
-        case "K":
-          e.preventDefault();
-          setKeeps(() => {
-            const next: Record<string, boolean> = {};
-            for (const img of c.images) next[img.path] = img.rank === 1;
-            return next;
-          });
-          break;
-        case "u":
-          e.preventDefault();
-          onUndoRef.current().catch((err) => onErrorRef.current(err instanceof Error ? err.message : String(err)));
-          break;
-        case "Enter":
-          e.preventDefault();
-          if (!submittingRef.current) {
-            const deletePaths = c.images.filter((img) => !keepsRef.current[img.path]).map((img) => img.path);
-            setSubmitting(true);
-            fetch("/api/confirm", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ delete_paths: deletePaths }),
-            })
-              .then((res) => { if (!res.ok) throw new Error(`Confirm failed: ${res.status}`); })
-              .then(() => setIdx((i) => i + 1))
-              .catch((err) => onErrorRef.current(err instanceof Error ? err.message : String(err)))
-              .finally(() => setSubmitting(false));
-          }
-          break;
-      }
+    const focusImage = (next: number) => {
+      imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      setFocusedImg(next);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []); // mount/unmount only
+
+    // 1–9: toggle image by rank
+    if (/^[1-9]$/.test(e.key)) {
+      const img = cluster.images.find((img) => img.rank === parseInt(e.key));
+      if (img) {
+        e.preventDefault();
+        toggle(img.path);
+      }
+      return;
+    }
+
+    switch (e.key) {
+      case "ArrowLeft":
+        e.preventDefault();
+        setIdx(Math.max(0, clusterIdx - 1));
+        break;
+      case "ArrowRight":
+      case "b":
+        e.preventDefault();
+        setIdx(Math.min(clusters.length - 1, clusterIdx + 1));
+        break;
+      case "s":
+        e.preventDefault();
+        if (cluster.images[focusedImg]) {
+          onToggleFavorite(cluster.images[focusedImg].path).catch((err) =>
+            onError(err instanceof Error ? err.message : String(err))
+          );
+        }
+        break;
+      case "h":
+        e.preventDefault();
+        focusImage(Math.max(0, focusedImg - 1));
+        break;
+      case "l":
+        e.preventDefault();
+        focusImage(Math.min(cluster.images.length - 1, focusedImg + 1));
+        break;
+      case "j":
+        e.preventDefault();
+        focusImage(Math.min(cluster.images.length - 1, focusedImg + cols));
+        break;
+      case "k":
+        e.preventDefault();
+        focusImage(Math.max(0, focusedImg - cols));
+        break;
+      case " ":
+        e.preventDefault();
+        if (cluster.images[focusedImg]) toggle(cluster.images[focusedImg].path);
+        break;
+      case "K":
+        e.preventDefault();
+        keepBest();
+        break;
+      case "u":
+        e.preventDefault();
+        onUndo().catch((err) => onError(err instanceof Error ? err.message : String(err)));
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (!submitting) confirm();
+        break;
+    }
+  });
 
   if (!cluster) return <p className="text-sm text-gray-500">No clusters remaining.</p>;
 
@@ -236,7 +219,7 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
             : <>keep all <strong>{nKeep}</strong></>}
         </span>
 
-        <span className="text-xs text-gray-300">hjkl · space · 1–9 · K best · enter · ←/→ clusters · b skip · u undo · ? help</span>
+        <span className="text-xs text-gray-300">hjkl · space · 1–9 · K best · enter · ←/→ clusters · b skip · s star · u undo · ? help</span>
 
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center gap-1">
@@ -290,12 +273,13 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
           const isKept = keeps[img.path] ?? img.rank === 1;
           const delta = img.score - bestScore;
           const focused = i === focusedImg;
+          const isFav = favSet.has(img.path);
           return (
             <div
               key={img.path}
               ref={(el) => { imgRefs.current[i] = el; }}
               className={`bg-white rounded overflow-hidden border-2 transition-colors ${
-                focused ? "border-blue-400" : "border-transparent"
+                focused ? "border-blue-400" : isFav ? "border-yellow-400" : "border-transparent"
               }`}
             >
               <div className={`h-1 ${isKept ? "bg-green-500" : "bg-red-400"}`} />
@@ -305,6 +289,15 @@ export function ClusterView({ clusters, onRefresh, onError, onUndo }: Props) {
               >
                 <span className="absolute top-1.5 left-1.5 z-10 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded-full">
                   <span className="font-bold">{img.rank}</span> · {img.score.toFixed(2)}{delta !== 0 && ` (Δ${delta.toFixed(2)})`}
+                </span>
+                {isFav && (
+                  <span className="absolute top-1.5 right-1.5 z-10 text-yellow-400 text-base leading-none drop-shadow">★</span>
+                )}
+                <span
+                  className="absolute bottom-1.5 left-1.5 z-10 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded-full max-w-[70%] truncate"
+                  title={img.path}
+                >
+                  {img.path.split("/").pop()}
                 </span>
                 <img
                   src={imgUrl(img.path)}

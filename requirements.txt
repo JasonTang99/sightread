@@ -1,12 +1,16 @@
-streamlit
 pillow
 pandas
-numpy
-torch
-torchvision
+numpy==2.4.6
+torch==2.12.0
+torchvision==0.27.0
 torchaudio
-scikit-learn
-faiss-cpu
-pyiqa
+scikit-learn==1.8.0
+scipy==1.17.1
+faiss-cpu==1.14.2
+pyiqa==0.1.15.post2
 tqdm
-transformers
+transformers==5.9.0
+
+# webapp
+fastapi
+uvicorn

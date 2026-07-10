@@ -1,3 +1,6 @@
 __pycache__/
 demo_photos/
 outputs/
+node_modules/
+webapp/frontend/dist/
+webapp/frontend/*.tsbuildinfo

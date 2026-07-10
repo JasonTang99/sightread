@@ -45,6 +45,9 @@ EXPOSURE_PENALTY_WEIGHT = 0.15
 FACE_BONUS_WEIGHT = 0.10
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+# Keep in sync with webapp/server.py VIDEO_EXTENSIONS (scripts must not import webapp).
+# No ".ts": MPEG-TS shares the extension with TypeScript sources.
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
 # FAISS k-NN connectivity replaces O(n²) sklearn distance matrix above this size
 _FAISS_N_THRESHOLD = 5_000
 _FAISS_K_NEIGHBORS = 50     # neighbors per point for connectivity graph
@@ -132,23 +135,18 @@ def _extract_features(model, pixel_values, num_skip_tokens: int) -> torch.Tensor
     return torch.cat([cls, patch], dim=-1)
 
 
-def _run_embedding_model(
+def _embed_with_model(
     paths: list[str],
+    model,
+    processor,
+    num_skip: int,
     device: str = DEVICE,
-    model_name: str = MODEL_NAME,
     batch_size: int = BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     flip_tta: bool = False,
+    desc: str | None = None,
 ) -> np.ndarray:
-    """Compute L2-normalized embeddings. No caching. Returns float32 [N, 2D]."""
-    from transformers import AutoImageProcessor, AutoModel
-
-    processor = AutoImageProcessor.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name).to(device).eval()
-
-    num_register = int(getattr(model.config, "num_register_tokens", 0) or 0)
-    num_skip = 1 + num_register
-
+    """Embed paths with an already-loaded model. L2-normalized float32 [N, 2D]."""
     ds = _ImageDataset(paths, processor)
     loader = torch.utils.data.DataLoader(
         ds, batch_size=batch_size, num_workers=num_workers,
@@ -156,7 +154,7 @@ def _run_embedding_model(
     )
 
     all_feats: list[np.ndarray] = []
-    for batch in tqdm(loader, desc=f"DINOv3 embeddings ({len(paths)} images)"):
+    for batch in tqdm(loader, desc=desc or f"DINOv3 embeddings ({len(paths)} images)"):
         batch = batch.to(device, non_blocking=True)
         with torch.no_grad(), torch.amp.autocast(device_type=device if device != "cpu" else "cpu"):
             feats = _extract_features(model, batch, num_skip)
@@ -169,6 +167,34 @@ def _run_embedding_model(
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1
     embeddings /= norms
+    return embeddings
+
+
+def _load_embedding_model(model_name: str = MODEL_NAME, device: str = DEVICE):
+    """Load DINOv3 processor + model. Returns (model, processor, num_skip_tokens)."""
+    from transformers import AutoImageProcessor, AutoModel
+
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name).to(device).eval()
+    num_register = int(getattr(model.config, "num_register_tokens", 0) or 0)
+    return model, processor, 1 + num_register
+
+
+def _run_embedding_model(
+    paths: list[str],
+    device: str = DEVICE,
+    model_name: str = MODEL_NAME,
+    batch_size: int = BATCH_SIZE,
+    num_workers: int = NUM_WORKERS,
+    flip_tta: bool = False,
+) -> np.ndarray:
+    """Compute L2-normalized embeddings. No caching. Returns float32 [N, 2D]."""
+    model, processor, num_skip = _load_embedding_model(model_name, device)
+
+    embeddings = _embed_with_model(
+        paths, model, processor, num_skip,
+        device=device, batch_size=batch_size, num_workers=num_workers, flip_tta=flip_tta,
+    )
 
     del model, processor
     gc.collect()
@@ -703,6 +729,160 @@ def rank_and_save(
 
 
 # ---------------------------------------------------------------------------
+# Step 5: Video highlights (clipfarm suggest_clips over DINOv3 frame embeddings)
+# ---------------------------------------------------------------------------
+def _scan_video_paths(image_dir: str) -> list[str]:
+    root = Path(image_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Image directory not found: {root}")
+    root_resolved = root.resolve()
+    paths = []
+    for p in root.rglob("*"):
+        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        rp = p.resolve()
+        # Skip <root>/clips/ — user-exported cuts (webapp /api/clips/export),
+        # not source footage. Only the top-level clips dir; a nested sub/clips/
+        # is treated as real footage.
+        try:
+            if rp.relative_to(root_resolved).parts[:1] == ("clips",):
+                continue
+        except ValueError:
+            pass
+        paths.append(str(rp))
+    return sorted(paths)
+
+
+def _video_fingerprint(path: Path) -> str:
+    st = path.stat()
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _make_video_frame_embedder(
+    device: str = DEVICE,
+    model_name: str = MODEL_NAME,
+    batch_size: int = BATCH_SIZE,
+):
+    """Return (embed_frames, release). DINOv3 is loaded lazily on first call
+    (i.e. only when some video actually needs frames embedded) and reused
+    across all videos; release() frees it."""
+    state: dict = {}
+
+    def embed_frames(frame_paths) -> np.ndarray:
+        if "model" not in state:
+            print(f"Loading {model_name} for video frame embeddings")
+            state["model"], state["processor"], state["num_skip"] = _load_embedding_model(
+                model_name, device
+            )
+        paths = [str(p) for p in frame_paths]
+        return _embed_with_model(
+            paths, state["model"], state["processor"], state["num_skip"],
+            device=device, batch_size=batch_size, num_workers=NUM_WORKERS,
+            flip_tta=False, desc=f"DINOv3 frame embeddings ({len(paths)} frames)",
+        )
+
+    def release() -> None:
+        state.pop("model", None)
+        state.pop("processor", None)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return embed_frames, release
+
+
+def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = False) -> None:
+    """Compute suggested highlight clips for each video under image_dir.
+
+    Writes output_dir/video_highlights.json:
+        {"schema_version": 1, "videos": {"<abs path>": {
+            "fingerprint": "<size>:<mtime_ns>", "duration": 34.5, "clips": [...]}}}
+
+    Incremental: videos whose size:mtime_ns fingerprint is unchanged are skipped
+    (unless force). Entries for videos no longer on disk are dropped. The JSON is
+    rewritten atomically after each video so an interrupted run keeps progress.
+    Requires clipfarm; if not installed the step is skipped.
+    """
+    videos = _scan_video_paths(image_dir)
+
+    try:
+        from clipfarm.lib import suggest_clips
+    except ImportError:
+        print("clipfarm not installed — skipping video highlights (pip install -e ~/Projects/clipfarm)")
+        return
+
+    highlights_path = output_dir / "video_highlights.json"
+    entries: dict[str, dict] = {}
+    if highlights_path.exists():
+        try:
+            loaded = json.loads(highlights_path.read_text())
+            if isinstance(loaded.get("videos"), dict):
+                entries = loaded["videos"]
+        except Exception as exc:
+            warnings.warn(f"Corrupt {highlights_path.name} ({exc}) — recomputing")
+
+    # Drop entries for videos no longer on disk
+    video_set = set(videos)
+    entries = {k: v for k, v in entries.items() if k in video_set}
+
+    def _write() -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {"schema_version": 1, "videos": entries}
+        tmp = highlights_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp.replace(highlights_path)
+
+    if not videos:
+        _write()
+        print("No videos found — video_highlights.json cleared")
+        return
+
+    workdir = output_dir / "video_highlights_cache"
+    embed_frames, release = _make_video_frame_embedder()
+    processed = skipped = failed = 0
+    try:
+        for video in videos:
+            try:
+                fingerprint = _video_fingerprint(Path(video))
+            except OSError as exc:
+                warnings.warn(f"Cannot stat {video} ({exc}) — skipping")
+                entries.pop(video, None)
+                failed += 1
+                continue
+            existing = entries.get(video)
+            if not force and existing and existing.get("fingerprint") == fingerprint:
+                skipped += 1
+                continue
+            print(f"Video highlights: {video}")
+            try:
+                result = suggest_clips(
+                    Path(video),
+                    workdir=workdir,
+                    embed_frames=embed_frames,
+                    force=force,
+                )
+                entries[video] = {
+                    "fingerprint": fingerprint,
+                    "duration": float(result["duration"]),
+                    "clips": result["clips"],
+                }
+                processed += 1
+            except Exception as exc:
+                warnings.warn(f"Video highlights failed for {video}: {exc}")
+                entries.pop(video, None)
+                failed += 1
+            _write()
+    finally:
+        release()
+
+    _write()
+    print(
+        f"Video highlights: {processed} computed, {skipped} cached, {failed} failed "
+        f"({len(videos)} videos) → {highlights_path}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 def run_pipeline(
@@ -714,6 +894,8 @@ def run_pipeline(
     auto_loose: bool = False,
     flip_tta: bool = False,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
+    video_highlights: bool = True,
+    force_video_highlights: bool = False,
 ) -> dict:
     out = Path(output_dir)
     emb_cache = out / "embeddings_dinov3_mpcls_tta.npy"
@@ -738,7 +920,12 @@ def run_pipeline(
     )
 
     scores, components = score_images(paths, cache_path=score_cache)
-    return rank_and_save(paths, clusters, scores, embeddings, out, timestamps=timestamps, components=components)
+    results = rank_and_save(paths, clusters, scores, embeddings, out, timestamps=timestamps, components=components)
+
+    if video_highlights:
+        compute_video_highlights(image_dir, out, force=force_video_highlights)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +945,15 @@ def main():
     parser.add_argument("--no-flip-tta", action="store_true")
     parser.add_argument("--max-gap-s", type=float, default=MAX_CLUSTER_GAP_S,
                         help="Max EXIF seconds between images in same cluster (0 to disable)")
+    parser.add_argument("--no-video-highlights", action="store_true",
+                        help="Skip the clipfarm video-highlights step")
+    parser.add_argument("--force-video-highlights", action="store_true",
+                        help="Recompute video highlights even for unchanged videos")
     args = parser.parse_args()
+
+    import random
+    random.seed(42)
+    np.random.seed(42)
 
     run_pipeline(
         args.image_dir,
@@ -769,6 +964,8 @@ def main():
         auto_loose=args.auto_loose,
         flip_tta=not args.no_flip_tta,
         max_gap_s=args.max_gap_s,
+        video_highlights=not args.no_video_highlights,
+        force_video_highlights=args.force_video_highlights,
     )
     print("Pipeline complete")
 
