@@ -9,7 +9,7 @@ pip install -r requirements.txt
 ./run.sh /path/to/photos
 ```
 
-This runs the clustering/scoring pipeline, then launches the curation UI.
+This runs the clustering/scoring pipeline, then launches the webapp at http://127.0.0.1:8765.
 
 ## Usage
 
@@ -28,10 +28,10 @@ Options:
 ### 2. Launch the UI separately
 
 ```bash
-streamlit run ui/app.py
+cd webapp && python -m uvicorn server:app --host 127.0.0.1 --port 8765
 ```
 
-Reads `outputs/results.json` produced by the pipeline. Clusters with only 1 image are skipped automatically.
+Then open http://127.0.0.1:8765 in a browser.
 
 ### 3. One command
 
@@ -47,7 +47,7 @@ Reads `outputs/results.json` produced by the pipeline. Clusters with only 1 imag
 - **Tournament compare** — step through head-to-head matchups, pick winners
 - **Manual compare** — choose any two images for side-by-side comparison
 - **Cluster-by-cluster** — navigate with Prev/Next or jump with dropdown
-- **Safe deletion** — images moved to `outputs/trash/`, never permanently deleted
+- **Safe deletion** — confirmed deletions go to a pending list; apply them from the Trash panel (or `scripts/delete_marked.py`) to move files into the project's `trash/` folder. Nothing is ever permanently deleted.
 - **Photo-first UI** — minimal chrome, images fill the screen
 
 ## Cache
@@ -81,6 +81,14 @@ This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters
 - `rank` — integer starting at 1, lower is better
 - `centrality` — cosine similarity to cluster centroid
 - `path` — absolute path to image
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m playwright install chromium   # or use --browser-channel chrome
+python -m pytest webapp/tests -q --browser-channel chrome
+```
 
 ## Requirements
 

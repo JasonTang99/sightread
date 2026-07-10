@@ -1,56 +1,58 @@
 #!/usr/bin/env bash
-# Usage: ./run.sh /path/to/photos [--output-dir outputs] [--ui-only]
+# Usage: ./run.sh [/path/to/photos] [--ui-only]
 #
-# Runs the clustering/scoring pipeline on the given folder,
-# then launches the Streamlit curation UI.
+# Without arguments: launches the webapp and opens the browser for folder selection.
+# With a folder: runs the pipeline on that folder first, then launches the webapp.
 # Pass --ui-only to skip the pipeline and launch the UI directly.
 
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
-    echo "Usage: ./run.sh <image-folder> [--output-dir outputs] [--ui-only]"
-    echo ""
-    echo "Example: ./run.sh ~/Photos/vacation"
-    echo "         ./run.sh ~/Photos/vacation --ui-only"
-    exit 1
-fi
-
-IMAGE_DIR="$1"
-shift
-
-if [ ! -d "$IMAGE_DIR" ]; then
-    echo "Error: '$IMAGE_DIR' is not a directory"
-    exit 1
-fi
-
-# Parse --output-dir and --ui-only; pass remaining args to pipeline
-OUTPUT_DIR="outputs"
+IMAGE_DIR=""
 UI_ONLY=0
 REMAINING_ARGS=()
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --output-dir)
-            OUTPUT_DIR="$2"; shift 2 ;;
-        --output-dir=*)
-            OUTPUT_DIR="${1#*=}"; shift ;;
         --ui-only)
             UI_ONLY=1; shift ;;
-        *)
+        -*)
             REMAINING_ARGS+=("$1"); shift ;;
+        *)
+            if [ -z "$IMAGE_DIR" ]; then
+                IMAGE_DIR="$1"
+            else
+                REMAINING_ARGS+=("$1")
+            fi
+            shift ;;
     esac
 done
 
-export SIGHTREAD_OUTPUT_DIR="$OUTPUT_DIR"
+if [ -n "$IMAGE_DIR" ] && [ ! -d "$IMAGE_DIR" ]; then
+    echo "Error: '$IMAGE_DIR' is not a directory"
+    exit 1
+fi
 
 echo "📸 Sightread — Photo Curation"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-if [ "$UI_ONLY" -eq 0 ]; then
+if [ -n "$IMAGE_DIR" ] && [ "$UI_ONLY" -eq 0 ]; then
     echo "⚙️  Running pipeline on: $IMAGE_DIR"
-    python scripts/pipeline.py --image-dir "$IMAGE_DIR" --output-dir "$OUTPUT_DIR" "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
+    python scripts/pipeline.py --image-dir "$IMAGE_DIR" "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
     echo ""
 fi
 
-echo "🚀 Launching curation UI..."
-PYTHONPATH="$(pwd)/ui:$(pwd)/scripts${PYTHONPATH:+:$PYTHONPATH}" streamlit run ui/app.py --server.address 127.0.0.1
+if [ ! -f webapp/frontend/dist/index.html ]; then
+    echo "🔨 Building frontend (dist missing)..."
+    (cd webapp/frontend && npm install && npm run build)
+fi
+
+URL="http://127.0.0.1:8765"
+echo "🚀 Launching curation UI at $URL ..."
+
+# Open browser after server has a moment to bind
+(sleep 1 && xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null || true) &
+
+# No --reload: it restarts the server on file edits, wiping the active
+# project and undo stack (both held in memory).
+cd webapp && python -m uvicorn server:app --host 127.0.0.1 --port 8765

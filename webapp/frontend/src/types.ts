@@ -11,6 +11,11 @@ export interface Cluster {
   images: ImageData[];
 }
 
+export interface ClusterDecision {
+  kept: string[];
+  deleted: string[];
+}
+
 export interface AppState {
   no_project: boolean;
   needs_pipeline: boolean;
@@ -19,6 +24,16 @@ export interface AppState {
   singleton_delete_threshold: number;
   pending_delete_count: number;
   undo_available: boolean;
+  cluster_decisions: Record<string, ClusterDecision>;
+  favorites: string[];
+}
+
+export interface GalleryPhoto {
+  path: string;
+  shot_at: string | null;
+  cluster_id: number;
+  cluster_size: number;
+  status: "keep" | "delete" | "undecided";
 }
 
 export type ProjectStatus = "ready" | "stale" | "never_run" | "running";
@@ -45,10 +60,32 @@ export interface FsListing {
   entries: FsEntry[];
 }
 
+export interface VideoHighlightClip {
+  start: number;
+  end: number;
+  score: number;
+  scores: { motion: number; scene_change: number; novelty: number };
+}
+
+export interface VideoHighlights {
+  duration: number;
+  clips: VideoHighlightClip[];
+}
+
+export type VideoHighlightsMap = Record<string, VideoHighlights>;
+
+export interface UserClip {
+  start: number;
+  end: number;
+}
+
+export type UserClipsMap = Record<string, { clips: UserClip[] }>;
+
 export interface JobStatus {
   running: boolean;
   done: boolean;
   error: string | null;
   last_line: string | null;
+  lines: string[];
   folder: string | null;
 }

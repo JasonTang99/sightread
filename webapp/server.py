@@ -1,28 +1,39 @@
 """FastAPI backend for Sightread webapp."""
+import hashlib
 import io
+import json
 import logging
 import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel
 
+# Must precede the local imports below so `uvicorn webapp.server:app` (run from
+# the repo root, e.g. by the test suite) resolves them.
+sys.path.insert(0, str(Path(__file__).parent))
+
 from utils import (
     SINGLETON_DELETE_THRESHOLD,
     append_to_delete_list,
+    load_decisions,
+    load_favorites,
     load_results,
     read_delete_list,
+    remove_decision,
     remove_from_delete_list,
-    remove_images_from_results,
-    save_results,
+    save_decision,
+    toggle_favorite,
 )
 
-sys.path.insert(0, str(Path(__file__).parent))
 from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
@@ -33,12 +44,58 @@ from projects import (
     upsert_recent,
 )
 from jobs import JobState, current_job, start_pipeline
+from video import cache_path as video_cache_path, transcode_for_web
+from clips import (
+    EXPORT_DIR_NAME,
+    ClipExportError,
+    export_clips,
+    save_user_clips,
+    user_clips_for,
+)
 
 log = logging.getLogger(__name__)
+
+import concurrent.futures
+import threading
+
+_transcode_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="transcode")
+_transcode_inflight: set[Path] = set()
+_transcode_lock = threading.Lock()
+
+
+def _transcode_bg(src: Path, dest: Path) -> None:
+    with _transcode_lock:
+        if src in _transcode_inflight or dest.exists():
+            return
+        _transcode_inflight.add(src)
+    try:
+        transcode_for_web(src, dest)
+        log.info("transcoded %s", src.name)
+    except Exception as exc:
+        log.warning("transcode failed %s: %s", src.name, exc)
+    finally:
+        with _transcode_lock:
+            _transcode_inflight.discard(src)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 app = FastAPI()
+
+# Only loopback hosts may talk to this server. Blocks DNS-rebinding (Host header)
+# and CSRF from malicious websites (Origin header on cross-site requests).
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+@app.middleware("http")
+async def _reject_non_local(request: Request, call_next):
+    host = urlparse(f"//{request.headers.get('host', '')}").hostname
+    if host not in _LOCAL_HOSTNAMES:
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).hostname not in _LOCAL_HOSTNAMES:
+        return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
+    return await call_next(request)
+
 
 _active: ProjectContext | None = None
 _undo_stack: list[dict] = []
@@ -50,8 +107,16 @@ def _require_active() -> ProjectContext:
     return _active
 
 
-def _push_undo(delete_paths: list[str]) -> None:
-    _undo_stack.append({"delete_paths": list(delete_paths)})
+def _push_undo(
+    delete_paths: list[str],
+    cluster_id: int | None = None,
+    cluster_ids: list[int] | None = None,
+) -> None:
+    _undo_stack.append({
+        "delete_paths": list(delete_paths),
+        "cluster_id": cluster_id,
+        "cluster_ids": list(cluster_ids or []),
+    })
     if len(_undo_stack) > 10:
         _undo_stack.pop(0)
 
@@ -69,10 +134,13 @@ def get_state():
     if not results_path.exists():
         return {"no_project": False, "needs_pipeline": True}
     data = load_results(results_path)
+    delete_list_path = ctx.output_dir / "to_delete.txt"
+    decisions_path = ctx.output_dir / "decisions.json"
+    decisions = load_decisions(decisions_path)
     clusters = [c for c in data["clusters"] if len(c["images"]) > 1]
     singletons = [c for c in data["clusters"] if len(c["images"]) == 1]
-    delete_list_path = ctx.output_dir / "to_delete.txt"
     pending = read_delete_list(delete_list_path)
+    favorites_path = ctx.output_dir / "favorites.json"
     return {
         "no_project": False,
         "needs_pipeline": False,
@@ -81,21 +149,44 @@ def get_state():
         "singleton_delete_threshold": SINGLETON_DELETE_THRESHOLD,
         "pending_delete_count": len(pending),
         "undo_available": len(_undo_stack) > 0,
+        "cluster_decisions": decisions,
+        "favorites": load_favorites(favorites_path),
     }
 
 
+class SingletonDecision(BaseModel):
+    cluster_id: int
+    kept: list[str] = []
+    deleted: list[str] = []
+
+
 class ConfirmRequest(BaseModel):
+    cluster_id: int | None = None
     delete_paths: list[str]
     all_paths: list[str] = []
+    singleton_decisions: list[SingletonDecision] = []
 
 
 @app.post("/api/confirm")
 def confirm(req: ConfirmRequest):
     ctx = _require_active()
+    for p in req.delete_paths:
+        if not _in_allowed_dirs(_resolve_project_path(ctx, p), ctx):
+            raise HTTPException(400, f"Path outside project: {p}")
     delete_list_path = ctx.output_dir / "to_delete.txt"
-    if req.delete_paths:
-        append_to_delete_list(req.delete_paths, delete_list_path)
-        _push_undo(req.delete_paths)
+    decisions_path = ctx.output_dir / "decisions.json"
+    favs = set(load_favorites(ctx.output_dir / "favorites.json"))
+    delete_paths = [p for p in req.delete_paths if p not in favs]
+    if delete_paths:
+        append_to_delete_list(delete_paths, delete_list_path)
+    singleton_ids = [d.cluster_id for d in req.singleton_decisions]
+    _push_undo(delete_paths, req.cluster_id, singleton_ids)
+    if req.cluster_id is not None:
+        deleted_set = set(req.delete_paths)
+        kept = [p for p in req.all_paths if p not in deleted_set]
+        save_decision(decisions_path, req.cluster_id, kept, req.delete_paths)
+    for d in req.singleton_decisions:
+        save_decision(decisions_path, d.cluster_id, d.kept, d.deleted)
     return {"ok": True}
 
 
@@ -106,8 +197,13 @@ def undo():
         raise HTTPException(400, "Nothing to undo")
     entry = _undo_stack.pop()
     delete_list_path = ctx.output_dir / "to_delete.txt"
+    decisions_path = ctx.output_dir / "decisions.json"
     if entry["delete_paths"]:
         remove_from_delete_list(set(entry["delete_paths"]), delete_list_path)
+    if entry.get("cluster_id") is not None:
+        remove_decision(decisions_path, entry["cluster_id"])
+    for cid in entry.get("cluster_ids", []):
+        remove_decision(decisions_path, cid)
     return {"ok": True}
 
 
@@ -130,57 +226,357 @@ def get_trash():
     return {"paths": read_delete_list(delete_list_path)}
 
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".ts", ".webm"}
+@app.post("/api/apply-deletes")
+def apply_deletes():
+    """Move every pending-delete file into <output_dir>/trash/ and clear the list."""
+    ctx = _require_active()
+    delete_list_path = ctx.output_dir / "to_delete.txt"
+    favs = set(load_favorites(ctx.output_dir / "favorites.json"))
+    paths = [p for p in read_delete_list(delete_list_path) if p not in favs]
+    trash_dir = ctx.output_dir / "trash"
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    skipped = 0
+    for p in paths:
+        src = _resolve_project_path(ctx, p)
+        if not _in_allowed_dirs(src, ctx) or not src.is_file():
+            skipped += 1
+            continue
+        dest = trash_dir / src.name
+        counter = 1
+        while dest.exists():
+            dest = trash_dir / f"{src.stem}_{counter}{src.suffix}"
+            counter += 1
+        shutil.move(str(src), str(dest))
+        moved += 1
+    delete_list_path.write_text("")
+    # Undo entries reference files that are no longer in place — drop them.
+    _undo_stack.clear()
+    return {"ok": True, "moved": moved, "skipped": skipped, "trash_dir": str(trash_dir)}
+
+
+class FavoriteRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/favorite")
+def toggle_fav(req: FavoriteRequest):
+    ctx = _require_active()
+    abs_path = _resolve_project_path(ctx, req.path)
+    if not _in_allowed_dirs(abs_path, ctx):
+        raise HTTPException(400, f"Path outside project: {req.path}")
+    favorites_path = ctx.output_dir / "favorites.json"
+    favorited = toggle_favorite(favorites_path, req.path)
+    return {"ok": True, "favorited": favorited}
+
+
+# No ".ts": MPEG-TS shares the extension with TypeScript sources, so any code
+# folder would show up full of bogus "videos". AVCHD cameras use .mts/.m2ts.
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+
+
+MIN_CLIP_SCORE_DEFAULT = 0.1
+
+
+def _min_clip_score() -> float:
+    try:
+        return float(os.environ.get("SIGHTREAD_MIN_CLIP_SCORE", MIN_CLIP_SCORE_DEFAULT))
+    except ValueError:
+        return MIN_CLIP_SCORE_DEFAULT
+
+
+def _load_highlights_for(output_dir: Path, paths: list[str]) -> dict:
+    """Highlight clips from the pipeline's video_highlights.json, filtered to paths.
+
+    Clips scoring below SIGHTREAD_MIN_CLIP_SCORE (default 0.1) are dropped, and
+    videos with no remaining clips are omitted — not every video is clip-worthy.
+
+    Returns {path: {"duration": float, "clips": [...]}} — empty dict when the
+    file is missing or corrupt so the UI degrades cleanly.
+    """
+    try:
+        data = json.loads((output_dir / "video_highlights.json").read_text())
+        videos = data.get("videos", {})
+        if not isinstance(videos, dict):
+            return {}
+    except Exception:
+        return {}
+    threshold = _min_clip_score()
+    result = {}
+    for p in paths:
+        entry = videos.get(p)
+        if isinstance(entry, dict) and isinstance(entry.get("clips"), list):
+            clips = [
+                c for c in entry["clips"]
+                if isinstance(c, dict)
+                and isinstance(c.get("score"), (int, float))
+                and c["score"] >= threshold
+            ]
+            if clips:
+                result[p] = {"duration": entry.get("duration"), "clips": clips}
+    return result
+
+
+def _is_exported_clip(abs_path: Path, folder: Path) -> bool:
+    """True for files under <folder>/clips/ — user-exported cuts, not sources.
+
+    Only the `clips` directory directly inside the project folder counts;
+    a nested `sub/clips/` is someone's real footage folder.
+    """
+    try:
+        rel = abs_path.relative_to(folder)
+    except ValueError:
+        return False
+    return rel.parts[:1] == (EXPORT_DIR_NAME,)
 
 
 @app.get("/api/videos")
 def list_videos():
     ctx = _require_active()
+    pending = set(read_delete_list(ctx.output_dir / "to_delete.txt"))
+    folder = ctx.folder.resolve()
     paths = sorted(
-        str(p.resolve())
+        str(rp)
         for p in ctx.folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+        if p.is_file()
+        and p.suffix.lower() in VIDEO_EXTENSIONS
+        and str(rp := p.resolve()) not in pending
+        and not _is_exported_clip(rp, folder)
     )
-    return {"paths": paths}
+    shot_times = _get_shot_times(ctx, paths)
+    highlights = _load_highlights_for(ctx.output_dir, paths)
+    user_clips = user_clips_for(ctx.output_dir, paths)
+    # Kick off background faststart transcoding for any uncached videos
+    for p_str in paths:
+        p = Path(p_str)
+        cached = video_cache_path(ctx.output_dir, p)
+        if not cached.exists():
+            _transcode_executor.submit(_transcode_bg, p, cached)
+    return {
+        "paths": paths,
+        "shot_times": shot_times,
+        "highlights": highlights,
+        "user_clips": user_clips,
+    }
+
+
+# ---------------------------------------------------------------------------
+# User-editable clips
+# ---------------------------------------------------------------------------
+
+def _validate_clip_video_path(ctx: ProjectContext, path: str) -> Path:
+    """Resolve path and require an existing video file inside the project folder."""
+    abs_path = _resolve_project_path(ctx, path)
+    if not _is_under(abs_path, ctx.folder.resolve()):
+        raise HTTPException(400, f"Path outside project: {path}")
+    if not abs_path.is_file() or abs_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, f"Not an existing video file: {path}")
+    return abs_path
+
+
+def _validate_clip_ranges(clips: list) -> list[dict]:
+    """Each clip must be {"start": num, "end": num} with 0 <= start < end."""
+    out = []
+    for i, c in enumerate(clips):
+        if not isinstance(c, dict):
+            raise HTTPException(400, f"Clip {i}: must be an object with start/end")
+        for field in ("start", "end"):
+            v = c.get(field)
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise HTTPException(400, f"Clip {i}: {field} must be a number")
+        if not (0 <= c["start"] < c["end"]):
+            raise HTTPException(400, f"Clip {i}: requires 0 <= start < end")
+        out.append({"start": float(c["start"]), "end": float(c["end"])})
+    return out
+
+
+class ClipsPutRequest(BaseModel):
+    path: str
+    clips: list
+
+
+@app.put("/api/clips")
+def put_clips(req: ClipsPutRequest):
+    """Overwrite the user's clip list for one video (empty list = no clips)."""
+    ctx = _require_active()
+    abs_path = _validate_clip_video_path(ctx, req.path)
+    clips = _validate_clip_ranges(req.clips)
+    stored = save_user_clips(ctx.output_dir, str(abs_path), clips)
+    return {"ok": True, "clips": stored}
+
+
+class ClipsExportRequest(BaseModel):
+    path: str
+    mode: str = "reencode"
+
+
+@app.post("/api/clips/export")
+def export_clips_endpoint(req: ClipsExportRequest):
+    """Cut a video's clips into <project folder>/clips/ with ffmpeg.
+
+    Uses the user's clips when the video has a user_clips entry (an explicit
+    empty list means "no clips" and is a 400, not a fallback); otherwise falls
+    back to the pipeline's suggested highlight clips. Always cuts from the
+    original file, never the web-transcode cache.
+    """
+    ctx = _require_active()
+    if req.mode not in ("reencode", "copy"):
+        raise HTTPException(400, f"Unknown mode: {req.mode}")
+    abs_path = _validate_clip_video_path(ctx, req.path)
+    key = str(abs_path)
+    user = user_clips_for(ctx.output_dir, [key])
+    if key in user:
+        clips = user[key]["clips"]
+    else:
+        clips = _load_highlights_for(ctx.output_dir, [key]).get(key, {}).get("clips", [])
+    if not clips:
+        raise HTTPException(400, "No clips to export for this video")
+    out_dir = ctx.folder / EXPORT_DIR_NAME
+    try:
+        files = export_clips(abs_path, clips, out_dir, mode=req.mode)
+    except ClipExportError as exc:
+        raise HTTPException(500, str(exc))
+    return {"ok": True, "files": [str(f) for f in files]}
+
+
+def _read_shot_time(path: str) -> str | None:
+    EXIF_DATETIME_ORIGINAL = 36867
+    EXIF_DATETIME = 306
+    try:
+        with Image.open(path) as img:
+            exif = img.getexif()
+            for tag in (EXIF_DATETIME_ORIGINAL, EXIF_DATETIME):
+                val = exif.get(tag)
+                if val and isinstance(val, str):
+                    try:
+                        return datetime.strptime(val.strip(), "%Y:%m:%d %H:%M:%S").isoformat()
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
+    except Exception:
+        return None
+
+
+def _get_shot_times(ctx: ProjectContext, paths: list[str]) -> dict[str, str | None]:
+    cache_path = ctx.output_dir / "shot_times.json"
+    cache: dict[str, str | None] = {}
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text())
+        except Exception:
+            pass
+    missing = [p for p in paths if p not in cache]
+    if missing:
+        for p in missing:
+            cache[p] = _read_shot_time(p)
+        try:
+            cache_path.write_text(json.dumps(cache))
+        except Exception:
+            pass
+    return {p: cache.get(p) for p in paths}
+
+
+@app.get("/api/gallery")
+def get_gallery():
+    ctx = _require_active()
+    results_path = ctx.output_dir / "results.json"
+    if not results_path.exists():
+        raise HTTPException(400, "Run pipeline first")
+    data = load_results(results_path)
+    decisions = load_decisions(ctx.output_dir / "decisions.json")
+
+    all_photos = []
+    for cluster in data["clusters"]:
+        cid = cluster["cluster_id"]
+        csize = len(cluster["images"])
+        decision = decisions.get(str(cid))
+        kept_set = set(decision["kept"]) if decision else set()
+        deleted_set = set(decision["deleted"]) if decision else set()
+        for img in cluster["images"]:
+            p = img["path"]
+            if decision is not None:
+                status = "keep" if p in kept_set else "delete" if p in deleted_set else "undecided"
+            else:
+                status = "undecided"
+            all_photos.append({"path": p, "cluster_id": cid, "cluster_size": csize, "status": status})
+
+    shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos])
+    for ph in all_photos:
+        ph["shot_at"] = shot_times.get(ph["path"])
+
+    all_photos.sort(key=lambda p: (p["shot_at"] is None, p["shot_at"] or ""))
+    return {"photos": all_photos}
 
 
 @app.get("/api/video")
 def serve_video(path: str = Query(...)):
     ctx = _require_active()
-    p = Path(path)
-    abs_path = p.resolve() if p.is_absolute() else (ctx.folder / p).resolve()
-    allowed = (ctx.folder, ctx.output_dir, PROJECT_ROOT)
-    if not any(_is_under(abs_path, base) for base in allowed):
+    abs_path = _resolve_project_path(ctx, path)
+    if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(403, "Path outside project")
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
-    return FileResponse(abs_path)
+    # Serve the AAC-audio transcode if it's been pre-baked (see video.py / the
+    # convert_videos script). Falls back to the silent original otherwise.
+    cached = video_cache_path(ctx.output_dir, abs_path)
+    if cached.exists():
+        return FileResponse(cached, media_type="video/mp4", headers=_CACHE_HEADERS)
+    return FileResponse(abs_path, headers=_CACHE_HEADERS)
+
+
+_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
 @app.get("/api/image")
 def serve_image(path: str = Query(...), w: Optional[int] = None):
     ctx = _require_active()
-    p = Path(path)
-    if p.is_absolute():
-        abs_path = p.resolve()
-    else:
-        candidate = (ctx.folder / p).resolve()
-        abs_path = candidate if candidate.exists() else (PROJECT_ROOT / p).resolve()
-
-    # Must be under project folder, output dir, or project root (legacy)
-    allowed = (ctx.folder, ctx.output_dir, PROJECT_ROOT)
-    if not any(_is_under(abs_path, base) for base in allowed):
+    abs_path = _resolve_project_path(ctx, path)
+    if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(403, "Path outside project")
 
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
     if w is None:
-        return FileResponse(abs_path)
+        return FileResponse(abs_path, headers=_CACHE_HEADERS)
+
+    # Resized thumbnails are cached on disk, keyed by source path/mtime/width
+    key = hashlib.sha1(
+        f"{abs_path}|{abs_path.stat().st_mtime_ns}|{w}".encode()
+    ).hexdigest()
+    cache_file = ctx.output_dir / "thumb_cache" / f"{key}.jpg"
+    if cache_file.exists():
+        return FileResponse(cache_file, media_type="image/jpeg", headers=_CACHE_HEADERS)
+
     img = ImageOps.exif_transpose(Image.open(abs_path))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     img.thumbnail((w, w * 3), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85)
-    return Response(buf.getvalue(), media_type="image/jpeg")
+    img.save(buf, format="JPEG", quality=95)
+    data = buf.getvalue()
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_file.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(cache_file)
+    return Response(data, media_type="image/jpeg", headers=_CACHE_HEADERS)
+
+
+def _resolve_project_path(ctx: ProjectContext, path: str) -> Path:
+    p = Path(path)
+    if p.is_absolute():
+        return p.resolve()
+    candidate = (ctx.folder / p).resolve()
+    return candidate if candidate.exists() else (PROJECT_ROOT / p).resolve()
+
+
+def _in_allowed_dirs(abs_path: Path, ctx: ProjectContext) -> bool:
+    # Project folder, output dir, or project root (legacy relative paths)
+    return any(
+        _is_under(abs_path, base) for base in (ctx.folder, ctx.output_dir, PROJECT_ROOT)
+    )
 
 
 def _is_under(path: Path, base: Path) -> bool:
@@ -269,7 +665,10 @@ def run_pipeline_endpoint(req: FolderRequest):
     out_dir = project_output_dir(folder)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
     _undo_stack.clear()
-    start_pipeline(folder, out_dir, PROJECT_ROOT)
+    start_pipeline(
+        folder, out_dir, PROJECT_ROOT,
+        on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True),
+    )
     upsert_recent(folder, out_dir)
     return {"ok": True, "folder": str(folder)}
 
@@ -278,12 +677,16 @@ def run_pipeline_endpoint(req: FolderRequest):
 def job_status():
     job = current_job()
     if job is None:
-        return {"running": False, "done": False, "error": None, "last_line": None, "folder": None}
+        return {
+            "running": False, "done": False, "error": None,
+            "last_line": None, "lines": [], "folder": None,
+        }
     return {
         "running": job.running,
         "done": job.done,
         "error": job.error,
         "last_line": job.last_line,
+        "lines": job.tail,
         "folder": job.folder,
     }
 

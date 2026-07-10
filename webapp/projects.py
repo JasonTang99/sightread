@@ -34,7 +34,7 @@ def image_files_in(folder: Path) -> set[str]:
     return {
         str(p.resolve())
         for p in folder.rglob("*")
-        if p.suffix.lower() in IMAGE_EXTENSIONS
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
     }
 
 

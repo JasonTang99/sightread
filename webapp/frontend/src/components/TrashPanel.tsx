@@ -15,6 +15,8 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
   const [paths, setPaths] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [restoring, setRestoring] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<string | null>(null);
 
   const loadTrash = async () => {
     try {
@@ -40,6 +42,23 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
     });
   };
 
+  const applyDeletes = async () => {
+    if (!window.confirm(`Move ${pendingCount} file(s) to the trash folder? They are kept on disk but removed from the project.`)) return;
+    setApplying(true);
+    try {
+      const res = await fetch("/api/apply-deletes", { method: "POST" });
+      if (!res.ok) throw new Error(`Apply failed: ${res.status}`);
+      const data = await res.json();
+      setApplyResult(`Moved ${data.moved} file(s) to ${data.trash_dir}${data.skipped ? ` (${data.skipped} skipped)` : ""}`);
+      setSelected(new Set());
+      await onRefresh();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
   const restore = async () => {
     if (selected.size === 0) return;
     setRestoring(true);
@@ -60,7 +79,11 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
     }
   };
 
-  if (pendingCount === 0) return null;
+  if (pendingCount === 0) {
+    return applyResult ? (
+      <p className="text-xs text-gray-400 px-1 py-2">{applyResult}</p>
+    ) : null;
+  }
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -76,9 +99,18 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
 
       {open && (
         <div className="border-t border-gray-100 px-4 py-4 space-y-3">
-          <p className="text-xs text-gray-500">
-            These will be deleted when you run <code className="bg-gray-100 px-1 py-0.5 rounded">scripts/delete_marked.py</code>. Check to restore.
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-gray-500">
+              Click an image to mark it for restore, or move everything to the trash folder now.
+            </p>
+            <button
+              onClick={applyDeletes}
+              disabled={applying}
+              className="px-3 py-1.5 text-sm font-medium bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 shrink-0"
+            >
+              {applying ? "Moving…" : `🗑️ Move ${pendingCount} to trash`}
+            </button>
+          </div>
 
           {paths.length === 0 ? (
             <p className="text-sm text-gray-400">Loading…</p>
