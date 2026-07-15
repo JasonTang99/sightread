@@ -80,6 +80,24 @@ def save_user_clips(output_dir: Path, video_path: str, clips: list[dict]) -> lis
     return normalized
 
 
+def delete_user_clips(output_dir: Path, video_path: str) -> bool:
+    """Remove the clips entry for video_path, reverting the video to pipeline
+    suggestions in the UI. Returns True if an entry existed.
+
+    Written atomically like save_user_clips.
+    """
+    videos = load_user_clips(output_dir)
+    if video_path not in videos:
+        return False
+    del videos[video_path]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / USER_CLIPS_FILENAME
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"schema_version": 1, "videos": videos}, indent=2) + "\n")
+    tmp.replace(target)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # ffmpeg export
 # ---------------------------------------------------------------------------
