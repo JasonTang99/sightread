@@ -10,6 +10,10 @@ interface Props {
 
 type StatusFilter = "all" | "keep";
 
+// Status is conveyed by border colour alone, so tiles carry no text overlay and
+// can run large.
+const TILE_MIN_PX = 320;
+
 interface VideoItem {
   path: string;
   shot_at: string | null;
@@ -160,18 +164,16 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
       : gridPhotos;
     if (visible.length === 0) return <p className="text-sm text-gray-400 py-4">No photos.</p>;
     return (
-      <div className="grid gap-1.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}>
+      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
         {visible.map((ph) => {
           const status = effectiveStatus(ph, overrides);
           const borderClass = status === "keep" ? "border-green-400" : status === "delete" ? "border-red-400" : "border-gray-300";
-          const labelClass = status === "keep" ? "bg-green-500" : status === "delete" ? "bg-red-400" : "bg-gray-300";
-          const labelText = status === "keep" ? "keep" : status === "delete" ? "delete" : "?";
           return (
             <div
               key={ph.path}
-              className={`relative cursor-pointer rounded overflow-hidden border-2 transition-colors ${borderClass}`}
+              className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderClass}`}
               onClick={() => toggle(ph.path)}
-              title={ph.path.split("/").pop()}
+              title={`${ph.path.split("/").pop()} — ${status}`}
             >
               <img
                 src={`/api/image?path=${encodeURIComponent(ph.path)}&w=600`}
@@ -179,9 +181,6 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
                 className="w-full aspect-square object-cover bg-gray-100"
                 loading="lazy"
               />
-              <span className={`absolute bottom-0 left-0 right-0 text-white text-xs text-center py-0.5 ${labelClass} opacity-90`}>
-                {labelText}
-              </span>
             </div>
           );
         })}
@@ -192,11 +191,11 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
   const renderVideoGrid = (dayVideos: VideoItem[]) => {
     if (dayVideos.length === 0) return null;
     return (
-      <div className="grid gap-1.5 mt-1.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}>
+      <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
         {dayVideos.map((v) => {
           const clipCount = highlights[v.path]?.clips.length ?? 0;
           return (
-            <div key={v.path} className="relative rounded overflow-hidden border-2 border-blue-300 bg-gray-900" title={v.path.split("/").pop()}>
+            <div key={v.path} className="relative rounded overflow-hidden border-4 border-blue-300 bg-gray-900" title={v.path.split("/").pop()}>
               <video
                 src={`/api/video?path=${encodeURIComponent(v.path)}`}
                 className="w-full aspect-square object-cover"
