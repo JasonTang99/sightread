@@ -35,6 +35,8 @@ interface ClipEditorProps {
   selected: number | null;
   onSelect: (i: number | null) => void;
   onSeek: (time: number) => void;
+  /** Drag about to start: snapshot the pre-drag list for undo. */
+  onDragStart: () => void;
   /** Live edge-drag update: replace clip i, seek video to the dragged edge. No sorting. */
   onDragClip: (i: number, clip: UserClip, edgeTime: number) => void;
   /** Drag finished: commit (sort + persist). */
@@ -42,7 +44,7 @@ interface ClipEditorProps {
   onDelete: (i: number) => void;
 }
 
-function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSeek, onDragClip, onDragEnd, onDelete }: ClipEditorProps) {
+function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSeek, onDragStart, onDragClip, onDragEnd, onDelete }: ClipEditorProps) {
   const stripRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ idx: number; edge: "start" | "end"; rect: DOMRect } | null>(null);
   const maxScore = Math.max(0, ...clips.map((c) => c.score ?? 0));
@@ -52,6 +54,7 @@ function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSe
     e.preventDefault();
     const rect = stripRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
+    onDragStart();
     dragRef.current = { idx, edge, rect };
     e.currentTarget.setPointerCapture(e.pointerId);
     onSelect(idx);
@@ -77,62 +80,90 @@ function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSe
 
   return (
     <div
-      ref={stripRef}
-      className="relative h-7 w-full shrink-0 bg-gray-900 select-none touch-none"
+      className="shrink-0 bg-gray-950 px-3 py-2 select-none"
       onClick={() => onSelect(null)}
     >
-      {clips.map((c, i) => {
-        // Clamp to [0, 1]: the media's real duration can be shorter than the
-        // duration the pipeline analyzed, which would push segments past 100%.
-        const startFrac = Math.min(1, Math.max(0, c.start / duration));
-        const endFrac = Math.min(1, Math.max(startFrac, c.end / duration));
-        if (endFrac <= startFrac) return null;
-        const isSel = i === selected;
-        return (
-          <div
-            key={i}
-            className={`absolute top-0.5 bottom-0.5 rounded cursor-pointer transition-[filter] hover:brightness-125 ${
-              owned ? "bg-sky-400" : "bg-amber-400"
-            } ${isSel ? "ring-2 ring-white z-10" : ""}`}
-            style={{
-              left: `${startFrac * 100}%`,
-              width: `${(endFrac - startFrac) * 100}%`,
-              minWidth: "8px",
-              opacity: owned ? 0.9 : 0.45 + 0.55 * (maxScore > 0 ? (c.score ?? 0) / maxScore : 1),
-            }}
-            title={`${fmtTime(c.start)}–${fmtTime(c.end)}${c.score != null ? ` · score ${c.score.toFixed(2)}` : ""}`}
-            onClick={(e) => { e.stopPropagation(); onSelect(i); onSeek(Math.max(0, c.start)); }}
-          >
-            <div
-              className="absolute inset-y-0 left-0 w-1.5 rounded-l cursor-ew-resize bg-black/25 hover:bg-black/50"
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => handleDown(e, i, "start")}
-              onPointerMove={handleMove}
-              onPointerUp={handleUp}
-              onPointerCancel={handleUp}
-            />
-            <div
-              className="absolute inset-y-0 right-0 w-1.5 rounded-r cursor-ew-resize bg-black/25 hover:bg-black/50"
-              onClick={(e) => e.stopPropagation()}
-              onPointerDown={(e) => handleDown(e, i, "end")}
-              onPointerMove={handleMove}
-              onPointerUp={handleUp}
-              onPointerCancel={handleUp}
-            />
-            {isSel && (
-              <button
-                className="absolute top-1/2 -translate-y-1/2 right-2.5 z-20 w-3.5 h-3.5 rounded-full bg-black/50 text-white text-[9px] leading-none flex items-center justify-center hover:bg-black/80"
-                title="Delete clip (x)"
-                onClick={(e) => { e.stopPropagation(); onDelete(i); }}
-              >×</button>
-            )}
-          </div>
-        );
-      })}
       <div
-        className="absolute top-0 bottom-0 w-px bg-white pointer-events-none z-20"
-        style={{ left: `${Math.min(100, Math.max(0, (playhead / duration) * 100))}%` }}
-      />
+        ref={stripRef}
+        className="relative h-6 w-full rounded-md bg-white/[0.07] shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)] touch-none cursor-pointer"
+        onClick={(e) => {
+          const rect = stripRef.current?.getBoundingClientRect();
+          if (!rect || rect.width <= 0) return;
+          const t = Math.min(duration, Math.max(0, ((e.clientX - rect.left) / rect.width) * duration));
+          onSeek(t);
+        }}
+      >
+        {[0.25, 0.5, 0.75].map((f) => (
+          <div
+            key={f}
+            className="absolute top-1 bottom-1 w-px bg-white/10 pointer-events-none"
+            style={{ left: `${f * 100}%` }}
+          />
+        ))}
+        {clips.length === 0 && (
+          <span className="absolute inset-0 flex items-center justify-center text-[10px] tracking-wide text-gray-500 pointer-events-none">
+            no clips — press i to add one at the playhead
+          </span>
+        )}
+        {clips.map((c, i) => {
+          // Clamp to [0, 1]: the media's real duration can be shorter than the
+          // duration the pipeline analyzed, which would push segments past 100%.
+          const startFrac = Math.min(1, Math.max(0, c.start / duration));
+          const endFrac = Math.min(1, Math.max(startFrac, c.end / duration));
+          if (endFrac <= startFrac) return null;
+          const isSel = i === selected;
+          return (
+            <div
+              key={i}
+              className={`group absolute -top-0.5 -bottom-0.5 rounded cursor-pointer transition-[filter] hover:brightness-110 ${
+                owned
+                  ? "bg-gradient-to-b from-sky-300 to-sky-500"
+                  : "bg-gradient-to-b from-amber-300 to-amber-500"
+              } ${isSel ? "ring-2 ring-white shadow-lg z-10" : "ring-1 ring-black/30"}`}
+              style={{
+                left: `${startFrac * 100}%`,
+                width: `${(endFrac - startFrac) * 100}%`,
+                minWidth: "10px",
+                opacity: owned ? 1 : 0.5 + 0.5 * (maxScore > 0 ? (c.score ?? 0) / maxScore : 1),
+              }}
+              title={`${fmtTime(c.start)}–${fmtTime(c.end)}${c.score != null ? ` · score ${c.score.toFixed(2)}` : ""}`}
+              onClick={(e) => { e.stopPropagation(); onSelect(i); onSeek(Math.max(0, c.start)); }}
+            >
+              <div
+                className="absolute inset-y-0 left-0 w-2 rounded-l cursor-ew-resize flex items-center justify-center"
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => handleDown(e, i, "start")}
+                onPointerMove={handleMove}
+                onPointerUp={handleUp}
+                onPointerCancel={handleUp}
+              >
+                <div className={`h-3 w-0.5 rounded-full bg-black/40 transition-opacity ${isSel ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} />
+              </div>
+              <div
+                className="absolute inset-y-0 right-0 w-2 rounded-r cursor-ew-resize flex items-center justify-center"
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => handleDown(e, i, "end")}
+                onPointerMove={handleMove}
+                onPointerUp={handleUp}
+                onPointerCancel={handleUp}
+              >
+                <div className={`h-3 w-0.5 rounded-full bg-black/40 transition-opacity ${isSel ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} />
+              </div>
+              {isSel && (
+                <button
+                  className="absolute top-1/2 -translate-y-1/2 right-3 z-20 w-4 h-4 rounded-full bg-black/50 text-white text-[10px] leading-none flex items-center justify-center hover:bg-black/80 shadow"
+                  title="Delete clip (x)"
+                  onClick={(e) => { e.stopPropagation(); onDelete(i); }}
+                >×</button>
+              )}
+            </div>
+          );
+        })}
+        <div
+          className="absolute -top-1 -bottom-1 w-0.5 -translate-x-1/2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.9)] pointer-events-none z-20"
+          style={{ left: `${Math.min(100, Math.max(0, (playhead / duration) * 100))}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -161,27 +192,56 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
   const [playhead, setPlayhead] = useState(0);
   // Working clip lists edited this session, keyed by path. Takes precedence
   // over server user_clips, which takes precedence over suggested highlights.
-  const [localClips, setLocalClips] = useState<Record<string, UserClip[]>>({});
+  // A null entry means "reverted to suggestions" — it masks a stale server
+  // user_clips prop until the parent refetches.
+  const [localClips, setLocalClips] = useState<Record<string, UserClip[] | null>>({});
   const [selected, setSelected] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
 
   const current: string | undefined = videos[Math.min(idx, videos.length - 1)];
   const suggested = (current && highlights[current]?.clips) || [];
-  const ownedList = current ? localClips[current] ?? userClips[current]?.clips : undefined;
+  const localEntry = current ? localClips[current] : undefined;
+  const ownedList =
+    localEntry === null ? undefined : localEntry ?? (current ? userClips[current]?.clips : undefined);
   const owned = ownedList !== undefined;
   const clips: EditableClip[] = ownedList ?? suggested;
   const duration = mediaDuration ?? (current ? highlights[current]?.duration ?? null : null);
   const canEdit = current != null && duration != null && duration > 0;
 
+  // Track the previously-shown video so a `videos` prop change (e.g. after
+  // confirm shrinks the list, or a same-length refetch swaps paths) doesn't
+  // wipe every keep/delete decision or knock idx off the video the user was
+  // actually looking at.
+  const prevCurrentRef = useRef<string | undefined>(undefined);
+
   useEffect(() => {
-    const init: Record<string, boolean> = {};
-    for (const v of videos) init[v] = true;
-    setKeeps(init);
+    if (videos.length === 0) return;
+    setKeeps((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const v of videos) next[v] = prev[v] ?? true;
+      return next;
+    });
+    // Prune confirmed entries for videos that no longer exist (deleted or
+    // moved) so the localStorage set doesn't grow forever.
+    const here = new Set(videos);
     const stored = loadConfirmed();
-    const first = videos.findIndex((v) => !stored.has(v));
-    setIdx(first >= 0 ? first : 0);
-  }, [videos.length]);
+    const pruned = new Set([...stored].filter((v) => here.has(v)));
+    if (pruned.size !== stored.size) saveConfirmed(pruned);
+    setConfirmed(pruned);
+    const prevPath = prevCurrentRef.current;
+    const stillThere = prevPath != null ? videos.indexOf(prevPath) : -1;
+    if (stillThere >= 0) {
+      setIdx(stillThere);
+    } else {
+      const first = videos.findIndex((v) => !pruned.has(v));
+      setIdx(first >= 0 ? first : 0);
+    }
+  }, [videos]);
+
+  useEffect(() => {
+    prevCurrentRef.current = current;
+  }, [current]);
 
   useEffect(() => {
     if (soundOn) return;
@@ -220,6 +280,9 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, clips: clipList.map(toUserClip) }),
+        // Survives page unload — without this, a PUT in flight when the tab
+        // closes gets aborted and the edit is silently lost.
+        keepalive: true,
       });
       if (!res.ok) throw new Error(`Save clips failed: ${res.status}`);
     } catch (e) {
@@ -249,7 +312,55 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
     await Promise.all(entries.map(([p, c]) => doPut(p, c)));
   }, [doPut]);
 
+  // A still-debounced clip edit (up to 600ms unfired) would otherwise be lost
+  // if the tab closes or this view unmounts before the timer fires.
+  useEffect(() => {
+    window.addEventListener("pagehide", flushPuts);
+    return () => {
+      window.removeEventListener("pagehide", flushPuts);
+      flushPuts();
+    };
+  }, [flushPuts]);
+
   // --- Clip editing. First edit of any kind materializes the working list. ---
+  // One-entry-per-action undo stack, per video path. A null snapshot means the
+  // video was still on untouched suggestions, so undoing past the first edit
+  // reverts it all the way back to the amber suggestion list.
+  const clipHistoryRef = useRef<Record<string, (UserClip[] | null)[]>>({});
+
+  const pushHistory = (path: string, snapshot: UserClip[] | null) => {
+    const stack = clipHistoryRef.current[path] ?? (clipHistoryRef.current[path] = []);
+    stack.push(snapshot);
+    if (stack.length > 20) stack.shift();
+  };
+
+  /** What to record before an edit: the owned list, or null if still on suggestions. */
+  const snapshotClips = (): UserClip[] | null => (owned ? clips.map(toUserClip) : null);
+
+  const revertToSuggestions = async (path: string) => {
+    // Cancel any queued PUT so it can't resurrect the entry after the DELETE.
+    if (putTimers.current[path] != null) window.clearTimeout(putTimers.current[path]);
+    delete putTimers.current[path];
+    delete pendingPuts.current[path];
+    setLocalClips((prev) => ({ ...prev, [path]: null }));
+    try {
+      const res = await fetch(`/api/clips?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Revert clips failed: ${res.status}`);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const undoClipEdit = () => {
+    if (!current) return;
+    const stack = clipHistoryRef.current[current];
+    if (!stack || stack.length === 0) return;
+    const prev = stack.pop()!;
+    setSelected(null);
+    if (prev === null) revertToSuggestions(current);
+    else applyClips(prev);
+  };
+
   const applyClips = (next: UserClip[]) => {
     if (!current) return;
     setLocalClips((prev) => ({ ...prev, [current]: next }));
@@ -264,17 +375,31 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
   };
 
   const addClipAtPlayhead = () => {
-    if (!canEdit || duration == null) return;
+    if (!canEdit || duration == null || !current) return;
+    pushHistory(current, snapshotClips());
     const t = Math.max(0, Math.min(videoRef.current?.currentTime ?? playhead, duration - MIN_CLIP_LEN));
     const clip: UserClip = { start: t, end: Math.min(t + NEW_CLIP_LEN, duration) };
     commitClips([...clips.map(toUserClip), clip], clip);
   };
 
+  const setInPoint = () => {
+    if (!canEdit || duration == null || selected == null || !current) return;
+    const cur = clips[selected];
+    const t = Math.max(0, videoRef.current?.currentTime ?? playhead);
+    if (!cur || t >= cur.end) return;
+    pushHistory(current, snapshotClips());
+    const list = clips.map(toUserClip);
+    const updated: UserClip = { start: t, end: cur.end };
+    list[selected] = updated;
+    commitClips(list, updated);
+  };
+
   const setOutPoint = () => {
-    if (!canEdit || duration == null || selected == null) return;
+    if (!canEdit || duration == null || selected == null || !current) return;
     const cur = clips[selected];
     const t = Math.min(videoRef.current?.currentTime ?? playhead, duration);
     if (!cur || t <= cur.start) return;
+    pushHistory(current, snapshotClips());
     const list = clips.map(toUserClip);
     const updated: UserClip = { start: cur.start, end: t };
     list[selected] = updated;
@@ -282,11 +407,17 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
   };
 
   const deleteClip = (i: number) => {
-    if (!canEdit || i < 0 || i >= clips.length) return;
+    if (!canEdit || i < 0 || i >= clips.length || !current) return;
+    pushHistory(current, snapshotClips());
     const list = clips.map(toUserClip);
     list.splice(i, 1);
     setSelected(null);
     applyClips(list);
+  };
+
+  const beginDrag = () => {
+    if (!current) return;
+    pushHistory(current, snapshotClips());
   };
 
   const handleDragClip = (i: number, clip: UserClip, edgeTime: number) => {
@@ -333,13 +464,18 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
   }, [exportNote]);
 
   useWindowKeydown((e) => {
+    if (
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLSelectElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      e.target instanceof HTMLButtonElement
+    ) return;
     if (e.key === "Enter") {
       e.preventDefault();
-      const cur = videos[idx];
-      if (cur) {
+      if (current) {
         setConfirmed((prev) => {
           const next = new Set(prev);
-          next.add(cur);
+          next.add(current);
           saveConfirmed(next);
           return next;
         });
@@ -347,9 +483,6 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       setIdx((i) => Math.min(videos.length - 1, i + 1));
       return;
     }
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    // Let space play/pause when video element is focused
-    if (e.target instanceof HTMLMediaElement) return;
     switch (e.key) {
       case "j":
       case "ArrowDown":
@@ -369,7 +502,28 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       }
       case "s": {
         e.preventDefault();
-        if (onToggleFavorite) onToggleFavorite(videos[idx]).catch((err) => onError(String(err)));
+        if (onToggleFavorite && current) onToggleFavorite(current).catch((err) => onError(String(err)));
+        break;
+      }
+      case "l": {
+        e.preventDefault();
+        const el = videoRef.current;
+        if (!el) break;
+        if (el.paused) el.play(); else el.pause();
+        break;
+      }
+      case "ArrowRight": {
+        e.preventDefault();
+        const el = videoRef.current;
+        if (!el) break;
+        el.currentTime = Math.min(duration ?? el.duration, el.currentTime + 10);
+        break;
+      }
+      case "ArrowLeft": {
+        e.preventDefault();
+        const el = videoRef.current;
+        if (!el) break;
+        el.currentTime = Math.max(0, el.currentTime - 10);
         break;
       }
       case "n": {
@@ -393,7 +547,10 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       case "i": {
         if (!canEdit) break;
         e.preventDefault();
-        addClipAtPlayhead();
+        // With a clip selected, i trims its start (mirror of o); otherwise
+        // it drops a fresh clip at the playhead.
+        if (selected != null) setInPoint();
+        else addClipAtPlayhead();
         break;
       }
       case "o": {
@@ -407,6 +564,12 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
         if (!canEdit || selected == null) break;
         e.preventDefault();
         deleteClip(selected);
+        break;
+      }
+      case "u": {
+        if (!canEdit) break;
+        e.preventDefault();
+        undoClipEdit();
         break;
       }
     }
@@ -450,13 +613,18 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
         <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${isKept ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
           {isKept ? "Keep" : "Delete"}
         </span>
+        {confirmed.has(current) && (
+          <span className="text-xs font-medium px-2 py-0.5 rounded shrink-0 bg-blue-50 text-blue-600" title="Reviewed (enter)">
+            ✓ reviewed
+          </span>
+        )}
         <button
           onClick={() => onToggleFavorite?.(current).catch((e) => onError(String(e)))}
           className={`text-base leading-none shrink-0 transition-colors ${isFavorited ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400"}`}
           title="Toggle favorite (s)"
         >★</button>
         <span className="text-xs text-gray-300 truncate">
-          j/k · space toggle · s star · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del" : ""}
+          j/k · ←/→ ±10s · space toggle · l pause · s star · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
         </span>
         <div className="ml-auto flex items-center gap-2 shrink-0">
           {exportNote && <span className="text-xs text-emerald-600">{exportNote}</span>}
@@ -465,7 +633,7 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
               <button
                 onClick={addClipAtPlayhead}
                 className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50"
-                title="Add a 4s clip at the playhead (i)"
+                title="Add a 4s clip at the playhead (i, with no clip selected)"
               >＋ clip</button>
               <button
                 onClick={exportClips}
@@ -479,8 +647,9 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
             </>
           )}
           {nDelete > 0 && <span className="text-xs text-gray-400">{nDelete} → trash</span>}
-          <button onClick={confirm} disabled={submitting}
-            className="px-3 py-1 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+          <button onClick={confirm} disabled={submitting || nDelete === 0}
+            title={nDelete === 0 ? "Nothing marked for deletion — space marks the current video" : `Move ${nDelete} video${nDelete === 1 ? "" : "s"} to trash`}
+            className="px-3 py-1 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? "…" : "✓ Confirm"}
           </button>
         </div>
@@ -491,7 +660,6 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
         className={`flex-1 min-h-0 overflow-hidden bg-black border-4 transition-colors ${
           isFavorited ? "border-yellow-400" : isKept ? "border-green-400" : "border-red-400"
         }`}
-        onClick={() => setKeeps((prev) => ({ ...prev, [current]: !prev[current] }))}
       >
         <video
           key={current}
@@ -502,13 +670,29 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
           loop
           muted={!soundOn}
           className="w-full h-full object-contain"
-          onClick={(e) => e.stopPropagation()}
           onLoadedMetadata={(e) => {
             const d = e.currentTarget.duration;
             if (Number.isFinite(d) && d > 0) setMediaDuration(d);
           }}
           onTimeUpdate={(e) => setPlayhead(e.currentTarget.currentTime)}
+          onError={() => onError(`Failed to load video: ${name}`)}
         />
+        {/* Warm the browser's cache for neighboring videos so j/k doesn't hit a cold fetch,
+            in either direction — going back is just as common as going forward.
+            cached_only=1: only pull the bitrate-capped transcode, never the raw
+            (often ~190Mbps) original — a 404 here just means "not baked yet". */}
+        {[videos[idx - 2], videos[idx - 1], videos[idx + 1], videos[idx + 2]]
+          .filter((v): v is string => v != null)
+          .map((v) => (
+            <video
+              key={`preload-${v}`}
+              src={`/api/video?path=${encodeURIComponent(v)}&cached_only=1`}
+              preload="auto"
+              muted
+              style={{ display: "none" }}
+              onError={() => {}}
+            />
+          ))}
       </div>
 
       {/* Clip editor strip — below the video, mirroring the scrubber above it.
@@ -522,6 +706,7 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
           selected={selected}
           onSelect={setSelected}
           onSeek={(t) => { const el = videoRef.current; if (el) el.currentTime = t; }}
+          onDragStart={beginDrag}
           onDragClip={handleDragClip}
           onDragEnd={handleDragEnd}
           onDelete={deleteClip}

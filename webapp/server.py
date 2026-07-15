@@ -48,6 +48,7 @@ from video import cache_path as video_cache_path, transcode_for_web
 from clips import (
     EXPORT_DIR_NAME,
     ClipExportError,
+    delete_user_clips,
     export_clips,
     save_user_clips,
     user_clips_for,
@@ -405,6 +406,16 @@ def put_clips(req: ClipsPutRequest):
     return {"ok": True, "clips": stored}
 
 
+@app.delete("/api/clips")
+def delete_clips(path: str = Query(...)):
+    """Drop the user's clip list for one video, reverting it to pipeline
+    suggestions."""
+    ctx = _require_active()
+    abs_path = _validate_clip_video_path(ctx, path)
+    existed = delete_user_clips(ctx.output_dir, str(abs_path))
+    return {"ok": True, "existed": existed}
+
+
 class ClipsExportRequest(BaseModel):
     path: str
     mode: str = "reencode"
@@ -512,18 +523,23 @@ def get_gallery():
 
 
 @app.get("/api/video")
-def serve_video(path: str = Query(...)):
+def serve_video(path: str = Query(...), cached_only: bool = False):
     ctx = _require_active()
     abs_path = _resolve_project_path(ctx, path)
     if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(403, "Path outside project")
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
-    # Serve the AAC-audio transcode if it's been pre-baked (see video.py / the
-    # convert_videos script). Falls back to the silent original otherwise.
+    # Serve the browser-playable, bitrate-capped transcode if it's been
+    # pre-baked (see video.py / the convert_videos script). Falls back to the
+    # (silent, full-bitrate) original otherwise — unless the caller only wants
+    # the cache (e.g. background preloads, which shouldn't pull a ~190Mbps
+    # original just to warm the browser's buffer).
     cached = video_cache_path(ctx.output_dir, abs_path)
     if cached.exists():
         return FileResponse(cached, media_type="video/mp4", headers=_CACHE_HEADERS)
+    if cached_only:
+        raise HTTPException(404, "Not cached yet")
     return FileResponse(abs_path, headers=_CACHE_HEADERS)
 
 
