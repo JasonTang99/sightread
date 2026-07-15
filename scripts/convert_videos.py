@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Pre-bake browser-playable (AAC-audio) copies of a folder's videos.
+"""Pre-bake browser-playable copies of a folder's videos.
 
-Camera .MOV files often use LPCM audio that browsers can't decode, so the
-webapp plays them silently. This transcodes each clip into the project's
-video_cache (video stream copied, audio re-encoded to AAC). Originals are
+Camera .MOV files often pair LPCM audio browsers can't decode with a bitrate
+and resolution they can't scrub smoothly. This transcodes each clip into the
+project's video_cache using the settings in webapp/video.py. Originals are
 never touched.
 
-Usage: python scripts/convert_videos.py /path/to/folder
+Usage: python scripts/convert_videos.py /path/to/folder [--force]
 """
 import argparse
 import sys
@@ -21,6 +21,12 @@ from video import VIDEO_EXTENSIONS, cache_path, transcode_for_web  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("folder", help="Project folder containing videos")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-transcode videos that are already cached (use after changing "
+             "the encode settings in webapp/video.py)",
+    )
     args = ap.parse_args()
 
     folder = Path(args.folder).resolve()
@@ -43,7 +49,7 @@ def main() -> int:
     converted = skipped = failed = 0
     for i, src in enumerate(videos, 1):
         dest = cache_path(output_dir, src)
-        if dest.exists():
+        if dest.exists() and not args.force:
             skipped += 1
             continue
         print(f"[{i}/{len(videos)}] {src.name} …", flush=True)

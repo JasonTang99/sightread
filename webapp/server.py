@@ -530,11 +530,11 @@ def serve_video(path: str = Query(...), cached_only: bool = False):
         raise HTTPException(403, "Path outside project")
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
-    # Serve the browser-playable, bitrate-capped transcode if it's been
-    # pre-baked (see video.py / the convert_videos script). Falls back to the
-    # (silent, full-bitrate) original otherwise — unless the caller only wants
-    # the cache (e.g. background preloads, which shouldn't pull a ~190Mbps
-    # original just to warm the browser's buffer).
+    # Serve the browser-playable 1440p transcode if it's been pre-baked (see
+    # video.py / the convert_videos script). Falls back to the (silent, 4K,
+    # full-bitrate) original otherwise — unless the caller only wants the cache
+    # (e.g. background preloads, which shouldn't pull a ~190Mbps original just
+    # to warm the browser's buffer).
     cached = video_cache_path(ctx.output_dir, abs_path)
     if cached.exists():
         return FileResponse(cached, media_type="video/mp4", headers=_CACHE_HEADERS)
