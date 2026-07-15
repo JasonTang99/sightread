@@ -5,6 +5,9 @@ DINOv3 + two-stage clustering + IQA ensemble photo curation pipeline.
 Usage:
     python scripts/pipeline.py --image-dir /path/to/photos
     python scripts/pipeline.py --image-dir /path/to/photos --output-dir outputs
+
+Without --output-dir, results go to the per-project data directory
+(~/.local/share/sightread/projects/<md5>) — the same place the webapp reads.
 """
 
 import argparse
@@ -887,7 +890,7 @@ def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = Fal
 # ---------------------------------------------------------------------------
 def run_pipeline(
     image_dir: str,
-    output_dir: str = "outputs",
+    output_dir: str,
     batch_size: int = BATCH_SIZE,
     tight: float = TIGHT_THRESHOLD,
     loose: float = LOOSE_THRESHOLD,
@@ -934,7 +937,9 @@ def run_pipeline(
 def main():
     parser = argparse.ArgumentParser(description="Photo clustering & scoring pipeline")
     parser.add_argument("--image-dir", required=True)
-    parser.add_argument("--output-dir", default="outputs")
+    parser.add_argument("--output-dir", default=None,
+                        help="Defaults to the per-project data dir the webapp reads "
+                             "(~/.local/share/sightread/projects/<md5>)")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--tight", type=float, default=TIGHT_THRESHOLD,
                         help="Near-duplicate cosine-dist threshold")
@@ -950,6 +955,13 @@ def main():
     parser.add_argument("--force-video-highlights", action="store_true",
                         help="Recompute video highlights even for unchanged videos")
     args = parser.parse_args()
+
+    if args.output_dir is None:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+        from projects import project_output_dir
+        args.output_dir = str(project_output_dir(Path(args.image_dir)))
+        print(f"Output dir: {args.output_dir}")
 
     import random
     random.seed(42)
