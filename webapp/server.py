@@ -4,8 +4,9 @@ import io
 import json
 import logging
 import os
-import shutil
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -101,6 +102,18 @@ async def _reject_non_local(request: Request, call_next):
 _active: ProjectContext | None = None
 _undo_stack: list[dict] = []
 
+# Every endpoint that mutates to_delete.txt, decisions.json, favorites.json or the
+# undo stack does a read-modify-write, so two overlapping requests can drop one
+# side's edit entirely. Uvicorn runs sync handlers on a threadpool, and the
+# thumbnail prewarmer adds background load on top, so the overlap is routine
+# rather than theoretical. Serialise the writers; readers are left alone.
+_curation_lock = threading.Lock()
+
+# Width the timeline grid requests; kept in sync with TimelineView.tsx.
+TIMELINE_THUMB_WIDTH = 600
+_prewarm_lock = threading.Lock()
+_prewarm_started: set[str] = set()
+
 
 def _require_active() -> ProjectContext:
     if _active is None:
@@ -176,35 +189,37 @@ def confirm(req: ConfirmRequest):
             raise HTTPException(400, f"Path outside project: {p}")
     delete_list_path = ctx.output_dir / "to_delete.txt"
     decisions_path = ctx.output_dir / "decisions.json"
-    favs = set(load_favorites(ctx.output_dir / "favorites.json"))
-    delete_paths = [p for p in req.delete_paths if p not in favs]
-    if delete_paths:
-        append_to_delete_list(delete_paths, delete_list_path)
-    singleton_ids = [d.cluster_id for d in req.singleton_decisions]
-    _push_undo(delete_paths, req.cluster_id, singleton_ids)
-    if req.cluster_id is not None:
-        deleted_set = set(req.delete_paths)
-        kept = [p for p in req.all_paths if p not in deleted_set]
-        save_decision(decisions_path, req.cluster_id, kept, req.delete_paths)
-    for d in req.singleton_decisions:
-        save_decision(decisions_path, d.cluster_id, d.kept, d.deleted)
+    with _curation_lock:
+        favs = set(load_favorites(ctx.output_dir / "favorites.json"))
+        delete_paths = [p for p in req.delete_paths if p not in favs]
+        if delete_paths:
+            append_to_delete_list(delete_paths, delete_list_path)
+        singleton_ids = [d.cluster_id for d in req.singleton_decisions]
+        _push_undo(delete_paths, req.cluster_id, singleton_ids)
+        if req.cluster_id is not None:
+            deleted_set = set(req.delete_paths)
+            kept = [p for p in req.all_paths if p not in deleted_set]
+            save_decision(decisions_path, req.cluster_id, kept, req.delete_paths)
+        for d in req.singleton_decisions:
+            save_decision(decisions_path, d.cluster_id, d.kept, d.deleted)
     return {"ok": True}
 
 
 @app.post("/api/undo")
 def undo():
     ctx = _require_active()
-    if not _undo_stack:
-        raise HTTPException(400, "Nothing to undo")
-    entry = _undo_stack.pop()
     delete_list_path = ctx.output_dir / "to_delete.txt"
     decisions_path = ctx.output_dir / "decisions.json"
-    if entry["delete_paths"]:
-        remove_from_delete_list(set(entry["delete_paths"]), delete_list_path)
-    if entry.get("cluster_id") is not None:
-        remove_decision(decisions_path, entry["cluster_id"])
-    for cid in entry.get("cluster_ids", []):
-        remove_decision(decisions_path, cid)
+    with _curation_lock:
+        if not _undo_stack:
+            raise HTTPException(400, "Nothing to undo")
+        entry = _undo_stack.pop()
+        if entry["delete_paths"]:
+            remove_from_delete_list(set(entry["delete_paths"]), delete_list_path)
+        if entry.get("cluster_id") is not None:
+            remove_decision(decisions_path, entry["cluster_id"])
+        for cid in entry.get("cluster_ids", []):
+            remove_decision(decisions_path, cid)
     return {"ok": True}
 
 
@@ -216,7 +231,8 @@ class RestoreRequest(BaseModel):
 def restore(req: RestoreRequest):
     ctx = _require_active()
     delete_list_path = ctx.output_dir / "to_delete.txt"
-    n = remove_from_delete_list(set(req.paths), delete_list_path)
+    with _curation_lock:
+        n = remove_from_delete_list(set(req.paths), delete_list_path)
     return {"ok": True, "restored": n}
 
 
@@ -229,31 +245,93 @@ def get_trash():
 
 @app.post("/api/apply-deletes")
 def apply_deletes():
-    """Move every pending-delete file into <output_dir>/trash/ and clear the list."""
+    """Delete every pending-delete file from the primary drive.
+
+    The primary drive (h0) is the small one, so applying deletes has to actually
+    reclaim its space rather than shuffle files into a trash folder. The mirror
+    drive (h1) is left whole and becomes the sole remaining copy, so a file is
+    only unlinked once its mirror has been shown to exist at a matching size —
+    anything that fails that check is skipped and reported, never deleted.
+
+    Each project's mirror directory also gets an appended plain-text list of the
+    filenames deleted from the primary, so the mirror can be pruned later.
+    """
     ctx = _require_active()
     delete_list_path = ctx.output_dir / "to_delete.txt"
-    favs = set(load_favorites(ctx.output_dir / "favorites.json"))
-    paths = [p for p in read_delete_list(delete_list_path) if p not in favs]
-    trash_dir = ctx.output_dir / "trash"
-    trash_dir.mkdir(parents=True, exist_ok=True)
-    moved = 0
+
+    deleted: list[str] = []
+    unmirrored: list[str] = []
     skipped = 0
-    for p in paths:
-        src = _resolve_project_path(ctx, p)
-        if not _in_allowed_dirs(src, ctx) or not src.is_file():
-            skipped += 1
-            continue
-        dest = trash_dir / src.name
-        counter = 1
-        while dest.exists():
-            dest = trash_dir / f"{src.stem}_{counter}{src.suffix}"
-            counter += 1
-        shutil.move(str(src), str(dest))
-        moved += 1
-    delete_list_path.write_text("")
-    # Undo entries reference files that are no longer in place — drop them.
-    _undo_stack.clear()
-    return {"ok": True, "moved": moved, "skipped": skipped, "trash_dir": str(trash_dir)}
+    starred = 0
+    freed_bytes = 0
+    # Held across the whole run: a confirm landing mid-sweep would otherwise have
+    # its append erased by the delete-list rewrite below, or get its file unlinked
+    # before the user ever saw it in the pending list.
+    with _curation_lock:
+        favs = set(load_favorites(ctx.output_dir / "favorites.json"))
+        all_entries = read_delete_list(delete_list_path)
+        for entry in all_entries:
+            if entry in favs:
+                starred += 1  # starred after being marked; leave it alone
+                continue
+            src = _resolve_project_path(ctx, entry)
+            if not _in_allowed_dirs(src, ctx) or not src.is_file():
+                skipped += 1
+                continue
+            mirror = _mirror_path(src)
+            if mirror is None or not mirror.is_file() or mirror.stat().st_size != src.stat().st_size:
+                unmirrored.append(entry)
+                continue
+            size = src.stat().st_size
+            src.unlink()
+            freed_bytes += size
+            deleted.append(src.name)
+
+        manifest = _append_mirror_manifest(ctx, deleted)
+        # Everything the run considered is settled except the unmirrored files, which
+        # stay pending so a later run can retry them once their mirror is in place.
+        remove_from_delete_list(set(all_entries) - set(unmirrored), delete_list_path)
+        # Undo entries reference files that are no longer on disk — drop them.
+        _undo_stack.clear()
+    return {
+        "ok": True,
+        "deleted": len(deleted),
+        "skipped": skipped,
+        "starred": starred,
+        "unmirrored": unmirrored,
+        "freed_bytes": freed_bytes,
+        "manifest": str(manifest) if manifest else None,
+    }
+
+
+# Photos live on two drives: the primary (small, curated) and the mirror (large,
+# kept whole). The mirror reproduces the primary's tree under a prefix, so the
+# path mapping is a single prefix swap.
+PRIMARY_ROOT = Path(os.environ.get("SIGHTREAD_PRIMARY_ROOT", "/mnt/h0"))
+MIRROR_ROOT = Path(os.environ.get("SIGHTREAD_MIRROR_ROOT", "/mnt/h1/h0"))
+MIRROR_MANIFEST_NAME = ".sightread_deleted.txt"
+
+
+def _mirror_path(src: Path) -> Optional[Path]:
+    """Where `src` lives on the mirror drive, or None if it isn't on the primary."""
+    try:
+        return MIRROR_ROOT / src.relative_to(PRIMARY_ROOT)
+    except ValueError:
+        return None
+
+
+def _append_mirror_manifest(ctx: ProjectContext, names: list[str]) -> Optional[Path]:
+    """Record deleted filenames alongside the project's copy on the mirror drive."""
+    if not names:
+        return None
+    mirror_dir = _mirror_path(ctx.folder)
+    if mirror_dir is None or not mirror_dir.is_dir():
+        return None
+    manifest = mirror_dir / MIRROR_MANIFEST_NAME
+    with manifest.open("a") as fh:
+        for name in names:
+            fh.write(f"{name}\n")
+    return manifest
 
 
 class FavoriteRequest(BaseModel):
@@ -267,7 +345,8 @@ def toggle_fav(req: FavoriteRequest):
     if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(400, f"Path outside project: {req.path}")
     favorites_path = ctx.output_dir / "favorites.json"
-    favorited = toggle_favorite(favorites_path, req.path)
+    with _curation_lock:
+        favorited = toggle_favorite(favorites_path, req.path)
     return {"ok": True, "favorited": favorited}
 
 
@@ -519,6 +598,7 @@ def get_gallery():
         ph["shot_at"] = shot_times.get(ph["path"])
 
     all_photos.sort(key=lambda p: (p["shot_at"] is None, p["shot_at"] or ""))
+    _start_thumb_prewarm(ctx, [ph["path"] for ph in all_photos])
     return {"photos": all_photos}
 
 
@@ -558,26 +638,76 @@ def serve_image(path: str = Query(...), w: Optional[int] = None):
     if w is None:
         return FileResponse(abs_path, headers=_CACHE_HEADERS)
 
-    # Resized thumbnails are cached on disk, keyed by source path/mtime/width
-    key = hashlib.sha1(
-        f"{abs_path}|{abs_path.stat().st_mtime_ns}|{w}".encode()
-    ).hexdigest()
-    cache_file = ctx.output_dir / "thumb_cache" / f"{key}.jpg"
+    cache_file = _thumb_cache_file(ctx, abs_path, w)
     if cache_file.exists():
         return FileResponse(cache_file, media_type="image/jpeg", headers=_CACHE_HEADERS)
 
+    data = _render_thumb(abs_path, w)
+    _write_thumb(cache_file, data)
+    return Response(data, media_type="image/jpeg", headers=_CACHE_HEADERS)
+
+
+# Resized thumbnails are cached on disk, keyed by source path/mtime/width
+def _thumb_cache_file(ctx: ProjectContext, abs_path: Path, w: int) -> Path:
+    key = hashlib.sha1(
+        f"{abs_path}|{abs_path.stat().st_mtime_ns}|{w}".encode()
+    ).hexdigest()
+    return ctx.output_dir / "thumb_cache" / f"{key}.jpg"
+
+
+def _render_thumb(abs_path: Path, w: int) -> bytes:
     img = ImageOps.exif_transpose(Image.open(abs_path))
     if img.mode != "RGB":
         img = img.convert("RGB")
     img.thumbnail((w, w * 3), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=95)
-    data = buf.getvalue()
+    return buf.getvalue()
+
+
+def _write_thumb(cache_file: Path, data: bytes) -> None:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_file.with_suffix(f".{os.getpid()}.tmp")
+    # Thread id as well as pid: the prewarm pool has several threads writing
+    # thumbnails at once, and a shared temp name would let them clobber.
+    tmp = cache_file.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_bytes(data)
     tmp.replace(cache_file)
-    return Response(data, media_type="image/jpeg", headers=_CACHE_HEADERS)
+
+
+def _prewarm_one(ctx: ProjectContext, raw_path: str, w: int) -> None:
+    try:
+        abs_path = _resolve_project_path(ctx, raw_path)
+        if not _in_allowed_dirs(abs_path, ctx) or not abs_path.is_file():
+            return
+        cache_file = _thumb_cache_file(ctx, abs_path, w)
+        if cache_file.exists():
+            return
+        _write_thumb(cache_file, _render_thumb(abs_path, w))
+    except Exception:
+        pass  # a thumbnail that fails here is regenerated on demand by /api/image
+
+
+def _start_thumb_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
+    """Build the timeline's thumbnails in the background.
+
+    Generating one is ~0.5s of LANCZOS resize, and the browser only opens six
+    connections, so a cold project leaves the tail of the timeline grid empty
+    for a long while. Prewarming turns those requests into cache hits.
+    """
+    key = str(ctx.output_dir)
+    with _prewarm_lock:
+        if key in _prewarm_started:
+            return
+        _prewarm_started.add(key)
+
+    def _run() -> None:
+        # Two workers: enough to stay ahead of scrolling, few enough to leave
+        # the request threadpool free for tiles already on screen.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for p in raw_paths:
+                pool.submit(_prewarm_one, ctx, p, TIMELINE_THUMB_WIDTH)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _resolve_project_path(ctx: ProjectContext, path: str) -> Path:
@@ -664,6 +794,8 @@ def open_project(req: FolderRequest):
     out_dir.mkdir(parents=True, exist_ok=True)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
     _undo_stack.clear()
+    with _prewarm_lock:
+        _prewarm_started.discard(str(out_dir))  # let the next gallery load top it up
     upsert_recent(folder, out_dir)
     status = project_status(folder, out_dir)
     return {"folder": str(folder), "output_dir": str(out_dir), "status": status}

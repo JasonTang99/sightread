@@ -43,13 +43,24 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
   };
 
   const applyDeletes = async () => {
-    if (!window.confirm(`Move ${pendingCount} file(s) to the trash folder? They are kept on disk but removed from the project.`)) return;
+    const warning =
+      `Permanently delete ${pendingCount} file(s) from the primary drive?\n\n` +
+      `This frees space on the primary drive. Each file is only deleted after its ` +
+      `copy on the mirror drive is verified, and the mirror keeps that copy — so ` +
+      `recovery means restoring from the mirror. This cannot be undone here.`;
+    if (!window.confirm(warning)) return;
     setApplying(true);
     try {
       const res = await fetch("/api/apply-deletes", { method: "POST" });
       if (!res.ok) throw new Error(`Apply failed: ${res.status}`);
       const data = await res.json();
-      setApplyResult(`Moved ${data.moved} file(s) to ${data.trash_dir}${data.skipped ? ` (${data.skipped} skipped)` : ""}`);
+      const gb = (data.freed_bytes ?? 0) / 1024 ** 3;
+      const parts = [`Deleted ${data.deleted} file(s) from the primary drive, freeing ${gb.toFixed(2)} GB`];
+      if (data.unmirrored?.length) parts.push(`${data.unmirrored.length} left pending (no verified mirror copy)`);
+      if (data.starred) parts.push(`${data.starred} kept (starred)`);
+      if (data.skipped) parts.push(`${data.skipped} skipped (already gone)`);
+      if (data.manifest) parts.push(`list written to ${data.manifest}`);
+      setApplyResult(`${parts.join(" · ")}.`);
       setSelected(new Set());
       await onRefresh();
     } catch (e) {
@@ -101,14 +112,15 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
         <div className="border-t border-gray-100 px-4 py-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-gray-500">
-              Click an image to mark it for restore, or move everything to the trash folder now.
+              Click an image to mark it for restore, or delete them from the primary drive now.
+              The mirror drive keeps its copies and gets a list of what was removed.
             </p>
             <button
               onClick={applyDeletes}
               disabled={applying}
               className="px-3 py-1.5 text-sm font-medium bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 shrink-0"
             >
-              {applying ? "Moving…" : `🗑️ Move ${pendingCount} to trash`}
+              {applying ? "Deleting…" : `🗑️ Delete ${pendingCount} from primary drive`}
             </button>
           </div>
 
