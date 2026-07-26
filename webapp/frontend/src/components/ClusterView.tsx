@@ -1,6 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import type { Cluster, ClusterDecision } from "../types";
+
+type ClusterFilter = "all" | "wiped";
+
+// A cluster is "wiped" when it has been confirmed and nothing survived — every
+// image went to the delete list.
+function isWiped(cluster: Cluster, decisions: Record<string, ClusterDecision>): boolean {
+  const decision = decisions[String(cluster.cluster_id)];
+  if (!decision) return false;
+  return decision.kept.length === 0 && decision.deleted.length > 0;
+}
 
 interface Props {
   clusters: Cluster[];
@@ -16,9 +26,10 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ clusters, clusterDecisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
+export function ClusterView({ clusters: allClusters, clusterDecisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
+  const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
-    const first = clusters.findIndex((c) => !(String(c.cluster_id) in clusterDecisions));
+    const first = allClusters.findIndex((c) => !(String(c.cluster_id) in clusterDecisions));
     return first === -1 ? 0 : first;
   });
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
@@ -27,6 +38,18 @@ export function ClusterView({ clusters, clusterDecisions, favorites, onRefresh, 
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
+
+  const wipedCount = useMemo(
+    () => allClusters.filter((c) => isWiped(c, clusterDecisions)).length,
+    [allClusters, clusterDecisions],
+  );
+  const clusters = useMemo(
+    () => (filter === "wiped" ? allClusters.filter((c) => isWiped(c, clusterDecisions)) : allClusters),
+    [allClusters, clusterDecisions, filter],
+  );
+
+  // Filtering rebuilds the list under the cursor; start over at the top.
+  useEffect(() => { setIdx(0); }, [filter]);
 
   const clusterIdx = Math.min(idx, clusters.length - 1);
   const cluster = clusters[clusterIdx];
@@ -175,7 +198,36 @@ export function ClusterView({ clusters, clusterDecisions, favorites, onRefresh, 
     }
   });
 
-  if (!cluster) return <p className="text-sm text-gray-500">No clusters remaining.</p>;
+  const filterToggle = (
+    <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
+      <button
+        onClick={() => setFilter("all")}
+        className={`px-2 py-1 transition-colors ${filter === "all" ? "bg-blue-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
+      >
+        All ({allClusters.length})
+      </button>
+      <button
+        onClick={() => setFilter("wiped")}
+        className={`px-2 py-1 transition-colors ${filter === "wiped" ? "bg-red-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
+        title="Clusters where every image was marked for deletion"
+      >
+        Fully deleted ({wipedCount})
+      </button>
+    </div>
+  );
+
+  if (!cluster) {
+    return (
+      <div className="space-y-2">
+        <div className="bg-white border border-gray-200 rounded px-3 py-2 flex items-center gap-3">
+          {filterToggle}
+        </div>
+        <p className="text-sm text-gray-500 px-1">
+          {filter === "wiped" ? "No clusters had every image deleted." : "No clusters remaining."}
+        </p>
+      </div>
+    );
+  }
 
   const bestScore = Math.max(...cluster.images.map((img) => img.score));
   const nKeep = cluster.images.filter((img) => keeps[img.path] ?? img.rank === 1).length;
@@ -185,6 +237,7 @@ export function ClusterView({ clusters, clusterDecisions, favorites, onRefresh, 
     <div className="space-y-2">
       {/* Combined bar */}
       <div className="bg-white border border-gray-200 rounded px-3 py-2 flex items-center gap-3 flex-wrap">
+        {filterToggle}
         <button
           onClick={() => setIdx(Math.max(0, clusterIdx - 1))}
           disabled={clusterIdx === 0}
