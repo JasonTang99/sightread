@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "./hooks/useWindowKeydown";
 import { ClusterView } from "./components/ClusterView";
 import { FavoritesView } from "./components/FavoritesView";
@@ -57,24 +57,25 @@ export default function App() {
     if (projectOpen) refetchVideos();
   }, [projectOpen, refetchVideos]);
 
-  // Auto-navigate to first tab with content when current tab is empty
+  // Pick the landing tab once, on the first load of a project: whatever still
+  // needs triage, or — when every cluster and single is already decided — the
+  // timeline, which reviews the whole trip, videos included. Deliberately does
+  // not re-run on later state changes; confirming the last cluster shouldn't
+  // yank you off the tab you're working in.
+  const landedRef = useRef(false);
   useEffect(() => {
-    if (!state) return;
+    if (!state || state.no_project || landedRef.current) return;
+    landedRef.current = true;
     const decisions = state.cluster_decisions ?? {};
-    const hasClusters = (state.clusters ?? []).some((c) => !(String(c.cluster_id) in decisions));
-    const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !(String(c.cluster_id) in decisions));
-    const hasVideos = videos.length > 0;
-    setTab((current) => {
-      if (current === "clusters" && !hasClusters) {
-        if (hasUnconfirmedSingles) return "singles";
-        if (hasVideos) return "videos";
-      }
-      if (current === "singles" && !hasUnconfirmedSingles) {
-        if (hasVideos) return "videos";
-      }
-      return current;
-    });
-  }, [state, videos]);
+    const clusters = state.clusters ?? [];
+    const singletons = state.singletons ?? [];
+    if (clusters.length + singletons.length === 0) return;  // nothing curated yet
+    if (clusters.some((c) => !(String(c.cluster_id) in decisions))) return;  // stay on clusters
+    setTab(singletons.some((c) => !(String(c.cluster_id) in decisions)) ? "singles" : "timeline");
+  }, [state]);
+
+  // A different project gets its own landing decision.
+  useEffect(() => { landedRef.current = false; }, [state?.no_project]);
 
   useEffect(() => {
     if (!error) return;
@@ -223,7 +224,12 @@ export default function App() {
         )}
 
         {tab === "timeline" ? (
-          <TimelineView onError={setError} videos={videos} videoShotTimes={videoShotTimes} highlights={videoHighlights} />
+          // Timeline is where a finished project lands, so the apply-deletes
+          // control has to live here too or it becomes unreachable.
+          <div className="space-y-2">
+            <TimelineView onError={setError} videos={videos} videoShotTimes={videoShotTimes} highlights={videoHighlights} />
+            <TrashPanel pendingCount={state.pending_delete_count} onRefresh={reload} onError={setError} />
+          </div>
         ) : tab === "favorites" ? (
           <FavoritesView favorites={favorites} onToggleFavorite={toggleFavorite} onRefresh={reload} onError={setError} />
         ) : tab === "videos" ? (

@@ -8,11 +8,14 @@ interface Props {
   highlights?: VideoHighlightsMap;
 }
 
-type StatusFilter = "all" | "keep";
+type StatusFilter = "all" | "keep" | "delete";
 
 // Status is conveyed by border colour alone, so tiles carry no text overlay and
 // can run large.
 const TILE_MIN_PX = 320;
+// Kept in sync with TIMELINE_THUMB_WIDTH in webapp/server.py, which prewarms
+// this width's cache so the grid isn't waiting on resizes as it scrolls.
+const THUMB_W = 600;
 
 interface VideoItem {
   path: string;
@@ -21,6 +24,12 @@ interface VideoItem {
 
 function effectiveStatus(photo: GalleryPhoto, overrides: Record<string, GalleryPhoto["status"]>): GalleryPhoto["status"] {
   return overrides[photo.path] ?? photo.status;
+}
+
+function matchesFilter(status: GalleryPhoto["status"], filter: StatusFilter): boolean {
+  if (filter === "keep") return status !== "delete";
+  if (filter === "delete") return status === "delete";
+  return true;
 }
 
 function dateOf(shot_at: string | null): string {
@@ -52,14 +61,20 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
 
   useEffect(() => { fetchGallery(); }, [fetchGallery]);
 
-  // Preload next few photos when selectedDate changes
+  // Preload next few photos when the visible slice changes
   useEffect(() => {
-    const visible = photos.filter((p) => selectedDate === "all" || dateOf(p.shot_at) === selectedDate);
+    const visible = photos.filter(
+      (p) =>
+        (selectedDate === "all" || dateOf(p.shot_at) === selectedDate) &&
+        matchesFilter(effectiveStatus(p, overrides), filter),
+    );
     for (const ph of visible.slice(0, 6)) {
       const el = new Image();
-      el.src = `/api/image?path=${encodeURIComponent(ph.path)}&w=600`;
+      el.src = `/api/image?path=${encodeURIComponent(ph.path)}&w=${THUMB_W}`;
     }
-  }, [selectedDate, photos]);
+    // `overrides` deliberately omitted: toggling a tile shouldn't refire preloads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, photos, filter]);
 
   const videoItems = useMemo<VideoItem[]>(
     () => videos.map((p) => ({ path: p, shot_at: videoShotTimes[p] ?? null })),
@@ -98,19 +113,32 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     return map;
   }, [videoItems]);
 
+  // Videos carry no keep/delete status, so they drop out of a delete-only view.
+  const showVideos = filter !== "delete";
+
   const countByDate = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [d, ps] of Object.entries(photosByDate)) {
-      map[d] = ps.filter((p) => {
-        const s = effectiveStatus(p, overrides);
-        return filter === "all" || s !== "delete";
-      }).length;
+      map[d] = ps.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
     }
-    for (const [d, vs] of Object.entries(videosByDate)) {
-      map[d] = (map[d] ?? 0) + vs.length;
+    if (showVideos) {
+      for (const [d, vs] of Object.entries(videosByDate)) {
+        map[d] = (map[d] ?? 0) + vs.length;
+      }
     }
     return map;
-  }, [photosByDate, videosByDate, overrides, filter]);
+  }, [photosByDate, videosByDate, overrides, filter, showVideos]);
+
+  const totalPhotoCount = useMemo(
+    () => photos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length,
+    [photos, overrides, filter],
+  );
+
+  // Under a narrow filter most days can be empty; don't list them.
+  const visibleDates = useMemo(
+    () => (filter === "all" ? dates : dates.filter((d) => (countByDate[d] ?? 0) > 0)),
+    [dates, countByDate, filter],
+  );
 
   const toggle = (path: string) => {
     setOverrides((prev) => {
@@ -159,9 +187,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
   };
 
   const renderPhotoGrid = (gridPhotos: GalleryPhoto[]) => {
-    const visible = filter === "keep"
-      ? gridPhotos.filter((p) => effectiveStatus(p, overrides) !== "delete")
-      : gridPhotos;
+    const visible = gridPhotos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter));
     if (visible.length === 0) return <p className="text-sm text-gray-400 py-4">No photos.</p>;
     return (
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
@@ -176,7 +202,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
               title={`${ph.path.split("/").pop()} — ${status}`}
             >
               <img
-                src={`/api/image?path=${encodeURIComponent(ph.path)}&w=600`}
+                src={`/api/image?path=${encodeURIComponent(ph.path)}&w=${THUMB_W}`}
                 alt=""
                 className="w-full aspect-square object-cover bg-gray-100"
                 loading="lazy"
@@ -221,8 +247,8 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     const dayPhotos = photosByDate[date] ?? [];
     const dayVideos = videosByDate[date] ?? [];
     const isConfirming = confirming === date;
-    const photoCount = dayPhotos.length;
-    const videoCount = dayVideos.length;
+    const photoCount = dayPhotos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
+    const videoCount = showVideos ? dayVideos.length : 0;
     return (
       <div key={date}>
         <div className="flex items-center gap-3 mb-2 mt-4 first:mt-0">
@@ -240,7 +266,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
           )}
         </div>
         {renderPhotoGrid(dayPhotos)}
-        {renderVideoGrid(dayVideos)}
+        {showVideos && renderVideoGrid(dayVideos)}
       </div>
     );
   };
@@ -265,7 +291,13 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
               onClick={() => setFilter("keep")}
               className={`flex-1 py-1 transition-colors ${filter === "keep" ? "bg-green-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
             >
-              Keep only
+              Keep
+            </button>
+            <button
+              onClick={() => setFilter("delete")}
+              className={`flex-1 py-1 transition-colors ${filter === "delete" ? "bg-red-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
+            >
+              Delete
             </button>
           </div>
         </div>
@@ -277,10 +309,10 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
           }`}
         >
           All photos
-          <span className="ml-1 text-xs text-gray-400">({photos.length})</span>
+          <span className="ml-1 text-xs text-gray-400">({totalPhotoCount})</span>
         </button>
 
-        {dates.map((d) => (
+        {visibleDates.map((d) => (
           <button
             key={d}
             onClick={() => setSelectedDate(d)}
@@ -297,7 +329,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
       {/* Main */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {selectedDate === "all"
-          ? dates.map((d) => renderDaySection(d))
+          ? visibleDates.map((d) => renderDaySection(d))
           : renderDaySection(selectedDate)}
       </div>
     </div>
