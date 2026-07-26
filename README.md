@@ -47,8 +47,34 @@ Then open http://127.0.0.1:8765 in a browser.
 - **Tournament compare** — step through head-to-head matchups, pick winners
 - **Manual compare** — choose any two images for side-by-side comparison
 - **Cluster-by-cluster** — navigate with Prev/Next or jump with dropdown
-- **Safe deletion** — confirmed deletions go to a pending list; apply them from the Trash panel (or `scripts/delete_marked.py`) to move files into the project's `trash/` folder. Nothing is ever permanently deleted.
+- **Mirror-verified deletion** — confirmed deletions go to a pending list; apply them from the Trash panel (or `scripts/delete_marked.py`) to reclaim space on the primary drive. See below.
 - **Photo-first UI** — minimal chrome, images fill the screen
+
+## Deletion and the two drives
+
+Photos live on two drives: a **primary** (small, curated) and a **mirror** (large, kept whole).
+
+Applying deletes reclaims space on the primary by unlinking files there. A file is
+only unlinked once its copy on the mirror has been verified to exist at a matching
+size; anything that fails the check is left in place and reported, and stays on the
+pending list for a later run. Starred photos are never deleted.
+
+The mirror is never pruned by this tool — it keeps every file, and remains the copy
+you recover from. Each mirrored directory gets an appended `.sightread_deleted.txt`
+naming what was removed from the primary, so you can prune the mirror yourself later.
+
+Drive roots default to `/mnt/h0` and `/mnt/h1/h0` and are configurable:
+
+```bash
+export SIGHTREAD_PRIMARY_ROOT=/mnt/h0
+export SIGHTREAD_MIRROR_ROOT=/mnt/h1/h0
+```
+
+Preview before committing:
+
+```bash
+python scripts/delete_marked.py --dry-run
+```
 
 ## Cache
 
@@ -58,7 +84,7 @@ The pipeline caches DINOv3 embeddings and IQA scores so re-runs skip the expensi
 python scripts/clean_cache.py
 ```
 
-This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters.json`, `results.json`, and empties `outputs/trash/`.
+This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters.json`, `results.json`, and the `thumb_cache/` and `video_highlights_cache/` directories. Curation decisions (`to_delete.txt`, `favorites.json`, `curation.json`) are left alone.
 
 ## `results.json` Schema
 
