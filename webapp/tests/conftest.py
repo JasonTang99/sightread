@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -77,7 +78,6 @@ def _wait_for_server(timeout: int = 30) -> None:
 @pytest.fixture(scope="session")
 def output_dir(tmp_path_factory):
     out = tmp_path_factory.mktemp("sightread_out")
-    (out / "trash").mkdir()
     (out / "to_delete.txt").write_text("")
     (out / "results.json").write_text(json.dumps(FIXTURE_RESULTS))
     return out
@@ -130,10 +130,56 @@ def reset_state(output_dir, project_folder, webapp_server):
     yield
 
 
+_INFLIGHT: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _track_api_requests(page) -> None:
+    """Record in-flight API calls so `settle()` can wait for them.
+
+    Image requests are excluded: they are slow, numerous, and never what a test
+    is waiting on.
+    """
+    inflight: set = set()
+    _INFLIGHT[page] = inflight
+
+    def _started(req):
+        if "/api/" in req.url and "/api/image" not in req.url:
+            inflight.add(req)
+
+    def _done(req):
+        inflight.discard(req)
+
+    page.on("request", _started)
+    page.on("requestfinished", _done)
+    page.on("requestfailed", _done)
+
+
+def settle(page, timeout_ms: int = 10_000) -> None:
+    """Wait until the API calls a click just fired have completed.
+
+    Playwright's `wait_for_load_state("networkidle")` only tracks the current
+    navigation's lifecycle. These pages passed it during `goto`, so the call
+    returns immediately and never waits for the XHR a button click fired — a
+    test that then reads a file on disk races the server, and closing the page
+    aborts the request outright.
+    """
+    inflight = _INFLIGHT.get(page)
+    waited = 0
+    # One tick first: the click's request is dispatched asynchronously, so an
+    # immediate check can observe an empty set before it has even started.
+    page.wait_for_timeout(50)
+    while inflight and waited < timeout_ms:
+        page.wait_for_timeout(50)
+        waited += 50
+    if inflight:
+        raise AssertionError(f"API calls still in flight after {timeout_ms}ms: {inflight}")
+
+
 @pytest.fixture()
 def page_loaded(browser, webapp_server):
     ctx = browser.new_context()
     page = ctx.new_page()
+    _track_api_requests(page)
     page.goto(webapp_server)
     page.wait_for_selector("select", timeout=10_000)
     yield page
