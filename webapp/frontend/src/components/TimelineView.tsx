@@ -151,31 +151,20 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
   const confirmDay = async (date: string) => {
     setConfirming(date);
     try {
+      // Decisions are per photo, so confirming a day decides exactly that day's
+      // photos — no need to drag in the rest of any cluster that straddles it.
       const dayPhotos = photosByDate[date] ?? [];
-      const clusterIds = new Set(dayPhotos.map((p) => p.cluster_id));
-      const deletePaths: string[] = [];
-      const singletonDecisions: { cluster_id: number; kept: string[]; deleted: string[] }[] = [];
-
-      for (const cid of clusterIds) {
-        const clusterPhotos = photos.filter((p) => p.cluster_id === cid);
-        const kept: string[] = [];
-        const deleted: string[] = [];
-        for (const ph of clusterPhotos) {
-          const s = effectiveStatus(ph, overrides);
-          if (s === "delete") {
-            deleted.push(ph.path);
-            deletePaths.push(ph.path);
-          } else {
-            kept.push(ph.path);
-          }
-        }
-        singletonDecisions.push({ cluster_id: cid, kept, deleted });
-      }
+      const deletePaths = dayPhotos
+        .filter((p) => effectiveStatus(p, overrides) === "delete")
+        .map((p) => p.path);
 
       const res = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_paths: deletePaths, singleton_decisions: singletonDecisions }),
+        body: JSON.stringify({
+          delete_paths: deletePaths,
+          decided_paths: dayPhotos.map((p) => p.path),
+        }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       await fetchGallery();

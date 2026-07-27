@@ -11,7 +11,10 @@ from conftest import (  # noqa: F401
     _cluster_count,
     _singleton_count,
     output_dir,
+    queued,
+    seed_queue,
     settle,
+    statuses,
 )
 
 
@@ -119,16 +122,18 @@ class TestKeyboardNav:
     def test_enter_confirms(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
-        assert len(deleted) == 2  # ranks 2 and 3 deleted by default
+        assert len(queued(output_dir)) == 2  # ranks 2 and 3 deleted by default
 
     def test_enter_confirm_advances_and_records_decision(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         expect(page_loaded.locator("select")).to_have_value("1")
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "1" in decisions
-        assert len(decisions["1"]["deleted"]) == 2
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4380.JPG"] == "kept"  # rank 1
+        assert sorted(p for p, v in decisions.items() if v == "to_delete") == [
+            "demo_photos/DSCF4370.JPG",
+            "demo_photos/DSCF4375.JPG",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +172,7 @@ class TestConfirm:
     def test_confirm_writes_delete_list(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
         settle(page_loaded)
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
-        assert len(deleted) == 2
+        assert len(queued(output_dir)) == 2
 
     def test_confirm_advances_to_next_cluster(self, page_loaded: Page):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
@@ -178,13 +182,13 @@ class TestConfirm:
     def test_confirm_records_decision(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
         settle(page_loaded)
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert decisions["1"]["kept"] and len(decisions["1"]["deleted"]) == 2
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4380.JPG"] == "kept"
+        assert sum(1 for v in decisions.values() if v == "to_delete") == 2
 
     def test_skip_does_not_write_delete_list(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="Skip").click()
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
+        assert queued(output_dir) == []
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +207,14 @@ class TestUndo:
         self._confirm(page_loaded)
         page_loaded.get_by_role("button", name="↶ Undo").click()
         settle(page_loaded)
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
+        assert queued(output_dir) == []
 
     def test_undo_removes_decision(self, page_loaded: Page, output_dir):
         self._confirm(page_loaded)
         page_loaded.get_by_role("button", name="↶ Undo").click()
         settle(page_loaded)
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "1" not in decisions
+        decisions = statuses(output_dir)
+        assert decisions == {}  # every photo the cluster decided on is cleared
 
     def test_undo_disabled_after_undo(self, page_loaded: Page):
         self._confirm(page_loaded)
@@ -253,18 +256,18 @@ class TestSingles:
         self._open_singles(page_loaded)
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
+        deleted = queued(output_dir)
         assert len(deleted) == 1
         assert "DSCF4283" in deleted[0]
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "3" in decisions  # singleton cluster_id 3 recorded
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4283.JPG"] == "to_delete"
 
     def test_confirm_all_writes_delete_list(self, page_loaded: Page, output_dir):
         # No auto-keep threshold anymore: all unmarked singles default to Delete
         self._open_singles(page_loaded)
         page_loaded.get_by_role("button", name="✓ Confirm").click()
         settle(page_loaded)
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
+        deleted = queued(output_dir)
         assert len(deleted) == _singleton_count()
         assert any("DSCF4283" in d for d in deleted)
         assert any("DSCF4284" in d for d in deleted)
@@ -305,21 +308,17 @@ class TestTrashPanel:
         expect(page_loaded.locator(".border-blue-400").first).to_be_visible(timeout=5_000)
         page_loaded.get_by_role("button", name="Restore 1 selected").click()
         settle(page_loaded)
-        after = (output_dir / "to_delete.txt").read_text().strip().splitlines()
-        assert len(after) == 1  # started with 2 (ranks 2,3), restored 1
+        assert len(queued(output_dir)) == 1  # started with 2 (ranks 2,3), restored 1
 
     def test_apply_deletes_clears_list(self, page_loaded: Page, output_dir):
         # Nonexistent paths: apply must not touch real files during tests
-        (output_dir / "to_delete.txt").write_text(
-            "demo_photos/NOPE_1.JPG\ndemo_photos/NOPE_2.JPG\n"
-        )
+        seed_queue(output_dir, "demo_photos/NOPE_1.JPG", "demo_photos/NOPE_2.JPG")
         page_loaded.reload()
         page_loaded.get_by_text("▼ expand").click()
         page_loaded.once("dialog", lambda d: d.accept())
         page_loaded.get_by_role("button", name="🗑️ Delete 2 from primary drive").click()
         settle(page_loaded)
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
+        assert queued(output_dir) == []
         expect(page_loaded.get_by_text("Trash —")).not_to_be_visible()
 
 
@@ -366,10 +365,10 @@ class TestKeyboardNewBindings:
     def test_u_undo_after_confirm(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
-        assert len((output_dir / "to_delete.txt").read_text().splitlines()) == 2
+        assert len(queued(output_dir)) == 2
         page_loaded.keyboard.press("u")
         settle(page_loaded)
-        assert (output_dir / "to_delete.txt").read_text().strip() == ""
+        assert queued(output_dir) == []
 
     def test_question_mark_shows_help(self, page_loaded: Page):
         page_loaded.keyboard.press("?")

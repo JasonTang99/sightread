@@ -23,16 +23,17 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
+    DELETED,
+    FAVORITE,
+    KEPT,
     SINGLETON_DELETE_THRESHOLD,
-    append_to_delete_list,
+    TO_DELETE,
     load_decisions,
-    load_favorites,
     load_results,
-    read_delete_list,
-    remove_decision,
-    remove_from_delete_list,
-    save_decision,
-    toggle_favorite,
+    migrate_project_state,
+    paths_with_status,
+    save_decisions,
+    sort_clusters_chronologically,
 )
 
 from projects import (
@@ -102,9 +103,8 @@ async def _reject_non_local(request: Request, call_next):
 _active: ProjectContext | None = None
 _undo_stack: list[dict] = []
 
-# Every endpoint that mutates to_delete.txt, decisions.json, favorites.json or the
-# undo stack does a read-modify-write, so two overlapping requests can drop one
-# side's edit entirely. Uvicorn runs sync handlers on a threadpool, and the
+# Every endpoint that mutates decisions.json or the undo stack does a
+# read-modify-write, so two overlapping requests can drop one side's edit entirely. Uvicorn runs sync handlers on a threadpool, and the
 # thumbnail prewarmer adds background load on top, so the overlap is routine
 # rather than theoretical. Serialise the writers; readers are left alone.
 _curation_lock = threading.Lock()
@@ -121,16 +121,13 @@ def _require_active() -> ProjectContext:
     return _active
 
 
-def _push_undo(
-    delete_paths: list[str],
-    cluster_id: int | None = None,
-    cluster_ids: list[int] | None = None,
-) -> None:
-    _undo_stack.append({
-        "delete_paths": list(delete_paths),
-        "cluster_id": cluster_id,
-        "cluster_ids": list(cluster_ids or []),
-    })
+def _push_undo(previous: dict[str, str | None]) -> None:
+    """Remember each touched photo's prior status so undo can restore it.
+
+    A status is a single slot now, so undo has to put back what was there —
+    clearing to undecided would silently discard an earlier decision.
+    """
+    _undo_stack.append({"previous": dict(previous)})
     if len(_undo_stack) > 10:
         _undo_stack.pop(0)
 
@@ -148,37 +145,29 @@ def get_state():
     if not results_path.exists():
         return {"no_project": False, "needs_pipeline": True}
     data = load_results(results_path)
-    delete_list_path = ctx.output_dir / "to_delete.txt"
-    decisions_path = ctx.output_dir / "decisions.json"
-    decisions = load_decisions(decisions_path)
-    clusters = [c for c in data["clusters"] if len(c["images"]) > 1]
+    decisions = load_decisions(ctx.output_dir)
+    clusters = sort_clusters_chronologically(
+        [c for c in data["clusters"] if len(c["images"]) > 1]
+    )
     singletons = [c for c in data["clusters"] if len(c["images"]) == 1]
-    pending = read_delete_list(delete_list_path)
-    favorites_path = ctx.output_dir / "favorites.json"
     return {
         "no_project": False,
         "needs_pipeline": False,
         "clusters": clusters,
         "singletons": singletons,
         "singleton_delete_threshold": SINGLETON_DELETE_THRESHOLD,
-        "pending_delete_count": len(pending),
+        "pending_delete_count": len(paths_with_status(decisions, TO_DELETE)),
         "undo_available": len(_undo_stack) > 0,
-        "cluster_decisions": decisions,
-        "favorites": load_favorites(favorites_path),
+        "photo_decisions": decisions,
+        "favorites": paths_with_status(decisions, FAVORITE),
     }
 
 
-class SingletonDecision(BaseModel):
-    cluster_id: int
-    kept: list[str] = []
-    deleted: list[str] = []
-
-
 class ConfirmRequest(BaseModel):
-    cluster_id: int | None = None
-    delete_paths: list[str]
-    all_paths: list[str] = []
-    singleton_decisions: list[SingletonDecision] = []
+    delete_paths: list[str] = []
+    # Every photo this confirmation decides on, deletes included. Whatever is
+    # not in delete_paths is recorded as kept.
+    decided_paths: list[str] = []
 
 
 @app.post("/api/confirm")
@@ -187,39 +176,37 @@ def confirm(req: ConfirmRequest):
     for p in req.delete_paths:
         if not _in_allowed_dirs(_resolve_project_path(ctx, p), ctx):
             raise HTTPException(400, f"Path outside project: {p}")
-    delete_list_path = ctx.output_dir / "to_delete.txt"
-    decisions_path = ctx.output_dir / "decisions.json"
+    marked = set(req.delete_paths)
+    decided = list(dict.fromkeys([*req.decided_paths, *req.delete_paths]))
     with _curation_lock:
-        favs = set(load_favorites(ctx.output_dir / "favorites.json"))
-        delete_paths = [p for p in req.delete_paths if p not in favs]
-        if delete_paths:
-            append_to_delete_list(delete_paths, delete_list_path)
-        singleton_ids = [d.cluster_id for d in req.singleton_decisions]
-        _push_undo(delete_paths, req.cluster_id, singleton_ids)
-        if req.cluster_id is not None:
-            deleted_set = set(req.delete_paths)
-            kept = [p for p in req.all_paths if p not in deleted_set]
-            save_decision(decisions_path, req.cluster_id, kept, req.delete_paths)
-        for d in req.singleton_decisions:
-            save_decision(decisions_path, d.cluster_id, d.kept, d.deleted)
+        current = load_decisions(ctx.output_dir)
+        updates: dict[str, str | None] = {}
+        previous: dict[str, str | None] = {}
+        for p in decided:
+            was = current.get(p)
+            # A star outranks a delete mark; an applied delete is history and
+            # must not be resurrected as a pending one.
+            if was in (FAVORITE, DELETED):
+                continue
+            now = TO_DELETE if p in marked else KEPT
+            if was == now:
+                continue
+            updates[p] = now
+            previous[p] = was
+        if updates:
+            save_decisions(ctx.output_dir, updates)
+            _push_undo(previous)
     return {"ok": True}
 
 
 @app.post("/api/undo")
 def undo():
     ctx = _require_active()
-    delete_list_path = ctx.output_dir / "to_delete.txt"
-    decisions_path = ctx.output_dir / "decisions.json"
     with _curation_lock:
         if not _undo_stack:
             raise HTTPException(400, "Nothing to undo")
         entry = _undo_stack.pop()
-        if entry["delete_paths"]:
-            remove_from_delete_list(set(entry["delete_paths"]), delete_list_path)
-        if entry.get("cluster_id") is not None:
-            remove_decision(decisions_path, entry["cluster_id"])
-        for cid in entry.get("cluster_ids", []):
-            remove_decision(decisions_path, cid)
+        save_decisions(ctx.output_dir, entry["previous"])
     return {"ok": True}
 
 
@@ -229,18 +216,22 @@ class RestoreRequest(BaseModel):
 
 @app.post("/api/restore")
 def restore(req: RestoreRequest):
+    """Pull photos back out of the delete queue."""
     ctx = _require_active()
-    delete_list_path = ctx.output_dir / "to_delete.txt"
     with _curation_lock:
-        n = remove_from_delete_list(set(req.paths), delete_list_path)
-    return {"ok": True, "restored": n}
+        current = load_decisions(ctx.output_dir)
+        updates: dict[str, str | None] = {
+            p: KEPT for p in req.paths if current.get(p) == TO_DELETE
+        }
+        if updates:
+            save_decisions(ctx.output_dir, updates)
+    return {"ok": True, "restored": len(updates)}
 
 
 @app.get("/api/trash")
 def get_trash():
     ctx = _require_active()
-    delete_list_path = ctx.output_dir / "to_delete.txt"
-    return {"paths": read_delete_list(delete_list_path)}
+    return {"paths": paths_with_status(load_decisions(ctx.output_dir), TO_DELETE)}
 
 
 @app.post("/api/apply-deletes")
@@ -257,47 +248,57 @@ def apply_deletes():
     filenames deleted from the primary, so the mirror can be pruned later.
     """
     ctx = _require_active()
-    delete_list_path = ctx.output_dir / "to_delete.txt"
+    # An unmounted primary drive makes every source file look already-gone, and
+    # the sweep would settle the entire queue as `deleted` — photos that are
+    # still perfectly intact, now hidden from the gallery. Refuse to run at all
+    # rather than record a project-wide deletion that never happened.
+    if not ctx.folder.is_dir():
+        raise HTTPException(409, f"Project folder unavailable: {ctx.folder}. Is the drive mounted?")
 
     deleted: list[str] = []
     unmirrored: list[str] = []
     skipped = 0
-    starred = 0
     freed_bytes = 0
-    # Held across the whole run: a confirm landing mid-sweep would otherwise have
-    # its append erased by the delete-list rewrite below, or get its file unlinked
-    # before the user ever saw it in the pending list.
+    # Held across the whole run: a confirm landing mid-sweep would otherwise be
+    # erased by the status rewrite below, or get its file unlinked before the
+    # user ever saw it in the pending list.
     with _curation_lock:
-        favs = set(load_favorites(ctx.output_dir / "favorites.json"))
-        all_entries = read_delete_list(delete_list_path)
-        for entry in all_entries:
-            if entry in favs:
-                starred += 1  # starred after being marked; leave it alone
-                continue
+        # Only TO_DELETE is ever swept. A starred photo cannot hold that status
+        # — the two are one slot — so protection is structural, not a filter.
+        queue = paths_with_status(load_decisions(ctx.output_dir), TO_DELETE)
+        updates: dict[str, str | None] = {}
+        for entry in queue:
             src = _resolve_project_path(ctx, entry)
-            if not _in_allowed_dirs(src, ctx) or not src.is_file():
+            if not _in_allowed_dirs(src, ctx):
+                skipped += 1
+                continue
+            if not src.is_file():
+                # Already gone — settle the record rather than re-queue it
+                # forever, but still report it so the count covers every entry
+                # that left the queue.
+                updates[entry] = DELETED
                 skipped += 1
                 continue
             mirror = _mirror_path(src)
             if mirror is None or not mirror.is_file() or mirror.stat().st_size != src.stat().st_size:
+                # Stays queued so a later run retries once the mirror is in place.
                 unmirrored.append(entry)
                 continue
             size = src.stat().st_size
             src.unlink()
             freed_bytes += size
             deleted.append(src.name)
+            updates[entry] = DELETED
 
         manifest = _append_mirror_manifest(ctx, deleted)
-        # Everything the run considered is settled except the unmirrored files, which
-        # stay pending so a later run can retry them once their mirror is in place.
-        remove_from_delete_list(set(all_entries) - set(unmirrored), delete_list_path)
+        if updates:
+            save_decisions(ctx.output_dir, updates)
         # Undo entries reference files that are no longer on disk — drop them.
         _undo_stack.clear()
     return {
         "ok": True,
         "deleted": len(deleted),
         "skipped": skipped,
-        "starred": starred,
         "unmirrored": unmirrored,
         "freed_bytes": freed_bytes,
         "manifest": str(manifest) if manifest else None,
@@ -340,13 +341,26 @@ class FavoriteRequest(BaseModel):
 
 @app.post("/api/favorite")
 def toggle_fav(req: FavoriteRequest):
+    """Star or unstar. Starring outranks a pending delete and cancels it.
+
+    Unstarring falls back to `kept` rather than to whatever the photo was
+    before: a star is a stronger keep, so releasing it should never hand the
+    photo back to the delete queue.
+    """
     ctx = _require_active()
     abs_path = _resolve_project_path(ctx, req.path)
     if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(400, f"Path outside project: {req.path}")
-    favorites_path = ctx.output_dir / "favorites.json"
     with _curation_lock:
-        favorited = toggle_favorite(favorites_path, req.path)
+        current = load_decisions(ctx.output_dir)
+        if current.get(req.path) == FAVORITE:
+            favorited = False
+            save_decisions(ctx.output_dir, {req.path: KEPT})
+        elif current.get(req.path) == DELETED:
+            favorited = False  # already unlinked; nothing left to protect
+        else:
+            favorited = True
+            save_decisions(ctx.output_dir, {req.path: FAVORITE})
     return {"ok": True, "favorited": favorited}
 
 
@@ -413,7 +427,7 @@ def _is_exported_clip(abs_path: Path, folder: Path) -> bool:
 @app.get("/api/videos")
 def list_videos():
     ctx = _require_active()
-    pending = set(read_delete_list(ctx.output_dir / "to_delete.txt"))
+    pending = set(paths_with_status(load_decisions(ctx.output_dir), TO_DELETE))
     folder = ctx.folder.resolve()
     paths = sorted(
         str(rp)
@@ -576,21 +590,22 @@ def get_gallery():
     if not results_path.exists():
         raise HTTPException(400, "Run pipeline first")
     data = load_results(results_path)
-    decisions = load_decisions(ctx.output_dir / "decisions.json")
+    decisions = load_decisions(ctx.output_dir)
 
     all_photos = []
+    # The grid only distinguishes surviving from doomed; a star is a keep.
+    status_of = {KEPT: "keep", FAVORITE: "keep", TO_DELETE: "delete"}
     for cluster in data["clusters"]:
         cid = cluster["cluster_id"]
         csize = len(cluster["images"])
-        decision = decisions.get(str(cid))
-        kept_set = set(decision["kept"]) if decision else set()
-        deleted_set = set(decision["deleted"]) if decision else set()
         for img in cluster["images"]:
             p = img["path"]
-            if decision is not None:
-                status = "keep" if p in kept_set else "delete" if p in deleted_set else "undecided"
-            else:
-                status = "undecided"
+            # Applied deletes are gone from disk — results.json still lists them,
+            # but showing them would mean broken thumbnails and day counts that
+            # include photos the user can no longer act on.
+            if decisions.get(p) == DELETED:
+                continue
+            status = status_of.get(decisions.get(p), "undecided")
             all_photos.append({"path": p, "cluster_id": cid, "cluster_size": csize, "status": status})
 
     shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos])
@@ -792,6 +807,10 @@ def open_project(req: FolderRequest):
         raise HTTPException(400, f"Not a directory: {folder}")
     out_dir = project_output_dir(folder)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Opening a project is the only way it becomes active, so it is the one
+    # place legacy curation state has to be folded into decisions.json.
+    with _curation_lock:
+        migrate_project_state(out_dir)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
     _undo_stack.clear()
     with _prewarm_lock:
@@ -811,6 +830,8 @@ def run_pipeline_endpoint(req: FolderRequest):
     if job and job.running:
         raise HTTPException(409, "Pipeline already running")
     out_dir = project_output_dir(folder)
+    with _curation_lock:
+        migrate_project_state(out_dir)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
     _undo_stack.clear()
     start_pipeline(

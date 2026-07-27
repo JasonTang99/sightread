@@ -22,9 +22,9 @@ Updated: 2026-04-29
 
 ### P0 — Security / correctness
 
-- [x] **Race condition on confirm** — `/api/confirm` did read-modify-write with no locking; concurrent requests or double-clicks could lose deletions. Fixed 2026-07-26: `_curation_lock` (`webapp/server.py`) serialises `/api/confirm`, `/api/undo`, `/api/restore`, `/api/favorite` and `/api/apply-deletes`. Still outstanding: the individual writes in `webapp/utils.py` are plain `write_text`, so a crash mid-write can still truncate `to_delete.txt` / `decisions.json` / `favorites.json`. Make them atomic via temp-file + `os.replace`.
+- [x] **Race condition on confirm** — `/api/confirm` did read-modify-write with no locking; concurrent requests or double-clicks could lose deletions. Fixed 2026-07-26: `_curation_lock` (`webapp/server.py`) serialises `/api/confirm`, `/api/undo`, `/api/restore`, `/api/favorite` and `/api/apply-deletes`. Writes are atomic as of 2026-07-27: `_write_json_atomic` (`webapp/utils.py`) goes through a temp file + `Path.replace`, so a crash mid-write can no longer truncate `decisions.json`.
 
-- [ ] **Path traversal bypass** — `str(abs_path).startswith(str(PROJECT_ROOT))` is bypassable by sibling directories (e.g. `sightread2/`). Fix: use `abs_path.relative_to(PROJECT_ROOT)` in a try/except; also reject `Path(path).is_absolute()` early.
+- [x] **Path traversal bypass** — `str(abs_path).startswith(str(PROJECT_ROOT))` was bypassable by sibling directories (e.g. `sightread2/`). Already fixed: `_is_under` (`webapp/server.py`) does `path.relative_to(base)` in a try/except, and `_in_allowed_dirs` applies it to each allowed base. No `startswith` path checks remain in the codebase.
 
 ### P1 — UX / throughput
 
@@ -62,7 +62,7 @@ The decision artifacts are already separate from the pixels and already tiny:
 | Source photos + video | 104 GB |
 | Derived cache (`thumb_cache` 449 MB + `video_cache` 1.9 GB + highlights 66 MB) | 2.4 GB |
 | `/api/state` payload | 188 KB |
-| `to_delete.txt` + `favorites.json` + `user_clips.json` | **~17 KB** |
+| `decisions.json` + `user_clips.json` | **~17 KB** |
 
 So nothing about the data model needs to change. Serve the existing app over a tunnel;
 the remote browser pulls cached thumbs/clips, and `POST /api/apply-deletes` still runs

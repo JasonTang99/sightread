@@ -3,18 +3,26 @@ export interface ImageData {
   score: number;
   centrality: number;
   rank: number;
+  exif_timestamp?: number;
 }
 
 export interface Cluster {
   cluster_id: number;
   best_image: string;
   images: ImageData[];
+  // Unix seconds of the cluster's first shot; absent when no image has EXIF.
+  cluster_timestamp?: number;
 }
 
-export interface ClusterDecision {
-  kept: string[];
-  deleted: string[];
-}
+// Decisions are keyed by photo path, not cluster id: cluster ids are assigned
+// per pipeline run, so re-running renumbers them and strands every decision.
+// One status per photo — see webapp/utils.py for why these are a single field.
+//   kept       reviewed, staying
+//   favorite   starred; a stronger `kept` that deletion must never touch
+//   to_delete  marked for deletion, not yet applied — this is the queue
+//   deleted    already unlinked from the primary drive
+export type PhotoDecision = "kept" | "favorite" | "to_delete" | "deleted";
+export type PhotoDecisions = Record<string, PhotoDecision>;
 
 export interface AppState {
   no_project: boolean;
@@ -24,7 +32,7 @@ export interface AppState {
   singleton_delete_threshold: number;
   pending_delete_count: number;
   undo_available: boolean;
-  cluster_decisions: Record<string, ClusterDecision>;
+  photo_decisions: PhotoDecisions;
   favorites: string[];
 }
 
