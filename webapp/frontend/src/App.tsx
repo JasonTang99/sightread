@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "./hooks/useWindowKeydown";
+import { isDecided } from "./decisions";
 import { ClusterView } from "./components/ClusterView";
 import { FavoritesView } from "./components/FavoritesView";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -66,12 +67,12 @@ export default function App() {
   useEffect(() => {
     if (!state || state.no_project || landedRef.current) return;
     landedRef.current = true;
-    const decisions = state.cluster_decisions ?? {};
+    const decisions = state.photo_decisions ?? {};
     const clusters = state.clusters ?? [];
     const singletons = state.singletons ?? [];
     if (clusters.length + singletons.length === 0) return;  // nothing curated yet
-    if (clusters.some((c) => !(String(c.cluster_id) in decisions))) return;  // stay on clusters
-    setTab(singletons.some((c) => !(String(c.cluster_id) in decisions)) ? "singles" : "timeline");
+    if (clusters.some((c) => !isDecided(c, decisions))) return;  // stay on clusters
+    setTab(singletons.some((c) => !isDecided(c, decisions)) ? "singles" : "timeline");
   }, [state]);
 
   // A different project gets its own landing decision.
@@ -131,10 +132,10 @@ export default function App() {
     return <ProjectPicker onProjectOpened={reload} />;
   }
 
-  const decisions = state.cluster_decisions ?? {};
+  const decisions = state.photo_decisions ?? {};
   const hasClusters = (state.clusters?.length ?? 0) > 0;
   const hasSingles = (state.singletons?.length ?? 0) > 0;
-  const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !(String(c.cluster_id) in decisions));
+  const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !isDecided(c, decisions));
   const hasVideos = videos.length > 0;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
@@ -258,12 +259,12 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView clusters={state.clusters} clusterDecisions={state.cluster_decisions ?? {}} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} />
+              <ClusterView clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
                 singletons={state.singletons}
-                clusterDecisions={decisions}
+                decisions={decisions}
                 favorites={favorites}
                 onRefresh={reload}
                 onError={setError}

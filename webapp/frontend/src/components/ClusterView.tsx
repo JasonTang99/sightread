@@ -1,20 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
-import type { Cluster, ClusterDecision } from "../types";
+import { isDecided, isDoomed, isWiped } from "../decisions";
+import type { Cluster, PhotoDecisions } from "../types";
 
 type ClusterFilter = "all" | "wiped";
 
-// A cluster is "wiped" when it has been confirmed and nothing survived — every
-// image went to the delete list.
-function isWiped(cluster: Cluster, decisions: Record<string, ClusterDecision>): boolean {
-  const decision = decisions[String(cluster.cluster_id)];
-  if (!decision) return false;
-  return decision.kept.length === 0 && decision.deleted.length > 0;
-}
-
 interface Props {
   clusters: Cluster[];
-  clusterDecisions: Record<string, ClusterDecision>;
+  decisions: PhotoDecisions;
   favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
@@ -26,10 +19,10 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ clusters: allClusters, clusterDecisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
+export function ClusterView({ clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
   const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
-    const first = allClusters.findIndex((c) => !(String(c.cluster_id) in clusterDecisions));
+    const first = allClusters.findIndex((c) => !isDecided(c, decisions));
     return first === -1 ? 0 : first;
   });
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
@@ -40,12 +33,12 @@ export function ClusterView({ clusters: allClusters, clusterDecisions, favorites
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
 
   const wipedCount = useMemo(
-    () => allClusters.filter((c) => isWiped(c, clusterDecisions)).length,
-    [allClusters, clusterDecisions],
+    () => allClusters.filter((c) => isWiped(c, decisions)).length,
+    [allClusters, decisions],
   );
   const clusters = useMemo(
-    () => (filter === "wiped" ? allClusters.filter((c) => isWiped(c, clusterDecisions)) : allClusters),
-    [allClusters, clusterDecisions, filter],
+    () => (filter === "wiped" ? allClusters.filter((c) => isWiped(c, decisions)) : allClusters),
+    [allClusters, decisions, filter],
   );
 
   // Filtering rebuilds the list under the cursor; start over at the top.
@@ -71,13 +64,12 @@ export function ClusterView({ clusters: allClusters, clusterDecisions, favorites
     if (saved) {
       setKeeps(saved);
     } else {
-      const decision = clusterDecisions[String(clusterId)];
       const init: Record<string, boolean> = {};
-      if (decision) {
-        const deletedSet = new Set(decision.deleted);
-        for (const img of cluster.images) init[img.path] = !deletedSet.has(img.path);
-      } else {
-        for (const img of cluster.images) init[img.path] = img.rank === 1;
+      // Reopening a decided cluster restores what was kept; an undecided one
+      // pre-selects the top-ranked image.
+      const decided = isDecided(cluster, decisions);
+      for (const img of cluster.images) {
+        init[img.path] = decided ? !isDoomed(decisions[img.path]) : img.rank === 1;
       }
       setKeeps(init);
     }
@@ -111,9 +103,8 @@ export function ClusterView({ clusters: allClusters, clusterDecisions, favorites
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          cluster_id: cluster.cluster_id,
           delete_paths: deletePaths,
-          all_paths: cluster.images.map((img) => img.path),
+          decided_paths: cluster.images.map((img) => img.path),
         }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);

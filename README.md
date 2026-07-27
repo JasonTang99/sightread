@@ -84,7 +84,32 @@ The pipeline caches DINOv3 embeddings and IQA scores so re-runs skip the expensi
 python scripts/clean_cache.py
 ```
 
-This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters.json`, `results.json`, and the `thumb_cache/` and `video_highlights_cache/` directories. Curation decisions (`to_delete.txt`, `favorites.json`, `curation.json`) are left alone.
+This removes `embeddings_dinov3_mpcls_tta.npy`, `scores_ensemble.npz`, `clusters.json`, `results.json`, and the `thumb_cache/` and `video_highlights_cache/` directories. Curation decisions (`decisions.json`) are left alone.
+
+## Curation state
+
+All curation state lives in one file per project, `decisions.json`, holding a
+single status per photo path:
+
+| status | meaning |
+| --- | --- |
+| *(absent)* | never reviewed |
+| `kept` | reviewed, staying |
+| `favorite` | starred; a stronger `kept` that deletion never touches |
+| `to_delete` | marked for deletion, not yet applied — this *is* the queue |
+| `deleted` | already unlinked from the primary drive |
+
+It is keyed by photo path rather than cluster id because cluster ids are
+assigned per pipeline run, so re-running renumbers them and would strand every
+decision. It is one field rather than several files because the earlier split —
+`decisions.json` plus `to_delete.txt` plus `favorites.json` — had nothing
+keeping the three in agreement, and they drifted in practice: photos marked
+kept sat in the delete queue and would have been deleted.
+
+Projects still on the old layout are converted the first time they are opened.
+The superseded files are renamed to `*.migrated` rather than removed. Conflicts
+resolve away from deletion: a star beats everything, and an explicit keep beats
+a stale queue entry.
 
 ## `results.json` Schema
 

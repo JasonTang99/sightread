@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import server
 from projects import ProjectContext
+from utils import FAVORITE, KEPT, TO_DELETE, load_decisions, pending_deletes, save_decisions
 
 
 @pytest.fixture()
@@ -46,7 +47,11 @@ def _photo(folder, mirror_folder, name, body=b"pixels", mirror_body=b"pixels"):
 
 
 def _pending(output_dir, *paths):
-    (output_dir / "to_delete.txt").write_text("".join(f"{p}\n" for p in paths))
+    save_decisions(output_dir, {str(p): TO_DELETE for p in paths})
+
+
+def _queue(output_dir):
+    return sorted(pending_deletes(output_dir))
 
 
 def _manifest_lines(mirror_folder):
@@ -68,7 +73,7 @@ def test_deletes_file_with_matching_mirror(api):
     assert not src.exists()
     assert (mirror_folder / "a.jpg").exists()  # mirror untouched
     assert _manifest_lines(mirror_folder) == ["a.jpg"]
-    assert (output_dir / "to_delete.txt").read_text().strip() == ""
+    assert _queue(output_dir) == []
 
 
 def test_keeps_file_whose_mirror_is_missing(api):
@@ -82,7 +87,7 @@ def test_keeps_file_whose_mirror_is_missing(api):
     assert data["unmirrored"] == [str(src)]
     assert src.exists()
     # Stays pending so a later run can retry once the mirror is in place.
-    assert (output_dir / "to_delete.txt").read_text().strip() == str(src)
+    assert _queue(output_dir) == [str(src)]
 
 
 def test_keeps_file_whose_mirror_size_differs(api):
@@ -109,23 +114,77 @@ def test_mixed_batch_deletes_only_verified_files(api):
     assert not good.exists()
     assert bad.exists()
     assert _manifest_lines(mirror_folder) == ["good.jpg"]
-    assert (output_dir / "to_delete.txt").read_text().strip() == str(bad)
+    assert _queue(output_dir) == [str(bad)]
 
 
-def test_favorites_are_never_deleted(api):
+def test_starred_photo_cannot_reach_the_queue(api):
+    """Protection is structural: `favorite` and `to_delete` are one field, so
+    there is no starred-but-queued state left for the sweep to guard against."""
+    client, folder, output_dir, mirror_folder = api
+    src = _photo(folder, mirror_folder, "a.jpg")
+    save_decisions(output_dir, {str(src): FAVORITE})
+
+    assert _queue(output_dir) == []
+    data = client.post("/api/apply-deletes").json()
+
+    assert data["deleted"] == 0
+    assert src.exists()
+    assert _manifest_lines(mirror_folder) == []
+    assert load_decisions(output_dir)[str(src)] == FAVORITE
+
+
+def test_starring_a_queued_photo_cancels_the_delete(api):
     client, folder, output_dir, mirror_folder = api
     src = _photo(folder, mirror_folder, "a.jpg")
     _pending(output_dir, src)
-    (output_dir / "favorites.json").write_text(f'["{src}"]')
+
+    client.post("/api/favorite", json={"path": str(src)})
+
+    assert _queue(output_dir) == []
+    assert load_decisions(output_dir)[str(src)] == FAVORITE
+    client.post("/api/apply-deletes")
+    assert src.exists()
+
+
+def test_unmounted_drive_refuses_to_sweep(api, tmp_path):
+    """An unmounted primary makes every file look gone; settling the queue on
+    that basis would record the whole project as deleted."""
+    client, folder, output_dir, mirror_folder = api
+    src = _photo(folder, mirror_folder, "a.jpg")
+    _pending(output_dir, src)
+    # Simulate the drive going away: the project folder is no longer there.
+    server._active = ProjectContext(folder=tmp_path / "unmounted", output_dir=output_dir)
+
+    resp = client.post("/api/apply-deletes")
+
+    assert resp.status_code == 409
+    assert _queue(output_dir) == [str(src)]  # queue untouched
+    assert load_decisions(output_dir)[str(src)] == TO_DELETE
+
+
+def test_kept_photo_is_never_swept(api):
+    """The live drift: a photo marked kept must not be deleted, ever."""
+    client, folder, output_dir, mirror_folder = api
+    src = _photo(folder, mirror_folder, "a.jpg")
+    save_decisions(output_dir, {str(src): KEPT})
 
     data = client.post("/api/apply-deletes").json()
 
     assert data["deleted"] == 0
-    # Starred skips are reported rather than silently dropped, so the count in the
-    # UI accounts for every entry that left the pending list.
-    assert data["starred"] == 1
     assert src.exists()
-    assert _manifest_lines(mirror_folder) == []
+
+
+def test_applied_delete_is_recorded_as_gone(api):
+    client, folder, output_dir, mirror_folder = api
+    src = _photo(folder, mirror_folder, "a.jpg")
+    _pending(output_dir, src)
+
+    client.post("/api/apply-deletes")
+
+    assert load_decisions(output_dir)[str(src)] == "deleted"
+    # A settled delete must not be re-swept or re-queued on the next run.
+    assert _queue(output_dir) == []
+    assert client.post("/api/apply-deletes").json()["deleted"] == 0
 
 
 def test_manifest_appends_across_runs(api):
@@ -151,7 +210,7 @@ def test_missing_source_is_skipped_not_reported_as_unmirrored(api):
     assert data["skipped"] == 1
     assert data["deleted"] == 0
     assert data["unmirrored"] == []
-    assert (output_dir / "to_delete.txt").read_text().strip() == ""
+    assert _queue(output_dir) == []
 
 
 def test_file_outside_primary_root_is_never_deleted(tmp_path, monkeypatch):
@@ -167,7 +226,7 @@ def test_file_outside_primary_root_is_never_deleted(tmp_path, monkeypatch):
     )
     src = folder / "a.jpg"
     src.write_bytes(b"pixels")
-    (output_dir / "to_delete.txt").write_text(f"{src}\n")
+    save_decisions(output_dir, {str(src): TO_DELETE})
 
     client = TestClient(server.app, base_url="http://localhost")
     data = client.post("/api/apply-deletes").json()

@@ -57,8 +57,9 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
       const gb = (data.freed_bytes ?? 0) / 1024 ** 3;
       const parts = [`Deleted ${data.deleted} file(s) from the primary drive, freeing ${gb.toFixed(2)} GB`];
       if (data.unmirrored?.length) parts.push(`${data.unmirrored.length} left pending (no verified mirror copy)`);
-      if (data.starred) parts.push(`${data.starred} kept (starred)`);
-      if (data.skipped) parts.push(`${data.skipped} skipped (already gone)`);
+      // No starred counter: a star and a delete mark are one field now, so a
+      // starred photo can never reach the queue in the first place.
+      if (data.skipped) parts.push(`${data.skipped} skipped`);
       if (data.manifest) parts.push(`list written to ${data.manifest}`);
       setApplyResult(`${parts.join(" · ")}.`);
       setSelected(new Set());

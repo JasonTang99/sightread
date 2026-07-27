@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import server
 from projects import ProjectContext
+from utils import TO_DELETE, save_decisions
 
 
 def _write_highlights(output_dir, videos):
@@ -148,7 +149,7 @@ class TestApiVideosEndpoint:
         client, folder, out = api
         keep = _make_video(folder, "keep.mp4")
         gone = _make_video(folder, "gone.mp4")
-        (out / "to_delete.txt").write_text(gone + "\n")
+        save_decisions(out, {gone: TO_DELETE})
         _write_highlights(out, {
             keep: {"fingerprint": "1:1", "duration": 34.5, "clips": CLIPS},
             gone: {"fingerprint": "2:2", "duration": 10.0, "clips": []},

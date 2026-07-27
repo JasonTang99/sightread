@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Delete images listed in the to-delete file from the primary drive.
+"""Delete every photo marked `to_delete` in a project's decisions.json.
 
 Photos live on two drives: the primary (small, curated) and the mirror (large,
 kept whole). Reclaiming space means actually removing files from the primary, so
 each listed image is unlinked — but only after its copy on the mirror has been
 shown to exist at a matching size. Anything failing that check is left alone and
-reported, and stays in the delete list for a later run.
+reported, and keeps its `to_delete` status for a later run.
+
+Only the `to_delete` status is ever swept. A starred photo holds `favorite`
+instead, so it cannot reach the queue — protection is structural rather than a
+filter this script has to remember to apply.
 
 The mirror keeps every file. Each mirrored directory gets an appended
 `.sightread_deleted.txt` naming what was removed from the primary, so the mirror
@@ -17,13 +21,26 @@ $SIGHTREAD_MIRROR_ROOT (default /mnt/h1/h0), and must match webapp/server.py.
 Usage:
     python scripts/delete_marked.py --dry-run
     python scripts/delete_marked.py
-    python scripts/delete_marked.py --delete-file outputs/to_delete.txt --root /path/to/photos
+    python scripts/delete_marked.py --output-dir outputs --root /path/to/photos
 """
 
 import argparse
-import json
 import os
+import sys
 from pathlib import Path
+
+# The webapp owns the decisions schema and its legacy migration. Duplicating
+# either here would mean two implementations of the rules that decide what gets
+# unlinked, so this reuses them the same way pipeline.py reuses project paths.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+from utils import (  # noqa: E402
+    DELETED,
+    TO_DELETE,
+    load_decisions,
+    migrate_project_state,
+    paths_with_status,
+    save_decisions,
+)
 
 _OUTPUT_DIR = Path(os.environ.get("SIGHTREAD_OUTPUT_DIR", "outputs"))
 PRIMARY_ROOT = Path(os.environ.get("SIGHTREAD_PRIMARY_ROOT", "/mnt/h0"))
@@ -60,16 +77,6 @@ def _mirror_verdict(src: Path) -> tuple[Path | None, str | None]:
     return mirror, None
 
 
-def _load_favorites(output_dir: Path) -> set[str]:
-    p = output_dir / "favorites.json"
-    if not p.exists():
-        return set()
-    try:
-        return set(json.loads(p.read_text()))
-    except Exception:
-        return set()
-
-
 def _append_manifests(by_dir: dict[Path, list[str]]) -> None:
     for mirror_dir, names in by_dir.items():
         manifest = mirror_dir / MIRROR_MANIFEST_NAME
@@ -80,23 +87,33 @@ def _append_manifests(by_dir: dict[Path, list[str]]) -> None:
 
 
 def delete_marked(
-    delete_file: str = "outputs/to_delete.txt",
+    output_dir: str = "outputs",
     dry_run: bool = False,
     root: str | None = None,
 ) -> None:
-    """Unlink each listed file from the primary drive once its mirror is verified."""
-    delete_path = Path(delete_file)
-    if not delete_path.exists():
-        print(f"No delete file found at {delete_path}. Nothing to do.")
+    """Unlink each marked file from the primary drive once its mirror is verified."""
+    out = Path(output_dir)
+    if not (out / "decisions.json").exists() and not out.is_dir():
+        print(f"No project state found at {out}. Nothing to do.")
         return
 
-    paths = [line.strip() for line in delete_path.read_text().splitlines() if line.strip()]
+    # Fold any legacy to_delete.txt / favorites.json in before reading, so the
+    # CLI and the webapp can never disagree about what is queued.
+    if not dry_run and migrate_project_state(out):
+        print(f"Migrated legacy curation state in {out}")
+
+    paths = paths_with_status(load_decisions(out), TO_DELETE)
     if not paths:
-        print("Delete file is empty. Nothing to do.")
+        print("Nothing marked for deletion. Nothing to do.")
         return
+
+    # An unmounted primary drive makes every source file look already-gone, and
+    # the sweep would settle the whole queue as `deleted` — intact photos
+    # recorded as destroyed. Refuse rather than write that down.
+    if not PRIMARY_ROOT.is_dir():
+        raise SystemExit(f"Primary drive not mounted at {PRIMARY_ROOT}. Refusing to run.")
 
     root_path = Path(root).resolve() if root else None
-    favorites = _load_favorites(delete_path.parent)
 
     print(f"Found {len(paths)} image(s) to delete")
     print(f"Primary: {PRIMARY_ROOT}   Mirror: {MIRROR_ROOT}")
@@ -109,13 +126,10 @@ def delete_marked(
     unmirrored: list[str] = []
     manifest_by_dir: dict[Path, list[str]] = {}
 
+    settled: dict[str, str | None] = {}
+
     for p in paths:
         src = Path(p)
-
-        if p in favorites:
-            print(f"  Skip (starred): {p}")
-            skipped += 1
-            continue
 
         if root_path is not None and not _check_path_contained(src, root_path):
             print(f"  Skip (outside root {root_path}): {p}")
@@ -123,7 +137,9 @@ def delete_marked(
             continue
 
         if not src.is_file():
+            # Already gone — settle the record rather than re-queue it forever.
             print(f"  Skip (not found): {p}")
+            settled[p] = DELETED
             skipped += 1
             continue
 
@@ -140,6 +156,7 @@ def delete_marked(
             src.unlink()
             print(f"  Deleted: {p}")
             manifest_by_dir.setdefault(mirror.parent, []).append(src.name)
+            settled[p] = DELETED
         deleted += 1
         freed_bytes += size
 
@@ -150,23 +167,24 @@ def delete_marked(
         return
 
     _append_manifests(manifest_by_dir)
-    # Everything considered is settled except the unverified files, which stay
-    # pending so a later run can retry them once their mirror is in place.
-    delete_path.write_text("".join(f"{p}\n" for p in unmirrored))
+    # Everything considered is settled except the unverified files, which keep
+    # their to_delete status so a later run retries them once mirrored.
+    if settled:
+        save_decisions(out, settled)
     print(f"\n✅ Deleted {deleted} image(s) from {PRIMARY_ROOT}, freeing {gb:.2f} GB ({skipped} skipped)")
     if unmirrored:
-        print(f"⚠️  Kept {len(unmirrored)} image(s) with no verified mirror — still listed in {delete_path}")
+        print(f"⚠️  Kept {len(unmirrored)} image(s) with no verified mirror — still marked to_delete")
     else:
-        print(f"Cleared {delete_path}")
+        print("Delete queue is now empty")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Delete images listed in the to-delete file from the primary drive"
+        description="Delete photos marked to_delete from the primary drive"
     )
     parser.add_argument(
-        "--delete-file", default=str(_OUTPUT_DIR / "to_delete.txt"),
-        help="Path to the delete list file (default: $SIGHTREAD_OUTPUT_DIR/to_delete.txt)",
+        "--output-dir", default=str(_OUTPUT_DIR),
+        help="Project output dir holding decisions.json (default: $SIGHTREAD_OUTPUT_DIR)",
     )
     parser.add_argument(
         "--root", default=None,
@@ -177,7 +195,7 @@ def main():
         help="Preview without deleting anything",
     )
     args = parser.parse_args()
-    delete_marked(args.delete_file, args.dry_run, root=args.root)
+    delete_marked(args.output_dir, args.dry_run, root=args.root)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
-import type { Cluster } from "../types";
+import type { Cluster, PhotoDecisions } from "../types";
 
 interface Props {
   singletons: Cluster[];
-  clusterDecisions: Record<string, unknown>;
+  decisions: PhotoDecisions;
   favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
@@ -17,7 +17,7 @@ interface FlatImage {
   score: number;
 }
 
-export function SingletonsView({ singletons, clusterDecisions, favorites, onRefresh, onError, onToggleFavorite }: Props) {
+export function SingletonsView({ singletons, decisions, favorites, onRefresh, onError, onToggleFavorite }: Props) {
   const [idx, setIdx] = useState(0);
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -41,7 +41,7 @@ export function SingletonsView({ singletons, clusterDecisions, favorites, onRefr
       }
       return next;
     });
-    const firstUnconfirmed = items.findIndex((it) => !(String(it.cluster_id) in clusterDecisions));
+    const firstUnconfirmed = items.findIndex((it) => !(it.path in decisions));
     setIdx(firstUnconfirmed >= 0 ? firstUnconfirmed : 0);
   }, [singletons.length]);
 
@@ -54,8 +54,7 @@ export function SingletonsView({ singletons, clusterDecisions, favorites, onRefr
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         delete_paths: keep ? [] : [it.path],
-        all_paths: [it.path],
-        singleton_decisions: [{ cluster_id: it.cluster_id, kept: keep ? [it.path] : [], deleted: keep ? [] : [it.path] }],
+        decided_paths: [it.path],
       }),
     })
       .then((r) => { if (!r.ok) throw new Error(`Confirm failed: ${r.status}`); })
@@ -105,16 +104,13 @@ export function SingletonsView({ singletons, clusterDecisions, favorites, onRefr
     try {
       const isKeep = (it: FlatImage) => keeps[it.path] ?? false;
       const deletePaths = items.filter((it) => !isKeep(it)).map((it) => it.path);
-      const allPaths = items.map((it) => it.path);
-      const singletonDecisions = items.map((it) => ({
-        cluster_id: it.cluster_id,
-        kept: isKeep(it) ? [it.path] : [],
-        deleted: isKeep(it) ? [] : [it.path],
-      }));
       const res = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_paths: deletePaths, all_paths: allPaths, singleton_decisions: singletonDecisions }),
+        body: JSON.stringify({
+          delete_paths: deletePaths,
+          decided_paths: items.map((it) => it.path),
+        }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       await onRefresh();
@@ -129,7 +125,7 @@ export function SingletonsView({ singletons, clusterDecisions, favorites, onRefr
 
   const current = items[Math.min(idx, items.length - 1)];
   const isKept = keeps[current.path] ?? false;
-  const isConfirmed = String(current.cluster_id) in clusterDecisions;
+  const isConfirmed = current.path in decisions;
   const nDelete = items.filter((it) => !(keeps[it.path] ?? false)).length;
   const favSet = new Set(favorites);
   const isFav = favSet.has(current.path);
