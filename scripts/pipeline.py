@@ -36,6 +36,12 @@ LOOSE_THRESHOLD = 0.22   # same-scene
 BURST_WINDOW_S = 3.0     # EXIF timestamp delta to pre-group
 MAX_CLUSTER_GAP_S = 3600.0  # max EXIF gap within a cluster (1 hr)
 
+# Re-shoot merge: same subject framed portrait *and* landscape lands in two
+# clusters because rotating the camera moves the embedding further than the
+# same-scene threshold. Merge those back when they are close in time.
+ORIENT_MERGE_WINDOW_S = 120.0  # max EXIF gap between the two framings
+ORIENT_MERGE_THRESHOLD = 0.38  # cosine dist between cluster centroids
+
 # Score weights (ensemble)
 SCORE_WEIGHTS = {
     "musiq": 0.35,
@@ -58,6 +64,7 @@ _FAISS_K_NEIGHBORS = 50     # neighbors per point for connectivity graph
 SCORE_BATCH_SIZE = 16
 SCORE_RESIZE = 512           # resize to this before neural metrics
 _EXIF_DATETIME_TAG = next(k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal")
+_EXIF_ORIENTATION_TAG = 0x0112
 
 
 # ---------------------------------------------------------------------------
@@ -72,39 +79,56 @@ def _scan_image_paths(image_dir: str) -> list[str]:
     )
 
 
-def _read_exif_timestamp(path: str) -> float | None:
+def _parse_exif_timestamp(exif) -> float | None:
     """Return EXIF DateTimeOriginal as unix seconds, or None."""
+    raw = None
     try:
-        with Image.open(path) as img:
-            exif = img.getexif()
-            if not exif:
-                return None
-            raw = None
-            try:
-                ifd = exif.get_ifd(ExifTags.IFD.Exif)
-                raw = ifd.get(_EXIF_DATETIME_TAG)
-            except Exception:
-                pass
-            if not raw:
-                raw = exif.get(_EXIF_DATETIME_TAG)
-            if not raw:
-                # Fallback to DateTime (0x0132) top-level
-                raw = exif.get(0x0132)
-            if not raw:
-                return None
-            dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
-            return dt.timestamp()
+        ifd = exif.get_ifd(ExifTags.IFD.Exif)
+        raw = ifd.get(_EXIF_DATETIME_TAG)
     except Exception:
+        pass
+    if not raw:
+        raw = exif.get(_EXIF_DATETIME_TAG)
+    if not raw:
+        # Fallback to DateTime (0x0132) top-level
+        raw = exif.get(0x0132)
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S").timestamp()
+    except ValueError:
         return None
 
 
-def load_paths_and_timestamps(image_dir: str) -> tuple[list[str], list[float | None]]:
+def _read_exif_meta(path: str) -> tuple[float | None, str]:
+    """Return (unix timestamp or None, orientation in {portrait,landscape,square}).
+
+    Orientation is the *displayed* one: EXIF Orientation values 5-8 rotate by
+    90°, which swaps the stored width and height.
+    """
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            exif = img.getexif()
+            ts = _parse_exif_timestamp(exif) if exif else None
+            if exif and exif.get(_EXIF_ORIENTATION_TAG) in (5, 6, 7, 8):
+                width, height = height, width
+    except Exception:
+        return None, "unknown"
+    if width == height:
+        return ts, "square"
+    return ts, "portrait" if height > width else "landscape"
+
+
+def load_paths_and_meta(image_dir: str) -> tuple[list[str], list[float | None], list[str]]:
     paths = _scan_image_paths(image_dir)
     if not paths:
         raise RuntimeError(f"No images found in {image_dir}")
-    timestamps = [_read_exif_timestamp(p) for p in tqdm(paths, desc="Reading EXIF")]
+    meta = [_read_exif_meta(p) for p in tqdm(paths, desc="Reading EXIF")]
+    timestamps = [t for t, _ in meta]
+    orientations = [o for _, o in meta]
     print(f"Found {len(paths)} images ({sum(t is not None for t in timestamps)} with EXIF timestamps)")
-    return paths, timestamps
+    return paths, timestamps, orientations
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +365,103 @@ def calibrate_threshold(embeddings: np.ndarray, fallback: float) -> float:
     return chosen
 
 
+def _merge_orientation_pairs(
+    embeddings: np.ndarray,
+    timestamps: list[float | None],
+    orientations: list[str],
+    labels: np.ndarray,
+    window_s: float,
+    threshold: float,
+    max_gap_s: float,
+) -> np.ndarray:
+    """Merge clusters that hold the same subject shot portrait *and* landscape.
+
+    Rotating the camera moves a photo further in embedding space than the
+    same-scene threshold allows, so the two framings split apart. A pair is
+    rejoined only when it is close in time, differs in framing, and the cluster
+    centroids are still within `threshold`.
+    """
+    groups: dict[int, list[int]] = {}
+    for i, lab in enumerate(labels):
+        groups.setdefault(int(lab), []).append(i)
+
+    info: dict[int, dict] = {}
+    for lab, idxs in groups.items():
+        ts = [timestamps[i] for i in idxs if timestamps[i] is not None]
+        kinds = {orientations[i] for i in idxs if orientations[i] in ("portrait", "landscape")}
+        # Without a timestamp there is no hint to merge on; without a known
+        # framing there is nothing to pair across.
+        if not ts or not kinds:
+            continue
+        centroid = embeddings[idxs].mean(axis=0)
+        centroid /= max(np.linalg.norm(centroid), 1e-8)
+        info[lab] = {
+            "idxs": idxs,
+            "t_min": min(ts),
+            "t_max": max(ts),
+            "kinds": kinds,
+            "centroid": centroid,
+        }
+
+    ordered = sorted(info, key=lambda lab: info[lab]["t_min"])
+    candidates: list[tuple[float, int, int]] = []
+    for pos, a in enumerate(ordered):
+        left = info[a]
+        for b in ordered[pos + 1:]:
+            right = info[b]
+            # `ordered` is sorted by t_min, so once one candidate is out of
+            # range every later one is too.
+            if right["t_min"] - left["t_max"] > window_s:
+                break
+            if left["kinds"] == right["kinds"]:
+                continue
+            dist = 1.0 - float(left["centroid"] @ right["centroid"])
+            if dist <= threshold:
+                candidates.append((dist, a, b))
+
+    parent = {lab: lab for lab in info}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    span = {lab: (info[lab]["t_min"], info[lab]["t_max"]) for lab in info}
+    merged = 0
+    for _dist, a, b in sorted(candidates):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            continue
+        lo = min(span[ra][0], span[rb][0])
+        hi = max(span[ra][1], span[rb][1])
+        # Chained merges must still respect the stage-3 span limit.
+        if max_gap_s and max_gap_s > 0 and hi - lo > max_gap_s:
+            continue
+        parent[rb] = ra
+        span[ra] = (lo, hi)
+        merged += 1
+
+    if merged:
+        for lab in info:
+            root = find(lab)
+            if root != lab:
+                for i in info[lab]["idxs"]:
+                    labels[i] = root
+        print(f"Merged {merged} portrait/landscape cluster pair(s) shot within {window_s}s")
+    return labels
+
+
 def cluster_embeddings(
     embeddings: np.ndarray,
     timestamps: list[float | None],
+    orientations: list[str] | None = None,
     tight: float = TIGHT_THRESHOLD,
     loose: float = LOOSE_THRESHOLD,
     burst_window_s: float = BURST_WINDOW_S,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
+    orient_window_s: float = ORIENT_MERGE_WINDOW_S,
+    orient_threshold: float = ORIENT_MERGE_THRESHOLD,
     auto_loose: bool = False,
 ) -> dict[int, list[int]]:
     """Two-stage clustering: burst pre-group, tight dedup inside parent groups."""
@@ -419,6 +533,18 @@ def cluster_embeddings(
                 for i in new_split:
                     final_labels[i] = next_id
                 next_id += 1
+
+    # Stage 4: rejoin the same subject shot in both portrait and landscape
+    if orientations is not None and orient_window_s > 0:
+        final_labels = _merge_orientation_pairs(
+            embeddings,
+            timestamps,
+            orientations,
+            final_labels,
+            window_s=orient_window_s,
+            threshold=orient_threshold,
+            max_gap_s=max_gap_s,
+        )
 
     clusters: dict[int, list[int]] = {}
     for i, lab in enumerate(final_labels):
@@ -714,14 +840,29 @@ def rank_and_save(
                 }
             image_entries.append(entry)
         best_score = scores[indices[ranked[0]]]
-        results_clusters.append({
+        cluster_ts = None
+        if timestamps is not None:
+            shot_at = [timestamps[i] for i in indices if timestamps[i] is not None]
+            cluster_ts = min(shot_at) if shot_at else None
+        entry_cluster: dict = {
             "cluster_id": int(cid),
             "cluster_score": round(float(best_score), 4),
             "best_image": paths[indices[ranked[0]]],
             "images": image_entries,
-        })
+        }
+        if cluster_ts is not None:
+            entry_cluster["cluster_timestamp"] = cluster_ts
+        results_clusters.append(entry_cluster)
 
-    results_clusters.sort(key=lambda c: c["cluster_score"], reverse=True)
+    # Chronological by first shot. Clusters with no EXIF have no place on the
+    # timeline, so they trail the rest ordered by score.
+    results_clusters.sort(
+        key=lambda c: (
+            c.get("cluster_timestamp") is None,
+            c.get("cluster_timestamp") or 0.0,
+            -c["cluster_score"],
+        )
+    )
 
     results = {"schema_version": 1, "clusters": results_clusters}
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -897,6 +1038,8 @@ def run_pipeline(
     auto_loose: bool = False,
     flip_tta: bool = False,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
+    orient_window_s: float = ORIENT_MERGE_WINDOW_S,
+    orient_threshold: float = ORIENT_MERGE_THRESHOLD,
     video_highlights: bool = True,
     force_video_highlights: bool = False,
 ) -> dict:
@@ -904,7 +1047,7 @@ def run_pipeline(
     emb_cache = out / "embeddings_dinov3_mpcls_tta.npy"
     score_cache = out / "scores_ensemble.npz"
 
-    paths, timestamps = load_paths_and_timestamps(image_dir)
+    paths, timestamps, orientations = load_paths_and_meta(image_dir)
 
     embeddings = compute_embeddings(
         paths,
@@ -916,9 +1059,12 @@ def run_pipeline(
     clusters = cluster_embeddings(
         embeddings,
         timestamps,
+        orientations,
         tight=tight,
         loose=loose,
         max_gap_s=max_gap_s,
+        orient_window_s=orient_window_s,
+        orient_threshold=orient_threshold,
         auto_loose=auto_loose,
     )
 
@@ -950,6 +1096,11 @@ def main():
     parser.add_argument("--no-flip-tta", action="store_true")
     parser.add_argument("--max-gap-s", type=float, default=MAX_CLUSTER_GAP_S,
                         help="Max EXIF seconds between images in same cluster (0 to disable)")
+    parser.add_argument("--orient-window-s", type=float, default=ORIENT_MERGE_WINDOW_S,
+                        help="Max EXIF seconds apart to merge a portrait/landscape "
+                             "re-shoot of the same subject (0 to disable)")
+    parser.add_argument("--orient-threshold", type=float, default=ORIENT_MERGE_THRESHOLD,
+                        help="Centroid cosine-dist ceiling for that merge")
     parser.add_argument("--no-video-highlights", action="store_true",
                         help="Skip the clipfarm video-highlights step")
     parser.add_argument("--force-video-highlights", action="store_true",
@@ -976,6 +1127,8 @@ def main():
         auto_loose=args.auto_loose,
         flip_tta=not args.no_flip_tta,
         max_gap_s=args.max_gap_s,
+        orient_window_s=args.orient_window_s,
+        orient_threshold=args.orient_threshold,
         video_highlights=not args.no_video_highlights,
         force_video_highlights=args.force_video_highlights,
     )
