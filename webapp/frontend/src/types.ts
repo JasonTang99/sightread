@@ -36,13 +36,19 @@ export interface AppState {
   favorites: string[];
 }
 
+// What a grid draws: the four stored decisions collapsed to survives / doomed /
+// not yet looked at. Videos carry the same statuses as photos.
+export type GridStatus = "keep" | "delete" | "undecided";
+
 export interface GalleryPhoto {
   path: string;
   shot_at: string | null;
   cluster_id: number;
   cluster_size: number;
-  status: "keep" | "delete" | "undecided";
+  status: GridStatus;
 }
+
+export type VideoStatuses = Record<string, GridStatus>;
 
 export type ProjectStatus = "ready" | "stale" | "never_run" | "running";
 

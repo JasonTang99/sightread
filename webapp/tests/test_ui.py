@@ -1,12 +1,17 @@
 """Playwright tests for the Sightread React webapp."""
 
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
+import requests
 from playwright.sync_api import Page, expect
 
 from conftest import (  # noqa: F401
+    BASE_URL,
     FIXTURE_RESULTS,
     _cluster_count,
     _singleton_count,
@@ -36,7 +41,12 @@ class TestPageLoad:
         expect(page_loaded.get_by_role("button", name="↶ Undo")).to_be_disabled()
 
     def test_progress_bar_visible(self, page_loaded: Page):
-        expect(page_loaded.locator(".bg-blue-500").first).to_be_visible()
+        # By test id, not by colour class: the header's session meter uses the
+        # same blue and would otherwise win `.first` purely by DOM order.
+        expect(page_loaded.get_by_test_id("cluster-progress")).to_be_visible()
+
+    def test_session_progress_visible(self, page_loaded: Page):
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("reviewed")
 
     def test_cluster_select_shows_first(self, page_loaded: Page):
         # Select dropdown should show "1/N" for the first cluster
@@ -383,3 +393,103 @@ class TestKeyboardNewBindings:
         page_loaded.keyboard.press("?")
         page_loaded.keyboard.press("Escape")
         expect(page_loaded.get_by_text("Keyboard shortcuts")).not_to_be_visible()
+
+
+# ---------------------------------------------------------------------------
+# Timeline video tiles
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestTimelineVideos:
+    """Videos are curated like photos, so the timeline has to show their status.
+
+    Its tiles are still frames rather than <video> elements: media elements load
+    eagerly, and at six connections per origin they starve the lazy photo
+    thumbnails below them — with 89 videos in a real project, 150 photos never
+    got requested at all.
+    """
+
+    @pytest.fixture()
+    def video_project(self, tmp_path, webapp_server):
+        """Point the server at a throwaway folder holding one real video."""
+        folder = tmp_path / "clips"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "results.json").write_text(json.dumps({"clusters": []}))
+        video = folder / "a.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(video)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, str(video.resolve())
+
+    def _open_timeline(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.get_by_role("button", name="Timeline").click()
+        settle(page)
+
+    def test_tile_uses_a_poster_not_a_video_element(self, page_loaded: Page, video_project):
+        self._open_timeline(page_loaded)
+        expect(page_loaded.locator("img[src*='/api/video-poster']")).to_have_count(1)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_undecided_video_is_grey(self, page_loaded: Page, video_project):
+        self._open_timeline(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-gray-300"))
+
+    def test_marked_video_is_red(self, page_loaded: Page, video_project):
+        out, video = video_project
+        seed_queue(out, video)
+        self._open_timeline(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-red-400"))
+
+    def test_confirm_day_records_a_video_keep(self, page_loaded: Page, video_project):
+        out, video = video_project
+        self._open_timeline(page_loaded)
+        page_loaded.get_by_role("button", name="✓ Confirm Day").click()
+        settle(page_loaded)
+        assert statuses(out).get(video) == "kept"
+
+    def test_clicking_a_tile_then_confirming_queues_the_video(self, page_loaded: Page, video_project):
+        out, video = video_project
+        self._open_timeline(page_loaded)
+        page_loaded.locator("img[src*='/api/video-poster']").click()
+        page_loaded.get_by_role("button", name="✓ Confirm Day").click()
+        settle(page_loaded)
+        assert queued(out) == [video]
+
+    def test_space_records_a_delete_immediately(self, page_loaded: Page, video_project):
+        """Marks used to live only in component state until a bulk confirm."""
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press(" ")
+        settle(page_loaded)
+        assert queued(out) == [video]
+
+    def test_enter_records_a_keep_immediately(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        assert statuses(out).get(video) == "kept"
+
+    def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-green-400"))

@@ -28,6 +28,8 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   const [cols, setCols] = useState(2);
   const [submitting, setSubmitting] = useState(false);
+  const [sweeping, setSweeping] = useState(false);
+  const [confirmSweep, setConfirmSweep] = useState(false);
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
@@ -91,6 +93,42 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
     const next: Record<string, boolean> = {};
     for (const img of cluster.images) next[img.path] = img.rank === 1;
     setKeeps(next);
+  };
+
+  const undecidedCount = useMemo(
+    () => allClusters.filter((c) => !isDecided(c, decisions)).length,
+    [allClusters, decisions],
+  );
+
+  // Skipping leaves gaps behind you, and past a hundred clusters finding them
+  // again by arrowing through is the slow part of a second pass.
+  const jumpToUnreviewed = () => {
+    const from = clusterIdx + 1;
+    const ahead = clusters.findIndex((c, i) => i >= from && !isDecided(c, decisions));
+    const next = ahead === -1 ? clusters.findIndex((c) => !isDecided(c, decisions)) : ahead;
+    if (next !== -1) setIdx(next);
+  };
+
+  const autoKeepBest = async () => {
+    setConfirmSweep(false);
+    setSweeping(true);
+    try {
+      const res = await fetch("/api/auto-keep-best", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error(`Auto keep-best failed: ${res.status}`);
+      // Every swept cluster now has stored decisions, but this view is still
+      // showing the selections it made locally; drop them so the reopened
+      // clusters reflect what was actually written.
+      keepsByClusterRef.current = {};
+      await onRefresh();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSweeping(false);
+    }
   };
 
   const confirm = async () => {
@@ -178,6 +216,10 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
         e.preventDefault();
         keepBest();
         break;
+      case "n":
+        e.preventDefault();
+        jumpToUnreviewed();
+        break;
       case "u":
         e.preventDefault();
         onUndo().catch((err) => onError(err instanceof Error ? err.message : String(err)));
@@ -263,7 +305,11 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
             : <>keep all <strong>{nKeep}</strong></>}
         </span>
 
-        <span className="text-xs text-gray-300">hjkl · space · 1–9 · K best · enter · ←/→ clusters · b skip · s star · u undo · ? help</span>
+        <span className="text-xs text-gray-500">
+          {undecidedCount} of {allClusters.length} left
+        </span>
+
+        <span className="text-xs text-gray-300">hjkl · space · 1–9 · K best · enter · ←/→ clusters · n next unreviewed · b skip · s star · u undo · ? help</span>
 
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center gap-1">
@@ -283,6 +329,33 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
           <button onClick={keepBest} className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50">
             🏆 Best
           </button>
+          {confirmSweep ? (
+            <button
+              onClick={autoKeepBest}
+              disabled={sweeping}
+              className="px-2 py-1 text-xs border border-red-300 rounded bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-40"
+              title="Queues every other image in those clusters for deletion. Undoable as one step; nothing leaves disk until you apply deletes."
+            >
+              {sweeping ? "…" : `Sweep ${undecidedCount}?`}
+            </button>
+          ) : (
+            <button
+              onClick={() => setConfirmSweep(true)}
+              disabled={undecidedCount === 0}
+              className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+              title="Keep the top-ranked image in every cluster you haven't reviewed yet"
+            >
+              ⚡ Auto-best
+            </button>
+          )}
+          <button
+            onClick={jumpToUnreviewed}
+            disabled={undecidedCount === 0}
+            className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+            title="Jump to the next cluster with no decision (n)"
+          >
+            → Unreviewed
+          </button>
           <button
             onClick={() => setIdx(Math.min(clusters.length - 1, clusterIdx + 1))}
             disabled={clusterIdx >= clusters.length - 1}
@@ -301,7 +374,7 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
       </div>
 
       {/* Progress */}
-      <div className="w-full bg-gray-100 rounded-full h-0.5">
+      <div className="w-full bg-gray-100 rounded-full h-0.5" data-testid="cluster-progress">
         <div
           className="bg-blue-500 h-0.5 rounded-full transition-all duration-300"
           style={{ width: `${((clusterIdx + 1) / clusters.length) * 100}%` }}

@@ -473,6 +473,7 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
     if (e.key === "Enter") {
       e.preventDefault();
       if (current) {
+        persist(current, keeps[current] ?? true);
         setConfirmed((prev) => {
           const next = new Set(prev);
           next.add(current);
@@ -497,7 +498,11 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       case " ": {
         e.preventDefault();
         const v = videos[idx];
-        if (v) setKeeps((prev) => ({ ...prev, [v]: !prev[v] }));
+        if (v) {
+          const next = !(keeps[v] ?? true);
+          setKeeps((prev) => ({ ...prev, [v]: next }));
+          persist(v, next);
+        }
         break;
       }
       case "s": {
@@ -575,19 +580,34 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
     }
   });
 
+  // Write one video's decision through as soon as it's made. Keeping it in
+  // component state until a bulk confirm meant a reviewed video still read as
+  // undecided everywhere else — the timeline drew it grey, and a reload lost
+  // the review entirely.
+  const persist = (path: string, keep: boolean) => {
+    fetch("/api/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delete_paths: keep ? [] : [path], decided_paths: [path] }),
+    })
+      .then((res) => { if (!res.ok) throw new Error(`Confirm failed: ${res.status}`); })
+      .catch((e) => onError(e instanceof Error ? e.message : String(e)));
+  };
+
   const confirm = async () => {
     setSubmitting(true);
     try {
       const deletePaths = videos.filter((v) => !keeps[v]);
-      if (deletePaths.length > 0) {
-        const res = await fetch("/api/confirm", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ delete_paths: deletePaths }),
-        });
-        if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
-        await onConfirmed();
-      }
+      const res = await fetch("/api/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Send the keeps too, not just the deletes: an unrecorded keep is
+        // indistinguishable from unreviewed footage, which is what left the
+        // timeline unable to colour a video tile.
+        body: JSON.stringify({ delete_paths: deletePaths, decided_paths: videos }),
+      });
+      if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
+      await onConfirmed();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -647,8 +667,10 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
             </>
           )}
           {nDelete > 0 && <span className="text-xs text-gray-400">{nDelete} → trash</span>}
-          <button onClick={confirm} disabled={submitting || nDelete === 0}
-            title={nDelete === 0 ? "Nothing marked for deletion — space marks the current video" : `Move ${nDelete} video${nDelete === 1 ? "" : "s"} to trash`}
+          <button onClick={confirm} disabled={submitting}
+            title={nDelete === 0
+              ? "Record every video in this list as kept"
+              : `Move ${nDelete} video${nDelete === 1 ? "" : "s"} to trash, keep the rest`}
             className="px-3 py-1 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
             {submitting ? "…" : "✓ Confirm"}
           </button>

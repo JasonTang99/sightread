@@ -22,6 +22,7 @@ marked kept sat in the delete queue regardless.
 import json
 import logging
 import shutil
+import threading
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -45,9 +46,47 @@ LEGACY_DELETE_LIST = "to_delete.txt"
 LEGACY_FAVORITES = "favorites.json"
 
 
+# results.json is written once by the pipeline and read on every /api/state and
+# /api/gallery call, so the same ~200 KB was being re-parsed for each of them.
+# Keyed on (mtime_ns, size) rather than mtime alone so a same-second rewrite by
+# a re-run pipeline still invalidates.
+_results_cache: dict[Path, tuple[tuple[int, int], dict]] = {}
+_results_cache_lock = threading.Lock()
+
+
 def load_results(path) -> dict:
+    """Parse results.json, reusing the previous parse while the file is unchanged.
+
+    The returned dict is shared between callers — treat it as read-only. Callers
+    that need to reshape it (filtering clusters, attaching shot times) must build
+    their own containers rather than mutating this one.
+    """
+    path = Path(path)
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None  # let the open() below raise the real error
+    if key is not None:
+        with _results_cache_lock:
+            hit = _results_cache.get(path)
+        if hit is not None and hit[0] == key:
+            return hit[1]
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    if key is not None:
+        with _results_cache_lock:
+            _results_cache[path] = (key, data)
+    return data
+
+
+def invalidate_results_cache(path=None) -> None:
+    """Drop cached parses. Called when a pipeline run rewrites results.json."""
+    with _results_cache_lock:
+        if path is None:
+            _results_cache.clear()
+        else:
+            _results_cache.pop(Path(path), None)
 
 
 def cluster_shot_at(cluster: dict) -> float | None:
