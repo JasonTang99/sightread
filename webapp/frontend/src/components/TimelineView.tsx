@@ -1,45 +1,126 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GalleryPhoto, VideoHighlightsMap } from "../types";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import type { GalleryPhoto, GridStatus, VideoHighlightsMap, VideoStatuses } from "../types";
 
 interface Props {
   onError: (msg: string) => void;
   videos?: string[];
+  videoStatuses?: VideoStatuses;
   videoShotTimes?: Record<string, string | null>;
   highlights?: VideoHighlightsMap;
+  onVideosChanged?: () => void | Promise<void>;
 }
 
 type StatusFilter = "all" | "keep" | "delete";
 
 // Status is conveyed by border colour alone, so tiles carry no text overlay and
 // can run large.
-const TILE_MIN_PX = 320;
+const TILE_MIN_PX = 480;
 // Kept in sync with TIMELINE_THUMB_WIDTH in webapp/server.py, which prewarms
 // this width's cache so the grid isn't waiting on resizes as it scrolls.
-const THUMB_W = 600;
+// Tiles are square-cropped via object-cover, so a landscape frame needs ~1.5x
+// the tile's width to fill it without upscaling.
+const THUMB_W = 800;
 
 interface VideoItem {
   path: string;
   shot_at: string | null;
+  status: GridStatus;
 }
 
-function effectiveStatus(photo: GalleryPhoto, overrides: Record<string, GalleryPhoto["status"]>): GalleryPhoto["status"] {
-  return overrides[photo.path] ?? photo.status;
+function borderFor(status: GridStatus): string {
+  if (status === "keep") return "border-green-400";
+  if (status === "delete") return "border-red-400";
+  return "border-gray-300";
 }
 
-function matchesFilter(status: GalleryPhoto["status"], filter: StatusFilter): boolean {
+function effectiveStatus(
+  item: { path: string; status: GridStatus },
+  overrides: Record<string, GridStatus>,
+): GridStatus {
+  return overrides[item.path] ?? item.status;
+}
+
+function matchesFilter(status: GridStatus, filter: StatusFilter): boolean {
   if (filter === "keep") return status !== "delete";
   if (filter === "delete") return status === "delete";
   return true;
 }
+
+interface TileProps {
+  path: string;
+  status: GridStatus;
+  // The server's status, which is what a click toggles away from.
+  baseStatus: GridStatus;
+  onToggle: (path: string, baseStatus: GridStatus) => void;
+}
+
+// Memoised: a trip's timeline runs to hundreds of tiles, and without this every
+// tile re-renders on each toggle, filter change and day switch.
+const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle }: TileProps) {
+  return (
+    <div
+      className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderFor(status)}`}
+      onClick={() => onToggle(path, baseStatus)}
+      title={`${path.split("/").pop()} — ${status}`}
+    >
+      <img
+        src={`/api/image?path=${encodeURIComponent(path)}&w=${THUMB_W}`}
+        alt=""
+        className="w-full aspect-square object-cover bg-gray-100"
+        loading="lazy"
+        decoding="async"
+      />
+    </div>
+  );
+});
+
+const VideoTile = memo(function VideoTile({ path, status, baseStatus, clipCount, onToggle }: TileProps & { clipCount: number }) {
+  return (
+    <div
+      className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors bg-gray-900 ${borderFor(status)}`}
+      onClick={() => onToggle(path, baseStatus)}
+      title={`${path.split("/").pop()} — ${status}`}
+    >
+      {/* A still frame, not a <video>: media elements load eagerly and at six
+          connections per origin they starve the lazy photo thumbnails further
+          down the timeline, which then never load at all. Playback lives in
+          the Videos tab. */}
+      <img
+        src={`/api/video-poster?path=${encodeURIComponent(path)}&w=${THUMB_W}`}
+        alt=""
+        className="w-full aspect-square object-cover"
+        loading="lazy"
+        decoding="async"
+      />
+      {clipCount > 0 && (
+        <span className="absolute top-1 right-1 bg-black/60 text-amber-300 text-xs rounded px-1">
+          ✨ {clipCount}
+        </span>
+      )}
+      {/* Neutral, not blue: the label sits on top of the frame, so it should
+          read as chrome rather than as another status colour. */}
+      <span className="absolute bottom-0 left-0 right-0 bg-gray-900/60 text-gray-200 text-xs text-center py-0.5 truncate px-1">
+        ▶ {path.split("/").pop()}
+      </span>
+    </div>
+  );
+});
 
 function dateOf(shot_at: string | null): string {
   if (!shot_at) return "Unknown";
   return shot_at.slice(0, 10);
 }
 
-export function TimelineView({ onError, videos = [], videoShotTimes = {}, highlights = {} }: Props) {
+export function TimelineView({
+  onError,
+  videos = [],
+  videoStatuses = {},
+  videoShotTimes = {},
+  highlights = {},
+  onVideosChanged,
+}: Props) {
   const [photos, setPhotos] = useState<GalleryPhoto[]>([]);
-  const [overrides, setOverrides] = useState<Record<string, GalleryPhoto["status"]>>({});
+  const [overrides, setOverrides] = useState<Record<string, GridStatus>>({});
   const [selectedDate, setSelectedDate] = useState<string>("all");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -77,8 +158,12 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
   }, [selectedDate, photos, filter]);
 
   const videoItems = useMemo<VideoItem[]>(
-    () => videos.map((p) => ({ path: p, shot_at: videoShotTimes[p] ?? null })),
-    [videos, videoShotTimes],
+    () => videos.map((p) => ({
+      path: p,
+      shot_at: videoShotTimes[p] ?? null,
+      status: videoStatuses[p] ?? "undecided",
+    })),
+    [videos, videoShotTimes, videoStatuses],
   );
 
   const dates = useMemo(() => {
@@ -113,21 +198,16 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     return map;
   }, [videoItems]);
 
-  // Videos carry no keep/delete status, so they drop out of a delete-only view.
-  const showVideos = filter !== "delete";
-
   const countByDate = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [d, ps] of Object.entries(photosByDate)) {
       map[d] = ps.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
     }
-    if (showVideos) {
-      for (const [d, vs] of Object.entries(videosByDate)) {
-        map[d] = (map[d] ?? 0) + vs.length;
-      }
+    for (const [d, vs] of Object.entries(videosByDate)) {
+      map[d] = (map[d] ?? 0) + vs.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter)).length;
     }
     return map;
-  }, [photosByDate, videosByDate, overrides, filter, showVideos]);
+  }, [photosByDate, videosByDate, overrides, filter]);
 
   const totalPhotoCount = useMemo(
     () => photos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length,
@@ -140,21 +220,23 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     [dates, countByDate, filter],
   );
 
-  const toggle = (path: string) => {
+  // Stable identity, or the memoised tiles re-render on every parent render.
+  const toggle = useCallback((path: string, current: GridStatus) => {
     setOverrides((prev) => {
-      const current = prev[path] ?? photos.find((p) => p.path === path)?.status ?? "undecided";
-      const next = current === "delete" ? "keep" : "delete";
-      return { ...prev, [path]: next };
+      const now = prev[path] ?? current;
+      return { ...prev, [path]: now === "delete" ? "keep" : "delete" };
     });
-  };
+  }, []);
 
   const confirmDay = async (date: string) => {
     setConfirming(date);
     try {
       // Decisions are per photo, so confirming a day decides exactly that day's
-      // photos — no need to drag in the rest of any cluster that straddles it.
-      const dayPhotos = photosByDate[date] ?? [];
-      const deletePaths = dayPhotos
+      // items — no need to drag in the rest of any cluster that straddles it.
+      // Videos are decided the same way, which is what puts a colour on their
+      // tiles here and drops them out of the video reviewer's queue.
+      const dayItems = [...(photosByDate[date] ?? []), ...(videosByDate[date] ?? [])];
+      const deletePaths = dayItems
         .filter((p) => effectiveStatus(p, overrides) === "delete")
         .map((p) => p.path);
 
@@ -163,11 +245,12 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           delete_paths: deletePaths,
-          decided_paths: dayPhotos.map((p) => p.path),
+          decided_paths: dayItems.map((p) => p.path),
         }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       await fetchGallery();
+      await onVideosChanged?.();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,54 +263,34 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     if (visible.length === 0) return <p className="text-sm text-gray-400 py-4">No photos.</p>;
     return (
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
-        {visible.map((ph) => {
-          const status = effectiveStatus(ph, overrides);
-          const borderClass = status === "keep" ? "border-green-400" : status === "delete" ? "border-red-400" : "border-gray-300";
-          return (
-            <div
-              key={ph.path}
-              className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderClass}`}
-              onClick={() => toggle(ph.path)}
-              title={`${ph.path.split("/").pop()} — ${status}`}
-            >
-              <img
-                src={`/api/image?path=${encodeURIComponent(ph.path)}&w=${THUMB_W}`}
-                alt=""
-                className="w-full aspect-square object-cover bg-gray-100"
-                loading="lazy"
-              />
-            </div>
-          );
-        })}
+        {visible.map((ph) => (
+          <PhotoTile
+            key={ph.path}
+            path={ph.path}
+            status={effectiveStatus(ph, overrides)}
+            baseStatus={ph.status}
+            onToggle={toggle}
+          />
+        ))}
       </div>
     );
   };
 
   const renderVideoGrid = (dayVideos: VideoItem[]) => {
-    if (dayVideos.length === 0) return null;
+    const visible = dayVideos.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter));
+    if (visible.length === 0) return null;
     return (
       <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
-        {dayVideos.map((v) => {
-          const clipCount = highlights[v.path]?.clips.length ?? 0;
-          return (
-            <div key={v.path} className="relative rounded overflow-hidden border-4 border-blue-300 bg-gray-900" title={v.path.split("/").pop()}>
-              <video
-                src={`/api/video?path=${encodeURIComponent(v.path)}`}
-                className="w-full aspect-square object-cover"
-                preload="metadata"
-                muted
-              />
-              {clipCount > 0 && (
-                <span className="absolute top-1 right-1 bg-black/60 text-amber-300 text-xs rounded px-1">
-                  ✨ {clipCount}
-                </span>
-              )}
-              <span className="absolute bottom-0 left-0 right-0 bg-blue-500 text-white text-xs text-center py-0.5 opacity-90 truncate px-1">
-                ▶ {v.path.split("/").pop()}
-              </span>
-            </div>
-          );
-        })}
+        {visible.map((v) => (
+          <VideoTile
+            key={v.path}
+            path={v.path}
+            status={effectiveStatus(v, overrides)}
+            baseStatus={v.status}
+            clipCount={highlights[v.path]?.clips.length ?? 0}
+            onToggle={toggle}
+          />
+        ))}
       </div>
     );
   };
@@ -237,14 +300,19 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     const dayVideos = videosByDate[date] ?? [];
     const isConfirming = confirming === date;
     const photoCount = dayPhotos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
-    const videoCount = showVideos ? dayVideos.length : 0;
+    const videoCount = dayVideos.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter)).length;
     return (
-      <div key={date}>
+      // content-visibility lets the browser skip layout, paint and image decode
+      // for days scrolled out of view — a trip is hundreds of tiles, and
+      // rendering them all at once is what made the page expensive. The
+      // intrinsic size is a placeholder height so the scrollbar stays sane
+      // until a section has been measured once.
+      <div key={date} style={{ contentVisibility: "auto", containIntrinsicSize: "auto 900px" }}>
         <div className="flex items-center gap-3 mb-2 mt-4 first:mt-0">
           <h2 className="text-sm font-semibold text-gray-700">{date}</h2>
           {photoCount > 0 && <span className="text-xs text-gray-400">{photoCount} photo{photoCount !== 1 ? "s" : ""}</span>}
           {videoCount > 0 && <span className="text-xs text-blue-400">{videoCount} video{videoCount !== 1 ? "s" : ""}</span>}
-          {photoCount > 0 && (
+          {photoCount + videoCount > 0 && (
             <button
               onClick={() => confirmDay(date)}
               disabled={isConfirming}
@@ -255,7 +323,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
           )}
         </div>
         {renderPhotoGrid(dayPhotos)}
-        {showVideos && renderVideoGrid(dayVideos)}
+        {renderVideoGrid(dayVideos)}
       </div>
     );
   };

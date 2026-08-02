@@ -3,13 +3,16 @@ interface Props {
 }
 
 const CLUSTER_KEYS = [
-  ["h / l", "prev / next cluster"],
+  ["← / →", "prev / next cluster"],
+  ["h / l", "move image focus left / right"],
   ["j / k", "move image focus up / down"],
   ["Space", "toggle focused image keep/delete"],
   ["1–9", "toggle image by rank number"],
   ["K", "keep best (rank 1 only)"],
+  ["n", "jump to next unreviewed cluster"],
   ["Enter", "confirm cluster"],
-  ["b / s", "skip cluster (no confirm)"],
+  ["b", "skip cluster (no confirm)"],
+  ["s", "star / unstar focused image"],
   ["u", "undo last confirm"],
   ["?", "toggle this help"],
 ];

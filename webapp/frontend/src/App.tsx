@@ -9,7 +9,7 @@ import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
 import { TrashPanel } from "./components/TrashPanel";
 import { VideoView } from "./components/VideoView";
-import type { AppState, UserClipsMap, VideoHighlightsMap } from "./types";
+import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "./types";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -19,6 +19,7 @@ export default function App() {
   const [undoing, setUndoing] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [videos, setVideos] = useState<string[]>([]);
+  const [videoStatuses, setVideoStatuses] = useState<VideoStatuses>({});
   const [videoShotTimes, setVideoShotTimes] = useState<Record<string, string | null>>({});
   const [videoHighlights, setVideoHighlights] = useState<VideoHighlightsMap>({});
   const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
@@ -44,6 +45,7 @@ export default function App() {
       if (!r.ok) return;
       const d = await r.json();
       setVideos(d.paths ?? []);
+      setVideoStatuses(d.statuses ?? {});
       setVideoShotTimes(d.shot_times ?? {});
       setVideoHighlights(d.highlights ?? {});
       setVideoUserClips(d.user_clips ?? {});
@@ -57,6 +59,13 @@ export default function App() {
   useEffect(() => {
     if (projectOpen) refetchVideos();
   }, [projectOpen, refetchVideos]);
+
+  // Video decisions are written as they're made in the Videos tab, so the
+  // timeline needs fresh statuses each time it's opened or its tiles keep the
+  // colours they had when the project loaded.
+  useEffect(() => {
+    if (projectOpen && tab === "timeline") refetchVideos();
+  }, [projectOpen, tab, refetchVideos]);
 
   // Pick the landing tab once, on the first load of a project: whatever still
   // needs triage, or — when every cluster and single is already decided — the
@@ -89,6 +98,17 @@ export default function App() {
     if (e.key === "?") { e.preventDefault(); setShowHelp((s) => !s); }
     if (e.key === "Escape") setShowHelp(false);
   });
+
+  // Blur on the way out: the views drive off window keydown and ignore events
+  // aimed at a button, so leaving focus on the tab you just clicked makes the
+  // first space or enter in that view do nothing at all.
+  const selectTab = useCallback(
+    (next: typeof tab) => (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.currentTarget.blur();
+      setTab(next);
+    },
+    [],
+  );
 
   const toggleFavorite = useCallback(async (path: string) => {
     const res = await fetch("/api/favorite", {
@@ -136,9 +156,24 @@ export default function App() {
   const hasClusters = (state.clusters?.length ?? 0) > 0;
   const hasSingles = (state.singletons?.length ?? 0) > 0;
   const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !isDecided(c, decisions));
-  const hasVideos = videos.length > 0;
+  // The video reviewer works through footage that isn't marked for deletion
+  // yet; the timeline shows everything, marked included, so it can colour a
+  // tile by its decision the way it does for photos.
+  const reviewableVideos = videos.filter((v) => videoStatuses[v] !== "delete");
+  const hasVideos = reviewableVideos.length > 0;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
+
+  // Session progress across everything that needs a decision. Clusters and
+  // singles count as one unit each — that is how they are reviewed — and every
+  // video counts, pending deletes included, since a delete mark is a decision.
+  const clusterList = state.clusters ?? [];
+  const singleList = state.singletons ?? [];
+  const totalUnits = clusterList.length + singleList.length + videos.length;
+  const reviewedUnits =
+    clusterList.filter((c) => isDecided(c, decisions)).length +
+    singleList.filter((c) => isDecided(c, decisions)).length +
+    videos.filter((v) => videoStatuses[v] && videoStatuses[v] !== "undecided").length;
 
   return (
     <div>
@@ -155,7 +190,7 @@ export default function App() {
 
         {hasClusters && (
           <button
-            onClick={() => setTab("clusters")}
+            onClick={selectTab("clusters")}
             className={`px-3 py-1 text-sm border-b-2 transition-colors ${
               tab === "clusters" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
@@ -165,7 +200,7 @@ export default function App() {
         )}
         {hasSingles && (
           <button
-            onClick={() => setTab("singles")}
+            onClick={selectTab("singles")}
             className={`px-3 py-1 text-sm border-b-2 transition-colors ${
               tab === "singles" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
@@ -175,17 +210,17 @@ export default function App() {
         )}
         {hasVideos && (
           <button
-            onClick={() => setTab("videos")}
+            onClick={selectTab("videos")}
             className={`px-3 py-1 text-sm border-b-2 transition-colors ${
               tab === "videos" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Videos ({videos.length})
+            Videos ({reviewableVideos.length})
           </button>
         )}
         {hasFavorites && (
           <button
-            onClick={() => setTab("favorites")}
+            onClick={selectTab("favorites")}
             className={`px-3 py-1 text-sm border-b-2 transition-colors ${
               tab === "favorites" ? "border-yellow-500 text-yellow-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
@@ -194,7 +229,7 @@ export default function App() {
           </button>
         )}
         <button
-          onClick={() => setTab("timeline")}
+          onClick={selectTab("timeline")}
           className={`px-3 py-1 text-sm border-b-2 transition-colors ${
             tab === "timeline" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
           }`}
@@ -203,6 +238,21 @@ export default function App() {
         </button>
 
         <div className="ml-auto flex items-center gap-2">
+          {totalUnits > 0 && (
+            <span
+              className="flex items-center gap-1.5 text-xs text-gray-400"
+              title="Clusters, singles and videos that have been decided"
+              data-testid="session-progress"
+            >
+              <span className="w-16 h-1 bg-gray-100 rounded-full overflow-hidden" aria-hidden>
+                <span
+                  className="block h-full bg-blue-500 transition-all duration-300"
+                  style={{ width: `${(reviewedUnits / totalUnits) * 100}%` }}
+                />
+              </span>
+              {reviewedUnits}/{totalUnits} reviewed
+            </span>
+          )}
           {state.pending_delete_count > 0 && (
             <span className="text-xs text-gray-400">{state.pending_delete_count} pending</span>
           )}
@@ -228,14 +278,21 @@ export default function App() {
           // Timeline is where a finished project lands, so the apply-deletes
           // control has to live here too or it becomes unreachable.
           <div className="space-y-2">
-            <TimelineView onError={setError} videos={videos} videoShotTimes={videoShotTimes} highlights={videoHighlights} />
+            <TimelineView
+              onError={setError}
+              videos={videos}
+              videoStatuses={videoStatuses}
+              videoShotTimes={videoShotTimes}
+              highlights={videoHighlights}
+              onVideosChanged={refetchVideos}
+            />
             <TrashPanel pendingCount={state.pending_delete_count} onRefresh={reload} onError={setError} />
           </div>
         ) : tab === "favorites" ? (
           <FavoritesView favorites={favorites} onToggleFavorite={toggleFavorite} onRefresh={reload} onError={setError} />
         ) : tab === "videos" ? (
           <VideoView
-            videos={videos}
+            videos={reviewableVideos}
             highlights={videoHighlights}
             userClips={videoUserClips}
             onError={setError}

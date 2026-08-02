@@ -28,21 +28,27 @@ Updated: 2026-04-29
 
 ### P1 — UX / throughput
 
-- [ ] **Keyboard shortcuts** — biggest single win. `1-9` toggle keep/delete for Nth image, `Enter` confirm, `←/→` prev/next cluster, `K` keep-best, `B` skip, `U` undo, `?` help overlay. Show digit on each card's rank badge. Would 3-5× curation throughput.
+- [x] **Keyboard shortcuts** — done. `ClusterView` handles `1-9` by rank, `hjkl` focus, `Space` toggle, `K` keep-best, `Enter` confirm, `←/→` clusters, `b` skip, `s` star, `u` undo; `HelpOverlay` (`?`) documents them and rank digits show on each card's badge.
 
-- [ ] **Auto tab-switch hijacks user** — `setTab("singles")` inside `reload()` runs on every confirm, pulling user off clusters mid-session. Fix: use a `ref` to only auto-switch once on initial mount.
+- [x] **Auto tab-switch hijacks user** — done. `landedRef` (`App.tsx`) picks the landing tab once per project and never re-runs, so confirming the last cluster no longer yanks you off the tab you're in.
 
-- [ ] **Bulk operations + session progress** — no "X/Y reviewed" counter, no jump-to-unreviewed, no auto-keep-best above threshold. Fix: `reviewed: Set<clusterId>` in client state, show progress in header, add `/api/auto_keep_best` endpoint (one undo entry for all).
+- [x] **Bulk operations + session progress** — done 2026-08-02. Header shows an `X/Y reviewed` meter over clusters + singles + videos (`data-testid="session-progress"`); `ClusterView` has `n` / "→ Unreviewed" to jump to the next undecided cluster and an "⚡ Auto-best" sweep (two-click confirm) behind `POST /api/auto-keep-best`. The sweep keeps rank 1 and queues the rest for every *untouched* multi-image cluster, takes an optional `min_score`, skips singletons, and pushes **one** undo entry for the whole run so it can't overflow the ten-deep stack.
 
 ### P2 — Performance
 
-- [ ] **Image caching** — thumbnails re-encoded on every request, no `Cache-Control`/`ETag`. Fix: `Cache-Control: public, max-age=86400, immutable` + `ETag` on `(path, mtime, w)`, disk thumbnail cache under `webapp/.thumb_cache/{w}/{hash}.jpg`, `304` on `If-None-Match`.
+- [x] **Image caching** — done. Disk thumbnail cache at `<output_dir>/thumb_cache/{sha1(path|mtime_ns|w)}.jpg` plus `Cache-Control: private, max-age=86400`; `ETag` + `304 If-None-Match` added 2026-08-02 on `/api/image` and `/api/video-poster` (`_media_etag`/`_not_modified`), so a timeline revalidating hundreds of tiles costs a few hundred bytes instead of a few hundred MB. Weak validators (`W/"…"`) are matched. `private`, not `public, immutable`: the payload is the user's photos and the URL is not content-addressed.
 
-- [ ] **`load_results` on every API call** — re-parses JSON every `/api/state` GET. Fix: mtime-based in-memory cache; invalidate on confirm/undo.
+  Deliberately **not** on `/api/video`: those responses are ranged, a hand-rolled 304 alongside `206` risks breaking scrubbing, and the file is already served from a local transcode cache.
+
+- [x] **`load_results` on every API call** — done 2026-08-02. `webapp/utils.py` keeps an in-memory parse keyed on `(mtime_ns, size)`, so `/api/state` and `/api/gallery` reuse it and a pipeline re-run still invalidates. The returned dict is shared — read-only by contract. `invalidate_results_cache()` is called when a pipeline run starts.
+
+- [x] **Media-loading hot paths** — done 2026-08-02, found while doing the above:
+  - `/api/videos` walked the whole project tree with `rglob("*")` + `is_file()` — a stat per entry across thousands of JPEGs — on *every* timeline open. Now `_scan_videos` filters on the filename before touching the filesystem.
+  - `_get_shot_times` re-parsed and non-atomically rewrote `shot_times.json` per call, and `/api/gallery` and `/api/videos` raced on it: whichever finished last dropped the other's freshly-read EXIF, so those timestamps were re-read forever. Now serialised under a lock, memoised in process, and written via temp + rename.
 
 ### P3 — Reliability
 
-- [ ] **Undo stack lost on restart** — in-memory only; server restart silently breaks undo. Fix: persist stack to `outputs/undo.jsonl`, or switch to diff-based undo (store only removed images + cluster indices rather than full snapshots). Document that undo doesn't restore files already unlinked by `apply-deletes` — that call clears the stack outright, and recovery means copying back from the mirror drive.
+- [x] **Undo stack lost on restart** — done 2026-08-02. The stack persists to `<output_dir>/undo.jsonl` (rewritten whole on each push/pop, ten entries deep) and is reloaded when a project becomes active. A corrupt or absent file yields an empty stack rather than an error. Undo still cannot restore files already unlinked by `apply-deletes` — that call clears the stack *and* the file, and recovery means copying back from the mirror drive.
 
 ---
 

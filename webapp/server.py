@@ -28,6 +28,7 @@ from utils import (
     KEPT,
     SINGLETON_DELETE_THRESHOLD,
     TO_DELETE,
+    invalidate_results_cache,
     load_decisions,
     load_results,
     migrate_project_state,
@@ -46,7 +47,12 @@ from projects import (
     upsert_recent,
 )
 from jobs import JobState, current_job, start_pipeline
-from video import cache_path as video_cache_path, transcode_for_web
+from video import (
+    cache_path as video_cache_path,
+    extract_poster,
+    poster_path as video_poster_path,
+    transcode_for_web,
+)
 from clips import (
     EXPORT_DIR_NAME,
     ClipExportError,
@@ -62,6 +68,10 @@ import concurrent.futures
 import threading
 
 _transcode_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="transcode")
+# Poster frames get their own worker: one ffmpeg keyframe grab is quick, but
+# queueing it behind a transcode would leave the timeline grid blank for as
+# long as that transcode runs.
+_poster_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="poster")
 _transcode_inflight: set[Path] = set()
 _transcode_lock = threading.Lock()
 
@@ -110,7 +120,7 @@ _undo_stack: list[dict] = []
 _curation_lock = threading.Lock()
 
 # Width the timeline grid requests; kept in sync with TimelineView.tsx.
-TIMELINE_THUMB_WIDTH = 600
+TIMELINE_THUMB_WIDTH = 800
 _prewarm_lock = threading.Lock()
 _prewarm_started: set[str] = set()
 
@@ -121,15 +131,67 @@ def _require_active() -> ProjectContext:
     return _active
 
 
-def _push_undo(previous: dict[str, str | None]) -> None:
+UNDO_FILENAME = "undo.jsonl"
+_UNDO_DEPTH = 10
+
+
+def _undo_file(ctx: ProjectContext) -> Path:
+    return ctx.output_dir / UNDO_FILENAME
+
+
+def _save_undo(ctx: ProjectContext) -> None:
+    """Mirror the in-memory stack to disk, one entry per line.
+
+    The stack used to be memory-only, so an accidental restart — or the reload
+    the dev server does on any edit — silently took undo with it while leaving
+    decisions.json fully written. Rewriting the whole file each time keeps disk
+    and memory in step without an append/trim split; at ten entries of a few
+    paths each it is well under a kilobyte.
+    """
+    path = _undo_file(ctx)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("".join(json.dumps(e) + "\n" for e in _undo_stack))
+        tmp.replace(path)
+    except OSError as exc:
+        # Losing the persistence is not worth failing the confirm that earned it.
+        log.warning("Could not persist undo stack to %s: %s", path, exc)
+
+
+def _load_undo(ctx: ProjectContext) -> None:
+    """Restore the stack for a newly-active project; empty if there is none."""
+    entries: list[dict] = []
+    path = _undo_file(ctx)
+    try:
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and isinstance(entry.get("previous"), dict):
+                entries.append(entry)
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read undo stack from %s: %s", path, exc)
+    _undo_stack[:] = entries[-_UNDO_DEPTH:]
+
+
+def _clear_undo(ctx: ProjectContext) -> None:
+    _undo_stack.clear()
+    _undo_file(ctx).unlink(missing_ok=True)
+
+
+def _push_undo(ctx: ProjectContext, previous: dict[str, str | None]) -> None:
     """Remember each touched photo's prior status so undo can restore it.
 
     A status is a single slot now, so undo has to put back what was there —
     clearing to undecided would silently discard an earlier decision.
     """
     _undo_stack.append({"previous": dict(previous)})
-    if len(_undo_stack) > 10:
+    if len(_undo_stack) > _UNDO_DEPTH:
         _undo_stack.pop(0)
+    _save_undo(ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -195,8 +257,66 @@ def confirm(req: ConfirmRequest):
             previous[p] = was
         if updates:
             save_decisions(ctx.output_dir, updates)
-            _push_undo(previous)
+            _push_undo(ctx, previous)
     return {"ok": True}
+
+
+class AutoKeepBestRequest(BaseModel):
+    # Only sweep clusters whose best image scores at least this well; the rest
+    # are left for the human. None means every undecided cluster.
+    min_score: Optional[float] = None
+
+
+@app.post("/api/auto-keep-best")
+def auto_keep_best(req: AutoKeepBestRequest):
+    """Keep each undecided cluster's top-ranked image and queue the rest.
+
+    This is the choice the cluster view already pre-selects, applied in bulk to
+    the clusters nobody has looked at yet. It pushes a single undo entry for the
+    whole sweep — undoing a hundred clusters one confirm at a time would blow
+    past the ten-deep stack and strand most of it.
+
+    Singletons are excluded: there is no "best" among one image, so the same
+    action there would just be a blind delete.
+    """
+    ctx = _require_active()
+    results_path = ctx.output_dir / "results.json"
+    if not results_path.exists():
+        raise HTTPException(400, "Run pipeline first")
+    data = load_results(results_path)
+
+    with _curation_lock:
+        current = load_decisions(ctx.output_dir)
+        updates: dict[str, str | None] = {}
+        previous: dict[str, str | None] = {}
+        clusters_touched = 0
+        for cluster in data["clusters"]:
+            images = cluster["images"]
+            if len(images) < 2:
+                continue
+            # "Undecided" means untouched: a cluster the user has partly worked
+            # through is theirs, not the sweep's.
+            if any(img["path"] in current for img in images):
+                continue
+            if req.min_score is not None and max(img["score"] for img in images) < req.min_score:
+                continue
+            clusters_touched += 1
+            for img in images:
+                p = img["path"]
+                now = KEPT if img["rank"] == 1 else TO_DELETE
+                updates[p] = now
+                previous[p] = current.get(p)  # None — nothing decided here yet
+        if updates:
+            save_decisions(ctx.output_dir, updates)
+            _push_undo(ctx, previous)
+
+    kept = sum(1 for v in updates.values() if v == KEPT)
+    return {
+        "ok": True,
+        "clusters": clusters_touched,
+        "kept": kept,
+        "queued": len(updates) - kept,
+    }
 
 
 @app.post("/api/undo")
@@ -207,6 +327,7 @@ def undo():
             raise HTTPException(400, "Nothing to undo")
         entry = _undo_stack.pop()
         save_decisions(ctx.output_dir, entry["previous"])
+        _save_undo(ctx)
     return {"ok": True}
 
 
@@ -293,8 +414,9 @@ def apply_deletes():
         manifest = _append_mirror_manifest(ctx, deleted)
         if updates:
             save_decisions(ctx.output_dir, updates)
-        # Undo entries reference files that are no longer on disk — drop them.
-        _undo_stack.clear()
+        # Undo entries reference files that are no longer on disk — drop them,
+        # on disk as well as in memory, so a restart can't resurrect them.
+        _clear_undo(ctx)
     return {
         "ok": True,
         "deleted": len(deleted),
@@ -424,19 +546,36 @@ def _is_exported_clip(abs_path: Path, folder: Path) -> bool:
     return rel.parts[:1] == (EXPORT_DIR_NAME,)
 
 
+def _scan_videos(ctx: ProjectContext) -> list[str]:
+    """Every video on disk under the project folder, exported cuts excluded.
+
+    Pending deletes are included: the timeline shows a video's decision the way
+    it shows a photo's, so it needs the marked ones too. Callers that only
+    review undecided footage filter on `statuses`.
+
+    Filters on the filename before touching the filesystem. The previous
+    `rglob("*")` + `is_file()` stat'd every entry in the tree — thousands of
+    JPEGs and sidecars per trip — to find a few dozen videos, and this runs on
+    every timeline open, not just the first.
+    """
+    folder = ctx.folder.resolve()
+    found: list[str] = []
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS:
+                continue
+            rp = Path(root, name).resolve()
+            if not _is_exported_clip(rp, folder):
+                found.append(str(rp))
+    return sorted(found)
+
+
 @app.get("/api/videos")
 def list_videos():
     ctx = _require_active()
-    pending = set(paths_with_status(load_decisions(ctx.output_dir), TO_DELETE))
-    folder = ctx.folder.resolve()
-    paths = sorted(
-        str(rp)
-        for p in ctx.folder.rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in VIDEO_EXTENSIONS
-        and str(rp := p.resolve()) not in pending
-        and not _is_exported_clip(rp, folder)
-    )
+    decisions = load_decisions(ctx.output_dir)
+    paths = _scan_videos(ctx)
+    statuses = {p: _grid_status(decisions.get(p)) for p in paths}
     shot_times = _get_shot_times(ctx, paths)
     highlights = _load_highlights_for(ctx.output_dir, paths)
     user_clips = user_clips_for(ctx.output_dir, paths)
@@ -446,8 +585,10 @@ def list_videos():
         cached = video_cache_path(ctx.output_dir, p)
         if not cached.exists():
             _transcode_executor.submit(_transcode_bg, p, cached)
+    _start_poster_prewarm(ctx, paths)
     return {
         "paths": paths,
+        "statuses": statuses,
         "shot_times": shot_times,
         "highlights": highlights,
         "user_clips": user_clips,
@@ -564,23 +705,67 @@ def _read_shot_time(path: str) -> str | None:
         return None
 
 
+# EXIF timestamps never change for a file that hasn't been rewritten, so the
+# on-disk cache is authoritative once warm. Holding it in memory too means the
+# common case — every path already known — costs nothing at all, where before
+# each /api/gallery and /api/videos call re-parsed the whole JSON.
+_shot_times_lock = threading.Lock()
+_shot_times_mem: dict[Path, tuple[tuple[int, int] | None, dict[str, str | None]]] = {}
+
+
 def _get_shot_times(ctx: ProjectContext, paths: list[str]) -> dict[str, str | None]:
+    """Shot time per path, reading EXIF only for paths not already cached.
+
+    Serialised: the gallery and the video list both extend the same file, and
+    two unsynchronised read-modify-writes meant whichever finished last dropped
+    the other's freshly-read timestamps — re-reading that EXIF on every
+    subsequent request. The write is atomic for the same reason decisions.json
+    is: a half-written cache is unparseable and gets discarded wholesale.
+    """
     cache_path = ctx.output_dir / "shot_times.json"
-    cache: dict[str, str | None] = {}
-    if cache_path.exists():
+    with _shot_times_lock:
         try:
-            cache = json.loads(cache_path.read_text())
-        except Exception:
-            pass
-    missing = [p for p in paths if p not in cache]
-    if missing:
-        for p in missing:
-            cache[p] = _read_shot_time(p)
-        try:
-            cache_path.write_text(json.dumps(cache))
-        except Exception:
-            pass
-    return {p: cache.get(p) for p in paths}
+            st = cache_path.stat()
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        hit = _shot_times_mem.get(cache_path)
+        if hit is not None and hit[0] == key:
+            cache = hit[1]
+        else:
+            cache = {}
+            if key is not None:
+                try:
+                    loaded = json.loads(cache_path.read_text())
+                    if isinstance(loaded, dict):
+                        cache = loaded
+                except (OSError, json.JSONDecodeError):
+                    pass  # rebuilt from EXIF below
+
+        missing = [p for p in paths if p not in cache]
+        if missing:
+            for p in missing:
+                cache[p] = _read_shot_time(p)
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(cache))
+                tmp.replace(cache_path)
+                st = cache_path.stat()
+                key = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                key = None  # don't memoise against a stat we couldn't take
+        _shot_times_mem[cache_path] = (key, cache)
+        return {p: cache.get(p) for p in paths}
+
+
+# The grid only distinguishes surviving from doomed; a star is a keep.
+_GRID_STATUS = {KEPT: "keep", FAVORITE: "keep", TO_DELETE: "delete"}
+
+
+def _grid_status(decision: str | None) -> str:
+    """Collapse a stored decision to what the timeline grid draws."""
+    return _GRID_STATUS.get(decision, "undecided")
 
 
 @app.get("/api/gallery")
@@ -593,8 +778,6 @@ def get_gallery():
     decisions = load_decisions(ctx.output_dir)
 
     all_photos = []
-    # The grid only distinguishes surviving from doomed; a star is a keep.
-    status_of = {KEPT: "keep", FAVORITE: "keep", TO_DELETE: "delete"}
     for cluster in data["clusters"]:
         cid = cluster["cluster_id"]
         csize = len(cluster["images"])
@@ -605,7 +788,7 @@ def get_gallery():
             # include photos the user can no longer act on.
             if decisions.get(p) == DELETED:
                 continue
-            status = status_of.get(decisions.get(p), "undecided")
+            status = _grid_status(decisions.get(p))
             all_photos.append({"path": p, "cluster_id": cid, "cluster_size": csize, "status": status})
 
     shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos])
@@ -638,11 +821,67 @@ def serve_video(path: str = Query(...), cached_only: bool = False):
     return FileResponse(abs_path, headers=_CACHE_HEADERS)
 
 
+@app.get("/api/video-poster")
+def serve_video_poster(request: Request, path: str = Query(...), w: int = TIMELINE_THUMB_WIDTH):
+    """One still frame per video, so grids can show footage without loading it.
+
+    A timeline day full of <video> elements starves the lazy <img> loads around
+    it — the browser only opens six connections and media takes priority, so
+    photos further down the page never get requested at all. Posters keep the
+    grid to plain images.
+    """
+    ctx = _require_active()
+    abs_path = _resolve_project_path(ctx, path)
+    if not _in_allowed_dirs(abs_path, ctx):
+        raise HTTPException(403, "Path outside project")
+    if not abs_path.exists():
+        raise HTTPException(404, "Not found")
+
+    etag = _media_etag(abs_path, "poster", w)
+    headers = {**_CACHE_HEADERS, "ETag": etag}
+    if _not_modified(request, etag):
+        return Response(status_code=304, headers=headers)
+
+    cache_file = video_poster_path(ctx.output_dir, abs_path, w)
+    if not cache_file.exists():
+        try:
+            extract_poster(abs_path, cache_file, w)
+        except Exception as e:
+            raise HTTPException(500, f"Poster extraction failed: {e}")
+    return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
+
+
 _CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
+def _media_etag(abs_path: Path, *parts) -> str:
+    """A strong ETag over the source's identity, mtime and any render options.
+
+    Derived rather than stored: every cache key in this file is already
+    (path, mtime_ns, size...), so the tag changes exactly when the bytes would.
+    """
+    st = abs_path.stat()
+    raw = "|".join(str(p) for p in (abs_path, st.st_mtime_ns, st.st_size, *parts))
+    return f'"{hashlib.sha1(raw.encode()).hexdigest()}"'
+
+
+def _not_modified(request: Request, etag: str) -> bool:
+    """True when the client already holds this exact entity.
+
+    max-age alone stops re-requests only until it lapses, and a revalidation
+    without an ETag re-sends the whole JPEG. If-None-Match turns that into a
+    304 — the timeline revalidates hundreds of tiles at once, so the difference
+    is a few hundred bytes against a few hundred megabytes.
+    """
+    header = request.headers.get("if-none-match")
+    if not header:
+        return False
+    # A client may send several tags, and a cache may have weakened ours.
+    return any(t.strip().removeprefix("W/") == etag for t in header.split(","))
+
+
 @app.get("/api/image")
-def serve_image(path: str = Query(...), w: Optional[int] = None):
+def serve_image(request: Request, path: str = Query(...), w: Optional[int] = None):
     ctx = _require_active()
     abs_path = _resolve_project_path(ctx, path)
     if not _in_allowed_dirs(abs_path, ctx):
@@ -650,16 +889,22 @@ def serve_image(path: str = Query(...), w: Optional[int] = None):
 
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
+
+    etag = _media_etag(abs_path, w)
+    if _not_modified(request, etag):
+        return Response(status_code=304, headers={**_CACHE_HEADERS, "ETag": etag})
+    headers = {**_CACHE_HEADERS, "ETag": etag}
+
     if w is None:
-        return FileResponse(abs_path, headers=_CACHE_HEADERS)
+        return FileResponse(abs_path, headers=headers)
 
     cache_file = _thumb_cache_file(ctx, abs_path, w)
     if cache_file.exists():
-        return FileResponse(cache_file, media_type="image/jpeg", headers=_CACHE_HEADERS)
+        return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
 
     data = _render_thumb(abs_path, w)
     _write_thumb(cache_file, data)
-    return Response(data, media_type="image/jpeg", headers=_CACHE_HEADERS)
+    return Response(data, media_type="image/jpeg", headers=headers)
 
 
 # Resized thumbnails are cached on disk, keyed by source path/mtime/width
@@ -670,13 +915,28 @@ def _thumb_cache_file(ctx: ProjectContext, abs_path: Path, w: int) -> Path:
     return ctx.output_dir / "thumb_cache" / f"{key}.jpg"
 
 
+# Grid tiles are ~380px on screen and there are hundreds of them, so they trade
+# a little quality for bytes; the 2400px renders behind the compare views are
+# where a soft JPEG would actually change which photo you pick.
+_GRID_MAX_WIDTH = 800
+_GRID_QUALITY = 88
+_DETAIL_QUALITY = 95
+
+
 def _render_thumb(abs_path: Path, w: int) -> bytes:
-    img = ImageOps.exif_transpose(Image.open(abs_path))
+    img = Image.open(abs_path)
+    # Decode straight to a DCT-scaled size (1/2, 1/4, 1/8) instead of unpacking
+    # 40 megapixels and throwing most of them away: ~3x faster per thumbnail on
+    # this footage, which is most of what a cold project's prewarm costs.
+    # draft() never picks a scale below the requested size, so LANCZOS still
+    # does the final, quality-carrying step.
+    img.draft("RGB", (w, w))
+    img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
     img.thumbnail((w, w * 3), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=95)
+    img.save(buf, format="JPEG", quality=_GRID_QUALITY if w <= _GRID_MAX_WIDTH else _DETAIL_QUALITY)
     return buf.getvalue()
 
 
@@ -725,6 +985,37 @@ def _start_thumb_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _prewarm_poster(ctx: ProjectContext, raw_path: str, w: int) -> None:
+    try:
+        abs_path = _resolve_project_path(ctx, raw_path)
+        if not _in_allowed_dirs(abs_path, ctx) or not abs_path.is_file():
+            return
+        cache_file = video_poster_path(ctx.output_dir, abs_path, w)
+        if cache_file.exists():
+            return
+        extract_poster(abs_path, cache_file, w)
+    except Exception:
+        pass  # regenerated on demand by /api/video-poster
+
+
+def _start_poster_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
+    """Same idea as the thumbnail prewarmer, for the timeline's video tiles.
+
+    Kept on its own started-set key so a project whose photos are already
+    prewarmed still gets its posters built, and on its own single-worker
+    executor so posters aren't stuck behind minutes of transcoding — the grid
+    needs them immediately, the transcode only matters once playback starts.
+    """
+    key = f"posters:{ctx.output_dir}"
+    with _prewarm_lock:
+        if key in _prewarm_started:
+            return
+        _prewarm_started.add(key)
+
+    for p in raw_paths:
+        _poster_executor.submit(_prewarm_poster, ctx, p, TIMELINE_THUMB_WIDTH)
+
+
 def _resolve_project_path(ctx: ProjectContext, path: str) -> Path:
     p = Path(path)
     if p.is_absolute():
@@ -755,14 +1046,17 @@ if os.getenv("SIGHTREAD_TEST"):
 
     @app.post("/api/_test_reset")
     def test_reset():
-        _undo_stack.clear()
+        if _active is not None:
+            _clear_undo(_active)
+        else:
+            _undo_stack.clear()
         return {"ok": True}
 
     @app.post("/api/_test_set_project")
     def test_set_project(req: _TestProjectRequest):
-        global _active, _undo_stack
+        global _active
         _active = ProjectContext(folder=Path(req.folder), output_dir=Path(req.output_dir))
-        _undo_stack.clear()
+        _load_undo(_active)
         return {"ok": True}
 
 
@@ -812,9 +1106,13 @@ def open_project(req: FolderRequest):
     with _curation_lock:
         migrate_project_state(out_dir)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
-    _undo_stack.clear()
+    # Undo survives a restart now, so reopening a project picks its stack back
+    # up rather than starting blank.
+    _load_undo(_active)
     with _prewarm_lock:
-        _prewarm_started.discard(str(out_dir))  # let the next gallery load top it up
+        # let the next gallery / video load top these up
+        _prewarm_started.discard(str(out_dir))
+        _prewarm_started.discard(f"posters:{out_dir}")
     upsert_recent(folder, out_dir)
     status = project_status(folder, out_dir)
     return {"folder": str(folder), "output_dir": str(out_dir), "status": status}
@@ -833,7 +1131,10 @@ def run_pipeline_endpoint(req: FolderRequest):
     with _curation_lock:
         migrate_project_state(out_dir)
     _active = ProjectContext(folder=folder, output_dir=out_dir)
-    _undo_stack.clear()
+    # A re-run renumbers clusters but decisions and undo are keyed by photo
+    # path, so the stack stays meaningful across it.
+    _load_undo(_active)
+    invalidate_results_cache(out_dir / "results.json")
     start_pipeline(
         folder, out_dir, PROJECT_ROOT,
         on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True),
