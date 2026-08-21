@@ -66,6 +66,7 @@ log = logging.getLogger(__name__)
 
 import concurrent.futures
 import threading
+from contextlib import contextmanager
 
 _transcode_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="transcode")
 # Poster frames get their own worker: one ffmpeg keyframe grab is quick, but
@@ -75,20 +76,62 @@ _poster_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_n
 _transcode_inflight: set[Path] = set()
 _transcode_lock = threading.Lock()
 
+# Same idea as _transcode_inflight, one entry per destination cache file: the
+# background prewarm and a tile the user is looking at routinely ask for the
+# same uncached thumbnail or poster at once, and without this both pay the
+# decode (~0.5s of LANCZOS) or the ffmpeg spin to write identical bytes.
+_render_inflight: set[Path] = set()
+_render_lock = threading.Condition()
+
+
+@contextmanager
+def _render_once(dest: Path):
+    """Yield True if this caller should render dest, False if it is now cached.
+
+    A caller that loses the race waits for the winner rather than returning
+    early: /api/image has to answer with the bytes either way, and waiting on
+    a render already in flight beats starting a second one.
+    """
+    with _render_lock:
+        while dest in _render_inflight:
+            _render_lock.wait()
+        if dest.exists():
+            yield False
+            return
+        _render_inflight.add(dest)
+    try:
+        yield True
+    finally:
+        with _render_lock:
+            _render_inflight.discard(dest)
+            _render_lock.notify_all()
+
+
+# A file ffmpeg cannot transcode fails the same way every time, and /api/videos
+# resubmits every uncached video on each switch to the timeline or videos tab —
+# so without a memory of the failure one bad file spins ffmpeg over the NAS on
+# every tab switch, forever. Forgotten on restart, which is when the file or
+# ffmpeg may have changed.
+_transcode_failed: set[Path] = set()
+
 
 def _transcode_bg(src: Path, dest: Path) -> None:
     with _transcode_lock:
-        if src in _transcode_inflight or dest.exists():
+        if src in _transcode_inflight or src in _transcode_failed or dest.exists():
             return
         _transcode_inflight.add(src)
+    failed = False
     try:
         transcode_for_web(src, dest)
         log.info("transcoded %s", src.name)
     except Exception as exc:
+        failed = True
         log.warning("transcode failed %s: %s", src.name, exc)
     finally:
         with _transcode_lock:
             _transcode_inflight.discard(src)
+            if failed:
+                _transcode_failed.add(src)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -713,8 +756,18 @@ _shot_times_lock = threading.Lock()
 _shot_times_mem: dict[Path, tuple[tuple[int, int] | None, dict[str, str | None]]] = {}
 
 
-def _get_shot_times(ctx: ProjectContext, paths: list[str]) -> dict[str, str | None]:
+def _get_shot_times(
+    ctx: ProjectContext,
+    paths: list[str],
+    known: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
     """Shot time per path, reading EXIF only for paths not already cached.
+
+    ``known`` supplies timestamps the caller already has — the pipeline reads
+    every photo's EXIF anyway and records it in results.json, so the gallery
+    passes those in rather than making us reopen a few hundred files over the
+    NAS to learn what is already on disk. They are still written to the cache,
+    so a later /api/videos call over the same paths costs nothing either.
 
     Serialised: the gallery and the video list both extend the same file, and
     two unsynchronised read-modify-writes meant whichever finished last dropped
@@ -745,7 +798,8 @@ def _get_shot_times(ctx: ProjectContext, paths: list[str]) -> dict[str, str | No
         missing = [p for p in paths if p not in cache]
         if missing:
             for p in missing:
-                cache[p] = _read_shot_time(p)
+                supplied = known.get(p) if known else None
+                cache[p] = supplied if supplied is not None else _read_shot_time(p)
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cache_path.with_suffix(".json.tmp")
@@ -778,11 +832,15 @@ def get_gallery():
     decisions = load_decisions(ctx.output_dir)
 
     all_photos = []
+    pipeline_times: dict[str, str | None] = {}
     for cluster in data["clusters"]:
         cid = cluster["cluster_id"]
         csize = len(cluster["images"])
         for img in cluster["images"]:
             p = img["path"]
+            ts = img.get("exif_timestamp")
+            if ts is not None:
+                pipeline_times[p] = datetime.fromtimestamp(ts).isoformat()
             # Applied deletes are gone from disk — results.json still lists them,
             # but showing them would mean broken thumbnails and day counts that
             # include photos the user can no longer act on.
@@ -791,7 +849,7 @@ def get_gallery():
             status = _grid_status(decisions.get(p))
             all_photos.append({"path": p, "cluster_id": cid, "cluster_size": csize, "status": status})
 
-    shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos])
+    shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos], known=pipeline_times)
     for ph in all_photos:
         ph["shot_at"] = shot_times.get(ph["path"])
 
@@ -834,33 +892,42 @@ def serve_video_poster(request: Request, path: str = Query(...), w: int = TIMELI
     abs_path = _resolve_project_path(ctx, path)
     if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(403, "Path outside project")
-    if not abs_path.exists():
+    try:
+        st = abs_path.stat()
+    except OSError:
         raise HTTPException(404, "Not found")
 
-    etag = _media_etag(abs_path, "poster", w)
+    etag = _media_etag(abs_path, "poster", w, st=st)
     headers = {**_CACHE_HEADERS, "ETag": etag}
     if _not_modified(request, etag):
         return Response(status_code=304, headers=headers)
 
-    cache_file = video_poster_path(ctx.output_dir, abs_path, w)
+    cache_file = video_poster_path(ctx.output_dir, abs_path, w, st=st)
     if not cache_file.exists():
-        try:
-            extract_poster(abs_path, cache_file, w)
-        except Exception as e:
-            raise HTTPException(500, f"Poster extraction failed: {e}")
+        with _render_once(cache_file) as mine:
+            if mine:
+                try:
+                    extract_poster(abs_path, cache_file, w)
+                except Exception as e:
+                    raise HTTPException(500, f"Poster extraction failed: {e}")
     return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
 
 
 _CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
-def _media_etag(abs_path: Path, *parts) -> str:
+def _media_etag(abs_path: Path, *parts, st: os.stat_result | None = None) -> str:
     """A strong ETag over the source's identity, mtime and any render options.
 
     Derived rather than stored: every cache key in this file is already
     (path, mtime_ns, size...), so the tag changes exactly when the bytes would.
+
+    Callers that have already stat()ed the source pass it in: the sources live
+    on a spinning-disk NAS, and every tile request otherwise stats the same
+    file for its existence check, its ETag and its cache key.
     """
-    st = abs_path.stat()
+    if st is None:
+        st = abs_path.stat()
     raw = "|".join(str(p) for p in (abs_path, st.st_mtime_ns, st.st_size, *parts))
     return f'"{hashlib.sha1(raw.encode()).hexdigest()}"'
 
@@ -887,30 +954,39 @@ def serve_image(request: Request, path: str = Query(...), w: Optional[int] = Non
     if not _in_allowed_dirs(abs_path, ctx):
         raise HTTPException(403, "Path outside project")
 
-    if not abs_path.exists():
+    try:
+        st = abs_path.stat()
+    except OSError:
         raise HTTPException(404, "Not found")
 
-    etag = _media_etag(abs_path, w)
+    etag = _media_etag(abs_path, w, st=st)
     if _not_modified(request, etag):
         return Response(status_code=304, headers={**_CACHE_HEADERS, "ETag": etag})
     headers = {**_CACHE_HEADERS, "ETag": etag}
 
     if w is None:
-        return FileResponse(abs_path, headers=headers)
+        return FileResponse(abs_path, headers=headers, stat_result=st)
 
-    cache_file = _thumb_cache_file(ctx, abs_path, w)
+    cache_file = _thumb_cache_file(ctx, abs_path, w, st=st)
     if cache_file.exists():
         return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
 
-    data = _render_thumb(abs_path, w)
-    _write_thumb(cache_file, data)
+    with _render_once(cache_file) as mine:
+        if not mine:
+            return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
+        data = _render_thumb(abs_path, w)
+        _write_thumb(cache_file, data)
     return Response(data, media_type="image/jpeg", headers=headers)
 
 
 # Resized thumbnails are cached on disk, keyed by source path/mtime/width
-def _thumb_cache_file(ctx: ProjectContext, abs_path: Path, w: int) -> Path:
+def _thumb_cache_file(
+    ctx: ProjectContext, abs_path: Path, w: int, st: os.stat_result | None = None
+) -> Path:
+    if st is None:
+        st = abs_path.stat()
     key = hashlib.sha1(
-        f"{abs_path}|{abs_path.stat().st_mtime_ns}|{w}".encode()
+        f"{abs_path}|{st.st_mtime_ns}|{w}".encode()
     ).hexdigest()
     return ctx.output_dir / "thumb_cache" / f"{key}.jpg"
 
@@ -957,7 +1033,9 @@ def _prewarm_one(ctx: ProjectContext, raw_path: str, w: int) -> None:
         cache_file = _thumb_cache_file(ctx, abs_path, w)
         if cache_file.exists():
             return
-        _write_thumb(cache_file, _render_thumb(abs_path, w))
+        with _render_once(cache_file) as mine:
+            if mine:
+                _write_thumb(cache_file, _render_thumb(abs_path, w))
     except Exception:
         pass  # a thumbnail that fails here is regenerated on demand by /api/image
 
@@ -993,7 +1071,9 @@ def _prewarm_poster(ctx: ProjectContext, raw_path: str, w: int) -> None:
         cache_file = video_poster_path(ctx.output_dir, abs_path, w)
         if cache_file.exists():
             return
-        extract_poster(abs_path, cache_file, w)
+        with _render_once(cache_file) as mine:
+            if mine:
+                extract_poster(abs_path, cache_file, w)
     except Exception:
         pass  # regenerated on demand by /api/video-poster
 
