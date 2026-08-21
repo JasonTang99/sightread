@@ -38,10 +38,14 @@ def cache_path(output_dir: Path, src: Path) -> Path:
     return output_dir / "video_cache" / f"{key}.mp4"
 
 
-def poster_path(output_dir: Path, src: Path, w: int) -> Path:
+def poster_path(
+    output_dir: Path, src: Path, w: int, st: os.stat_result | None = None
+) -> Path:
     """Cache location for a video's still frame, keyed like cache_path plus width."""
+    if st is None:
+        st = src.stat()
     key = hashlib.sha1(
-        f"{src.resolve()}|{src.stat().st_mtime_ns}|{w}".encode()
+        f"{src.resolve()}|{st.st_mtime_ns}|{w}".encode()
     ).hexdigest()
     return output_dir / "poster_cache" / f"{key}.jpg"
 

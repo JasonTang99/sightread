@@ -421,6 +421,7 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
                   alt=""
                   className="w-full object-contain bg-gray-50 max-h-[calc(100vh-9rem)]"
                   loading="lazy"
+                  decoding="async"
                 />
               </div>
               <button
