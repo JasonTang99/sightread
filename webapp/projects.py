@@ -26,8 +26,7 @@ class ProjectContext:
 
 
 def project_output_dir(folder: Path) -> Path:
-    key = hashlib.md5(str(folder.resolve()).encode()).hexdigest()
-    return DATA_DIR / key
+    return DATA_DIR / project_output_dir_name(folder.resolve())
 
 
 def image_files_in(folder: Path) -> set[str]:
@@ -84,3 +83,105 @@ def upsert_recent(folder: Path, output_dir: Path, pipeline_ran: bool = False) ->
         })
     entries.sort(key=lambda e: e.get("last_opened", ""), reverse=True)
     save_recents(entries[:20])
+
+
+def _folder_for_output_dir(out_dir: Path) -> Path | None:
+    """Recover the source folder a pipeline output dir belongs to.
+
+    The output dir name is an md5 of the folder path, so it cannot be reversed
+    directly. The embeddings sidecar holds absolute image paths, though: their
+    common ancestor is at or below the project folder, so walking up from it
+    and re-hashing finds the folder that produced this dir.
+    """
+    sidecar = out_dir / "embeddings_dinov3_mpcls_tta.paths.json"
+    if not sidecar.exists():
+        return None
+    try:
+        paths = json.loads(sidecar.read_text())
+    except Exception:
+        return None
+    if not paths:
+        return None
+    try:
+        candidate = Path(os.path.commonpath([str(p) for p in paths]))
+    except ValueError:  # paths on different drives — nothing sensible to do
+        return None
+    if candidate.suffix:  # commonpath of a single image is the image itself
+        candidate = candidate.parent
+    while True:
+        if project_output_dir_name(candidate) == out_dir.name:
+            return candidate
+        if candidate.parent == candidate:
+            return None
+        candidate = candidate.parent
+
+
+def project_output_dir_name(folder: Path) -> str:
+    return hashlib.md5(str(folder).encode()).hexdigest()
+
+
+def _pipeline_run_time(out_dir: Path) -> str | None:
+    newest = 0.0
+    for name in ("results.json", "embeddings_dinov3_mpcls_tta.paths.json"):
+        f = out_dir / name
+        if f.exists():
+            newest = max(newest, f.stat().st_mtime)
+    if not newest:
+        return None
+    return datetime.fromtimestamp(newest, timezone.utc).isoformat()
+
+
+def discover_pipeline_projects() -> list[dict]:
+    """Every folder with pipeline output on disk, recents.json or not.
+
+    Pipelines run from the CLI never touch recents.json, so the picker used to
+    hide them. Scanning the data dir picks those runs up too.
+    """
+    if not DATA_DIR.exists():
+        return []
+    found = []
+    for out_dir in DATA_DIR.iterdir():
+        if not out_dir.is_dir():
+            continue
+        folder = _folder_for_output_dir(out_dir)
+        if folder is None:
+            continue
+        sidecar = out_dir / "embeddings_dinov3_mpcls_tta.paths.json"
+        try:
+            image_count = len(json.loads(sidecar.read_text()))
+        except Exception:
+            image_count = 0
+        found.append({
+            "folder": str(folder),
+            "output_dir": str(out_dir),
+            "last_opened": None,
+            "last_pipeline_run": _pipeline_run_time(out_dir),
+            "image_count": image_count,
+        })
+    return found
+
+
+def known_projects() -> list[dict]:
+    """Recents merged with pipeline output found on disk, newest first."""
+    merged: dict[str, dict] = {}
+    for entry in discover_pipeline_projects():
+        merged[entry["folder"]] = entry
+    for entry in load_recents():
+        existing = merged.get(entry["folder"])
+        if existing is None:
+            merged[entry["folder"]] = dict(entry)
+            continue
+        # recents knows when it was opened; the disk knows when it last ran
+        existing["last_opened"] = entry.get("last_opened")
+        existing["last_pipeline_run"] = max(
+            filter(None, [existing.get("last_pipeline_run"), entry.get("last_pipeline_run")]),
+            default=None,
+        )
+        if entry.get("image_count"):
+            existing["image_count"] = entry["image_count"]
+    entries = list(merged.values())
+    entries.sort(
+        key=lambda e: max(e.get("last_opened") or "", e.get("last_pipeline_run") or ""),
+        reverse=True,
+    )
+    return entries

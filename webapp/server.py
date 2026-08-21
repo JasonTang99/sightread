@@ -41,7 +41,7 @@ from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
     image_files_in,
-    load_recents,
+    known_projects,
     project_output_dir,
     project_status,
     upsert_recent,
@@ -1070,7 +1070,7 @@ class FolderRequest(BaseModel):
 
 @app.get("/api/projects")
 def list_projects():
-    entries = load_recents()
+    entries = known_projects()
     result = []
     for e in entries:
         folder = Path(e["folder"])
@@ -1166,7 +1166,7 @@ def job_status():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/fs/list")
-def fs_list(path: str = Query(default=str(Path.home()))):
+def fs_list(path: str = Query(default=str(PRIMARY_ROOT / "Editing" / "imports"))):
     target = Path(path).resolve()
     if not target.exists() or not target.is_dir():
         raise HTTPException(400, "Not a directory")
