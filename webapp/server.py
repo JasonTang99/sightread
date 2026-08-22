@@ -1,6 +1,5 @@
 """FastAPI backend for Sightread webapp."""
 import hashlib
-import io
 import json
 import logging
 import os
@@ -15,13 +14,14 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps
+from PIL import Image
 from pydantic import BaseModel
 
 # Must precede the local imports below so `uvicorn webapp.server:app` (run from
 # the repo root, e.g. by the test suite) resolves them.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import thumbs
 from utils import (
     DELETED,
     FAVORITE,
@@ -186,8 +186,8 @@ _curation_lock = threading.Lock()
 
 # Widths the two review surfaces request; kept in sync with TimelineView.tsx
 # (the grid) and ClusterView.tsx (the side-by-side compare).
-TIMELINE_THUMB_WIDTH = 800
-COMPARE_THUMB_WIDTH = 2400
+TIMELINE_THUMB_WIDTH = thumbs.GRID_MAX_WIDTH
+COMPARE_THUMB_WIDTH = thumbs.COMPARE_WIDTH
 
 # Thumbnailing is libjpeg decode plus PIL resampling, and both release the GIL,
 # so the prewarm pool scales with cores instead of sitting at two: on this
@@ -1022,50 +1022,21 @@ def serve_image(request: Request, path: str = Query(...), w: Optional[int] = Non
     return Response(data, media_type="image/jpeg", headers=headers)
 
 
-# Resized thumbnails are cached on disk, keyed by source path/mtime/width
+# Both the webapp and the pipeline write this cache, so the key scheme and the
+# resize/quality choices live in thumbs.py. These stay as module-level names
+# because the prewarm path and the tests reach for them.
 def _thumb_cache_file(
     ctx: ProjectContext, abs_path: Path, w: int, st: os.stat_result | None = None
 ) -> Path:
-    if st is None:
-        st = abs_path.stat()
-    key = hashlib.sha1(
-        f"{abs_path}|{st.st_mtime_ns}|{w}".encode()
-    ).hexdigest()
-    return ctx.output_dir / "thumb_cache" / f"{key}.jpg"
-
-
-# Grid tiles are ~380px on screen and there are hundreds of them, so they trade
-# a little quality for bytes; the 2400px renders behind the compare views are
-# where a soft JPEG would actually change which photo you pick.
-_GRID_MAX_WIDTH = 800
-_GRID_QUALITY = 88
-_DETAIL_QUALITY = 95
+    return thumbs.cache_file(ctx.output_dir, abs_path, w, st=st)
 
 
 def _render_thumb(abs_path: Path, w: int) -> bytes:
-    img = Image.open(abs_path)
-    # Decode straight to a DCT-scaled size (1/2, 1/4, 1/8) instead of unpacking
-    # 40 megapixels and throwing most of them away: ~3x faster per thumbnail on
-    # this footage, which is most of what a cold project's prewarm costs.
-    # draft() never picks a scale below the requested size, so LANCZOS still
-    # does the final, quality-carrying step.
-    img.draft("RGB", (w, w))
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    img.thumbnail((w, w * 3), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=_GRID_QUALITY if w <= _GRID_MAX_WIDTH else _DETAIL_QUALITY)
-    return buf.getvalue()
+    return thumbs.render(abs_path, w)
 
 
 def _write_thumb(cache_file: Path, data: bytes) -> None:
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    # Thread id as well as pid: the prewarm pool has several threads writing
-    # thumbnails at once, and a shared temp name would let them clobber.
-    tmp = cache_file.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_bytes(data)
-    tmp.replace(cache_file)
+    thumbs.write(cache_file, data)
 
 
 def _prewarm_one(ctx: ProjectContext, raw_path: str, w: int) -> None:

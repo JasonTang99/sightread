@@ -13,6 +13,7 @@ Without --output-dir, results go to the per-project data directory
 import argparse
 import gc
 import json
+import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,12 @@ import numpy as np
 import torch
 from PIL import Image, ExifTags
 from tqdm import tqdm
+
+# thumbs.py is the one webapp module scripts may import: it pulls in nothing
+# beyond PIL and the stdlib, and duplicating the thumbnail cache key instead is
+# how the pipeline's output silently stops being a cache hit.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+import thumbs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config defaults
@@ -54,7 +61,7 @@ EXPOSURE_PENALTY_WEIGHT = 0.15
 FACE_BONUS_WEIGHT = 0.10
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-# Keep in sync with webapp/server.py VIDEO_EXTENSIONS (scripts must not import webapp).
+# Keep in sync with webapp/server.py VIDEO_EXTENSIONS (which scripts do not import).
 # No ".ts": MPEG-TS shares the extension with TypeScript sources.
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
 # FAISS k-NN connectivity replaces O(n²) sklearn distance matrix above this size
@@ -655,8 +662,42 @@ def _compute_scores_from_components(components: dict) -> list[float]:
     return combined.tolist()
 
 
-def _run_score_model(paths: list[str], device: str = DEVICE) -> dict[str, np.ndarray]:
-    """Batch-score images. Returns dict of raw component arrays."""
+def _emit_thumbs(thumb_dir: Path, path: str, img) -> None:
+    """Write the webapp's grid and compare thumbnails for one scored photo.
+
+    Uses thumbs.py so the cache key and the resize/quality choices are the ones
+    the server will look for; a mismatch here would not fail anything, it would
+    just silently stop being a cache hit.
+
+    _load_img has already applied its own >4K downscale, which is well above
+    the widest thumbnail, and skipped exif_transpose because scoring does not
+    care about orientation. thumbs.encode applies it, so a portrait frame is
+    not cached sideways.
+    """
+    if img is None:
+        return
+    try:
+        src = Path(path)
+        st = src.stat()
+        for w in (thumbs.GRID_MAX_WIDTH, thumbs.COMPARE_WIDTH):
+            dest = thumbs.cache_file(thumb_dir, src, w, st=st)
+            if not dest.exists():
+                thumbs.write(dest, thumbs.encode(img, w))
+    except Exception as exc:
+        warnings.warn(f"Thumbnail failed {path}: {exc}")  # the webapp renders it on demand
+
+
+def _run_score_model(
+    paths: list[str], device: str = DEVICE, thumb_dir: Path | None = None
+) -> dict[str, np.ndarray]:
+    """Batch-score images. Returns dict of raw component arrays.
+
+    Writes the webapp's thumbnails as a side effect when thumb_dir is given:
+    scoring already decodes every photo off the NAS, which is the expensive
+    part, so the derivatives cost 147ms per photo on top of the 717ms already
+    being spent. Rendering them later from the webapp instead costs ~1310ms
+    per photo, and costs it while someone is waiting to look at them.
+    """
     import pyiqa
     import torchvision.transforms.functional as TF
 
@@ -690,6 +731,10 @@ def _run_score_model(paths: list[str], device: str = DEVICE) -> dict[str, np.nda
     for batch_start in tqdm(range(0, n, SCORE_BATCH_SIZE), desc=f"Scoring images ({n} total)"):
         batch_end = min(batch_start + SCORE_BATCH_SIZE, n)
         imgs = [_load_img(paths[i]) for i in range(batch_start, batch_end)]
+
+        if thumb_dir is not None:
+            for i, img in zip(range(batch_start, batch_end), imgs):
+                _emit_thumbs(thumb_dir, paths[i], img)
 
         # Neural metrics: resize to SCORE_RESIZE for uniform batching
         tensors = [
@@ -743,6 +788,7 @@ def score_images(
     paths: list[str],
     cache_path: Path,
     device: str = DEVICE,
+    thumb_dir: Path | None = None,
 ) -> tuple[list[float], dict]:
     """Compute or load cached scores. Incremental: only new paths are scored.
 
@@ -770,7 +816,7 @@ def score_images(
                 return _compute_scores_from_components(components), components
 
             print(f"Incremental scoring: {len(cached_paths)} cached + {len(new_paths)} new")
-            new_components = _run_score_model(new_paths, device)
+            new_components = _run_score_model(new_paths, device, thumb_dir)
 
             if set(new_components.keys()) == set(old_components.keys()):
                 new_idx = {p: i for i, p in enumerate(new_paths)}
@@ -788,7 +834,7 @@ def score_images(
             # Keys differ (metric added/removed) → fall through to full recompute
 
     # Full recompute (also handles legacy cache without paths sidecar)
-    components = _run_score_model(paths, device)
+    components = _run_score_model(paths, device, thumb_dir)
     scores = _compute_scores_from_components(components)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(str(cache_path), **components)
@@ -1068,7 +1114,7 @@ def run_pipeline(
         auto_loose=auto_loose,
     )
 
-    scores, components = score_images(paths, cache_path=score_cache)
+    scores, components = score_images(paths, cache_path=score_cache, thumb_dir=out)
     results = rank_and_save(paths, clusters, scores, embeddings, out, timestamps=timestamps, components=components)
 
     if video_highlights:
@@ -1108,7 +1154,6 @@ def main():
     args = parser.parse_args()
 
     if args.output_dir is None:
-        import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
         from projects import project_output_dir
         args.output_dir = str(project_output_dir(Path(args.image_dir)))
