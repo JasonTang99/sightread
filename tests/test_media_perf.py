@@ -5,6 +5,9 @@ shows up as first-load lag on a few hundred photos.
 """
 
 import json
+import concurrent.futures
+import os
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -181,3 +184,37 @@ def test_state_starts_the_prewarm_for_cluster_first_users(api, monkeypatch):
     client.get("/api/state")
 
     assert started == [[str(a), str(b)]]
+
+
+def test_transcodes_run_below_the_renders_they_compete_with(tmp_path):
+    """Transcoding is lookahead; nobody is waiting on it.
+
+    Two of them saturate this box — a 2400px thumbnail render, which the user
+    *is* waiting on, went from 334ms idle to 997ms while they ran. Dropping the
+    pool's priority brings that back to 509ms. Linux niceness is per-thread and
+    survives fork/exec, so the ffmpeg children inherit it and the request
+    threads keep their own.
+    """
+    server._deprioritise  # the pool's initializer
+
+    def observed():
+        return os.nice(0)  # returns the caller's niceness without changing it
+
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, initializer=server._deprioritise
+    )
+    try:
+        worker_nice = pool.submit(observed).result()
+        child_nice = pool.submit(
+            lambda: int(
+                subprocess.run(
+                    ["sh", "-c", "ps -o ni= -p $$"], capture_output=True, text=True
+                ).stdout
+            )
+        ).result()
+    finally:
+        pool.shutdown()
+
+    assert worker_nice > 0, "transcode workers must not run at normal priority"
+    assert child_nice == worker_nice, "ffmpeg would not inherit the lowered priority"
+    assert os.nice(0) == 0, "the calling thread's priority must be untouched"

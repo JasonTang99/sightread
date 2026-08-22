@@ -68,10 +68,32 @@ import concurrent.futures
 import threading
 from contextlib import contextmanager
 
-_transcode_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="transcode")
+def _deprioritise() -> None:
+    """Drop this worker thread, and every ffmpeg it spawns, below normal.
+
+    A single 4K HEVC transcode measured 81 threads and 1307% CPU on this
+    16-core box and two run at once, so while the queue drains it is competing
+    with the thumbnails the user is actually waiting on. Measured with two
+    transcodes running, a 2400px render took 997ms against 334ms idle; at
+    nice 15 it takes 509ms. Capping ffmpeg's own thread count instead only got
+    it to 818ms, so this is the knob that matters.
+
+    Linux niceness is per-thread and is inherited across fork/exec, so setting
+    it in the pool's initializer covers the subprocesses without touching the
+    request threads.
+    """
+    os.nice(15)
+
+
+# Transcodes are pure lookahead — nothing plays until the user clicks a video —
+# so they yield to everything else.
+_transcode_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="transcode", initializer=_deprioritise
+)
 # Poster frames get their own worker: one ffmpeg keyframe grab is quick, but
 # queueing it behind a transcode would leave the timeline grid blank for as
-# long as that transcode runs.
+# long as that transcode runs. Left at normal priority — unlike a transcode,
+# a poster is a tile the user is looking at right now.
 _poster_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="poster")
 _transcode_inflight: set[Path] = set()
 _transcode_lock = threading.Lock()
