@@ -73,3 +73,43 @@ def test_output_dir_without_embeddings_is_ignored(tmp_path, monkeypatch):
     (data_dir / "deadbeef").mkdir(parents=True)
 
     assert projects.known_projects() == []
+
+
+def test_embeddings_without_results_is_not_openable(tmp_path):
+    """A run that embedded and then died before ranking is not "ready".
+
+    The review views are all built from results.json and /api/state refuses
+    without it, so reporting "ready" put an Open button on the picker that led
+    straight to "Run pipeline first" — a dead end with no way back except
+    guessing that Run Pipeline was the answer.
+    """
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(b"")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "embeddings_dinov3_mpcls_tta.paths.json").write_text(
+        json.dumps([str(folder / "a.jpg")])
+    )
+
+    assert projects.project_status(folder, out_dir) == "never_run"
+
+    (out_dir / "results.json").write_text(json.dumps({"clusters": []}))
+
+    assert projects.project_status(folder, out_dir) == "ready"
+
+
+def test_results_without_matching_embeddings_is_still_stale(tmp_path):
+    """The results.json check must not shadow the staleness check."""
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(b"")
+    (folder / "b.jpg").write_bytes(b"")  # arrived after the run
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "embeddings_dinov3_mpcls_tta.paths.json").write_text(
+        json.dumps([str(folder / "a.jpg")])
+    )
+    (out_dir / "results.json").write_text(json.dumps({"clusters": []}))
+
+    assert projects.project_status(folder, out_dir) == "stale"
