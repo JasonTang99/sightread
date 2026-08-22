@@ -125,3 +125,59 @@ def test_failed_transcode_is_not_retried_on_every_video_listing(api, monkeypatch
         assert attempts == [src]
     finally:
         server._transcode_failed.discard(src)
+
+
+def _wait_for(pred, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_prewarm_covers_the_compare_width_the_cluster_view_asks_for(api, monkeypatch):
+    """The cluster view requests w=2400, the grid w=800.
+
+    Prewarming only the grid width left every first visit to a cluster paying a
+    ~0.9s render per photo, in a view whose whole job is flipping between
+    near-identical frames quickly.
+    """
+    _, folder, _ = api
+    a = _photo(folder, "a.jpg")
+    seen = []
+    monkeypatch.setattr(server, "_prewarm_one", lambda ctx, p, w: seen.append((p, w)))
+
+    server._start_thumb_prewarm(server._active, [str(a)])
+
+    assert _wait_for(lambda: len(seen) == 2), seen
+    assert sorted(w for _, w in seen) == [
+        server.TIMELINE_THUMB_WIDTH,
+        server.COMPARE_THUMB_WIDTH,
+    ]
+
+
+def test_state_starts_the_prewarm_for_cluster_first_users(api, monkeypatch):
+    """The app lands in the cluster view, not the timeline.
+
+    While /api/gallery was the only caller, a user who never opened the
+    timeline rendered every photo on demand, one cluster at a time.
+    """
+    client, folder, output_dir = api
+    a, b = _photo(folder, "a.jpg"), _photo(folder, "b.jpg")
+    (output_dir / "results.json").write_text(json.dumps({"clusters": [{
+        "cluster_id": 1,
+        "best_image": str(a),
+        "images": [
+            {"path": str(p), "score": 0.5, "centrality": 1.0, "rank": i + 1}
+            for i, p in enumerate((a, b))
+        ],
+    }]}))
+    started = []
+    monkeypatch.setattr(
+        server, "_start_thumb_prewarm", lambda ctx, paths: started.append(paths)
+    )
+
+    client.get("/api/state")
+
+    assert started == [[str(a), str(b)]]
