@@ -41,6 +41,14 @@ def project_status(folder: Path, output_dir: Path) -> ProjectStatus:
     sidecar = output_dir / "embeddings_dinov3_mpcls_tta.paths.json"
     if not sidecar.exists():
         return "never_run"
+    # Embeddings alone are not something the app can open: every review view is
+    # built from results.json, and /api/state refuses without it. A run that
+    # embedded and then died before ranking used to report "ready" anyway, so
+    # the picker offered an Open button that led straight to "Run pipeline
+    # first". Rerunning is the way out, and it is cheap — the embeddings that
+    # are on disk are reused.
+    if not (output_dir / "results.json").exists():
+        return "never_run"
     try:
         processed = set(json.loads(sidecar.read_text()))
     except Exception:
