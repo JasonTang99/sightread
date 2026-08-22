@@ -162,8 +162,17 @@ _undo_stack: list[dict] = []
 # rather than theoretical. Serialise the writers; readers are left alone.
 _curation_lock = threading.Lock()
 
-# Width the timeline grid requests; kept in sync with TimelineView.tsx.
+# Widths the two review surfaces request; kept in sync with TimelineView.tsx
+# (the grid) and ClusterView.tsx (the side-by-side compare).
 TIMELINE_THUMB_WIDTH = 800
+COMPARE_THUMB_WIDTH = 2400
+
+# Thumbnailing is libjpeg decode plus PIL resampling, and both release the GIL,
+# so the prewarm pool scales with cores instead of sitting at two: on this
+# machine 24 cold 40MP frames take 15.4s one at a time and 2.6s twelve at a
+# time. Half the box, capped, keeps enough cores free for the request
+# threadpool to serve a tile the user is actually looking at.
+_PREWARM_WORKERS = max(2, min(8, (os.cpu_count() or 4) // 2))
 _prewarm_lock = threading.Lock()
 _prewarm_started: set[str] = set()
 
@@ -255,6 +264,18 @@ def get_state():
         [c for c in data["clusters"] if len(c["images"]) > 1]
     )
     singletons = [c for c in data["clusters"] if len(c["images"]) == 1]
+    # The app lands in the cluster view, so a user who never opens the timeline
+    # would otherwise never trigger a prewarm and would pay for every render as
+    # they reached it. Review order, so the pool stays ahead of the cursor.
+    _start_thumb_prewarm(
+        ctx,
+        [
+            img["path"]
+            for c in clusters + singletons
+            for img in c["images"]
+            if decisions.get(img["path"]) != DELETED
+        ],
+    )
     return {
         "no_project": False,
         "needs_pipeline": False,
@@ -1041,11 +1062,13 @@ def _prewarm_one(ctx: ProjectContext, raw_path: str, w: int) -> None:
 
 
 def _start_thumb_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
-    """Build the timeline's thumbnails in the background.
+    """Build both review surfaces' thumbnails in the background.
 
-    Generating one is ~0.5s of LANCZOS resize, and the browser only opens six
-    connections, so a cold project leaves the tail of the timeline grid empty
-    for a long while. Prewarming turns those requests into cache hits.
+    A cold 40MP frame costs ~0.5s at grid width and ~0.9s at compare width, and
+    the browser only opens six connections, so without this the tail of the
+    timeline stays empty and the first visit to every cluster waits on renders
+    the server could have done while the user was reading the one before it.
+    Prewarming turns both into cache hits.
     """
     key = str(ctx.output_dir)
     with _prewarm_lock:
@@ -1054,11 +1077,14 @@ def _start_thumb_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
         _prewarm_started.add(key)
 
     def _run() -> None:
-        # Two workers: enough to stay ahead of scrolling, few enough to leave
-        # the request threadpool free for tiles already on screen.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            for p in raw_paths:
-                pool.submit(_prewarm_one, ctx, p, TIMELINE_THUMB_WIDTH)
+        with ThreadPoolExecutor(max_workers=_PREWARM_WORKERS) as pool:
+            # Grid width first and to completion. It is what fills the screen on
+            # arrival, each one is half the work of a compare render, and the
+            # compare pass is only ever ahead of the user, never blocking them.
+            for w in (TIMELINE_THUMB_WIDTH, COMPARE_THUMB_WIDTH):
+                # _prewarm_one swallows its own failures, so nothing raises here.
+                for f in [pool.submit(_prewarm_one, ctx, p, w) for p in raw_paths]:
+                    f.result()
 
     threading.Thread(target=_run, daemon=True).start()
 
