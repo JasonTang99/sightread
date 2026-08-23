@@ -295,3 +295,16 @@ def test_cli_dry_run_reports_sidecars_and_deletes_nothing(drives, capsys):
     out_text = capsys.readouterr().out
     assert "DSCF3.RAF" in out_text
     assert "1 sidecar file(s)" in out_text
+
+
+def test_cli_refuses_when_mirror_drive_is_not_mounted(drives, monkeypatch, tmp_path):
+    folder, mirror_folder, out = drives
+    monkeypatch.setattr(delete_marked, "MIRROR_ROOT", tmp_path / "not-mounted")
+    src = _photo(folder, mirror_folder, "a.jpg")
+    _pending(out, src)
+
+    with pytest.raises(SystemExit, match="Mirror drive not mounted"):
+        delete_marked.delete_marked(str(out))
+
+    assert src.exists()
+    assert _queue(out) == [str(src)]

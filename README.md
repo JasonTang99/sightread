@@ -119,8 +119,19 @@ export SIGHTREAD_PRIMARY_ROOT=/mnt/h0
 export SIGHTREAD_MIRROR_ROOT=/mnt/h1/h0
 ```
 
-Get this wrong and nothing is destroyed — every file simply fails verification and stays
-queued, reported as unmirrored. Check with a dry run before trusting it.
+The mirror drive holds its copy under an `h0/` directory, which is why the mirror root is
+`/mnt/h1/h0` rather than `/mnt/h1`: a photo at
+`/mnt/h0/Editing/imports/trips/2026_01_Japan/DSCF4526.JPG` mirrors to
+`/mnt/h1/h0/Editing/imports/trips/2026_01_Japan/DSCF4526.JPG`.
+
+Get this wrong and nothing is destroyed — every file fails verification and stays queued,
+reported as unmirrored. That failure is silent enough to look like a no-op, so applying
+deletes now refuses outright when the mirror root is not a mounted directory.
+
+**Mount the drives by UUID, not by `/dev/sdX`.** Those letters are handed out in probe
+order, so plugging in any USB storage can renumber them and mount a drive at the wrong
+path — including mounting the *primary* where the tool expects the *mirror*. Check with
+`lsblk -f` if verification starts failing for everything at once.
 
 Preview before committing:
 

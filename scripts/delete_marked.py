@@ -118,6 +118,13 @@ def delete_marked(
     # recorded as destroyed. Refuse rather than write that down.
     if not PRIMARY_ROOT.is_dir():
         raise SystemExit(f"Primary drive not mounted at {PRIMARY_ROOT}. Refusing to run.")
+    # An absent mirror root defers every file rather than deleting one, which is
+    # safe but reads as "the script did nothing". Name the cause.
+    if not MIRROR_ROOT.is_dir():
+        raise SystemExit(
+            f"Mirror drive not mounted at {MIRROR_ROOT}. Nothing could be verified. "
+            f"Check $SIGHTREAD_MIRROR_ROOT. Refusing to run."
+        )
 
     root_path = Path(root).resolve() if root else None
 
