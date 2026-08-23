@@ -248,3 +248,50 @@ def test_legacy_queue_is_migrated_before_sweeping(drives):
     assert kept.exists()  # keep outranks the stale queue entry
     assert not doomed.exists()
     assert _manifest_lines(mirror_folder) == ["doomed.jpg"]
+
+
+# ---------------------------------------------------------------------------
+# Raw + sidecar sweep — mirrors tests/test_apply_deletes.py, since both
+# deleters share utils.sidecars_of and must not drift apart.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_deletes_raw_and_xmp_alongside_the_jpeg(drives, capsys):
+    folder, mirror_folder, out = drives
+    jpg = _photo(folder, mirror_folder, "DSCF1.JPG")
+    raw = _photo(folder, mirror_folder, "DSCF1.RAF", body=b"raw", mirror_body=b"raw")
+    xmp = _photo(folder, mirror_folder, "DSCF1.RAF.xmp", body=b"<x/>", mirror_body=b"<x/>")
+    _pending(out, jpg)
+
+    delete_marked.delete_marked(str(out))
+
+    assert not jpg.exists() and not raw.exists() and not xmp.exists()
+    assert "2 sidecar file(s)" in capsys.readouterr().out
+    assert sorted(_manifest_lines(mirror_folder)) == ["DSCF1.JPG", "DSCF1.RAF", "DSCF1.RAF.xmp"]
+    assert _queue(out) == []
+
+
+def test_cli_unmirrored_raw_defers_the_whole_shot(drives):
+    folder, mirror_folder, out = drives
+    jpg = _photo(folder, mirror_folder, "DSCF2.JPG")
+    raw = _photo(folder, mirror_folder, "DSCF2.RAF", body=b"raw", mirror_body=None)
+    _pending(out, jpg)
+
+    delete_marked.delete_marked(str(out))
+
+    assert jpg.exists() and raw.exists()
+    assert _queue(out) == [str(jpg)]
+
+
+def test_cli_dry_run_reports_sidecars_and_deletes_nothing(drives, capsys):
+    folder, mirror_folder, out = drives
+    jpg = _photo(folder, mirror_folder, "DSCF3.JPG")
+    raw = _photo(folder, mirror_folder, "DSCF3.RAF", body=b"raw", mirror_body=b"raw")
+    _pending(out, jpg)
+
+    delete_marked.delete_marked(str(out), dry_run=True)
+
+    assert jpg.exists() and raw.exists()
+    out_text = capsys.readouterr().out
+    assert "DSCF3.RAF" in out_text
+    assert "1 sidecar file(s)" in out_text

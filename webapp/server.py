@@ -34,6 +34,7 @@ from utils import (
     migrate_project_state,
     paths_with_status,
     save_decisions,
+    sidecars_of,
     sort_clusters_chronologically,
 )
 
@@ -448,13 +449,20 @@ def get_trash():
 
 @app.post("/api/apply-deletes")
 def apply_deletes():
-    """Delete every pending-delete file from the primary drive.
+    """Delete every pending-delete file, and its sidecars, from the primary drive.
 
     The primary drive (h0) is the small one, so applying deletes has to actually
     reclaim its space rather than shuffle files into a trash folder. The mirror
     drive (h1) is left whole and becomes the sole remaining copy, so a file is
     only unlinked once its mirror has been shown to exist at a matching size —
     anything that fails that check is skipped and reported, never deleted.
+
+    A queued JPEG stands for the *shot*, not for one file: the camera also wrote
+    a raw next to it, and each of those may carry an `.xmp`. Deleting only the
+    JPEG reclaimed a tenth of the space and left the raw orphaned — on a 349-shot
+    queue, 6.6GB of 63GB. So the whole group goes, and it goes atomically: if any
+    member fails the mirror check the entire shot stays queued, because a half-
+    deleted shot is worse than a deferred one.
 
     Each project's mirror directory also gets an appended plain-text list of the
     filenames deleted from the primary, so the mirror can be pruned later.
@@ -467,9 +475,11 @@ def apply_deletes():
     if not ctx.folder.is_dir():
         raise HTTPException(409, f"Project folder unavailable: {ctx.folder}. Is the drive mounted?")
 
-    deleted: list[str] = []
+    deleted: list[str] = []       # queue entries settled — one per shot
+    removed_names: list[str] = []  # every file unlinked, sidecars included
     unmirrored: list[str] = []
     skipped = 0
+    companions = 0
     freed_bytes = 0
     # Held across the whole run: a confirm landing mid-sweep would otherwise be
     # erased by the status rewrite below, or get its file unlinked before the
@@ -491,18 +501,23 @@ def apply_deletes():
                 updates[entry] = DELETED
                 skipped += 1
                 continue
-            mirror = _mirror_path(src)
-            if mirror is None or not mirror.is_file() or mirror.stat().st_size != src.stat().st_size:
-                # Stays queued so a later run retries once the mirror is in place.
+            group = [src, *sidecars_of(src)]
+            group = [p for p in group if _in_allowed_dirs(p, ctx)]
+            if not all(_mirror_verified(p) for p in group):
+                # Stays queued so a later run retries once the mirror is in
+                # place — all of it, so the shot is never split across drives.
                 unmirrored.append(entry)
                 continue
-            size = src.stat().st_size
-            src.unlink()
-            freed_bytes += size
+            for path in group:
+                size = path.stat().st_size
+                path.unlink()
+                freed_bytes += size
+                removed_names.append(path.name)
+            companions += len(group) - 1
             deleted.append(src.name)
             updates[entry] = DELETED
 
-        manifest = _append_mirror_manifest(ctx, deleted)
+        manifest = _append_mirror_manifest(ctx, removed_names)
         if updates:
             save_decisions(ctx.output_dir, updates)
         # Undo entries reference files that are no longer on disk — drop them,
@@ -511,6 +526,7 @@ def apply_deletes():
     return {
         "ok": True,
         "deleted": len(deleted),
+        "companions": companions,
         "skipped": skipped,
         "unmirrored": unmirrored,
         "freed_bytes": freed_bytes,
@@ -532,6 +548,12 @@ def _mirror_path(src: Path) -> Optional[Path]:
         return MIRROR_ROOT / src.relative_to(PRIMARY_ROOT)
     except ValueError:
         return None
+
+
+def _mirror_verified(src: Path) -> bool:
+    """True once `src` is known to exist on the mirror drive at a matching size."""
+    mirror = _mirror_path(src)
+    return mirror is not None and mirror.is_file() and mirror.stat().st_size == src.stat().st_size
 
 
 def _append_mirror_manifest(ctx: ProjectContext, names: list[str]) -> Optional[Path]:

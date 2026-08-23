@@ -285,3 +285,42 @@ def pending_deletes(output_dir) -> list[str]:
 
 def favorites(output_dir) -> list[str]:
     return paths_with_status(load_decisions(output_dir), FAVORITE)
+
+
+# One shot on disk is several files: the JPEG the pipeline ranked, the camera's
+# raw beside it, and an `.xmp` per file once anything has touched them in a raw
+# editor. Only the JPEG is ever in the decision queue, so deleting a shot means
+# finding the rest by name.
+RAW_EXTENSIONS = {
+    ".raf", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2",
+    ".dng", ".orf", ".rw2", ".raw", ".pef", ".srw", ".3fr", ".erf",
+    ".mef", ".mos", ".iiq", ".x3f",
+}
+SIDECAR_SUFFIX = ".xmp"
+
+
+def sidecars_of(src: Path) -> list[Path]:
+    """Every other file on disk belonging to the same shot as `src`.
+
+    Matched by stem within the one directory rather than by scanning: a trip
+    folder holds thousands of entries and this runs per queued shot. Both
+    sidecar spellings are covered — `DSCF1234.JPG.xmp` (appended, what most
+    editors write) and `DSCF1234.xmp` (replaced).
+    """
+    out: list[Path] = []
+    seen = {src}
+
+    def add(candidate: Path) -> None:
+        if candidate not in seen and candidate.is_file():
+            seen.add(candidate)
+            out.append(candidate)
+
+    add(src.with_name(src.name + SIDECAR_SUFFIX))
+    add(src.with_suffix(SIDECAR_SUFFIX))
+    for ext in RAW_EXTENSIONS:
+        for raw in (src.with_suffix(ext), src.with_suffix(ext.upper())):
+            if not raw.is_file():
+                continue
+            add(raw)
+            add(raw.with_name(raw.name + SIDECAR_SUFFIX))
+    return out

@@ -44,10 +44,13 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
 
   const applyDeletes = async () => {
     const warning =
-      `Permanently delete ${pendingCount} file(s) from the primary drive?\n\n` +
-      `This frees space on the primary drive. Each file is only deleted after its ` +
-      `copy on the mirror drive is verified, and the mirror keeps that copy — so ` +
-      `recovery means restoring from the mirror. This cannot be undone here.`;
+      `Permanently delete ${pendingCount} shot(s) from the primary drive?\n\n` +
+      `Each shot takes its raw file and any .xmp sidecars with it, so this removes ` +
+      `more files than the ${pendingCount} shown — and far more bytes, since the raw ` +
+      `is the big one.\n\n` +
+      `Each file is only deleted after its copy on the mirror drive is verified at a ` +
+      `matching size, and the mirror keeps that copy — so recovery means restoring ` +
+      `from the mirror. This cannot be undone here.`;
     if (!window.confirm(warning)) return;
     setApplying(true);
     try {
@@ -55,7 +58,11 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
       if (!res.ok) throw new Error(`Apply failed: ${res.status}`);
       const data = await res.json();
       const gb = (data.freed_bytes ?? 0) / 1024 ** 3;
-      const parts = [`Deleted ${data.deleted} file(s) from the primary drive, freeing ${gb.toFixed(2)} GB`];
+      const companions = data.companions ?? 0;
+      const withRaws = companions ? ` (+ ${companions} raw/sidecar file(s))` : "";
+      const parts = [
+        `Deleted ${data.deleted} shot(s)${withRaws} from the primary drive, freeing ${gb.toFixed(2)} GB`,
+      ];
       if (data.unmirrored?.length) parts.push(`${data.unmirrored.length} left pending (no verified mirror copy)`);
       // No starred counter: a star and a delete mark are one field now, so a
       // starred photo can never reach the queue in the first place.
@@ -114,7 +121,8 @@ export function TrashPanel({ pendingCount, onRefresh, onError }: Props) {
           <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-gray-500">
               Click an image to mark it for restore, or delete them from the primary drive now.
-              The mirror drive keeps its copies and gets a list of what was removed.
+              Each one takes its raw file and .xmp sidecars with it. The mirror drive keeps its
+              copies and gets a list of what was removed.
             </p>
             <button
               onClick={applyDeletes}
