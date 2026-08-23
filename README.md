@@ -110,17 +110,23 @@ Freeing the photo drive and freeing the cache drive are two different operations
 
 ### Drive roots
 
-Defaults are `/mnt/h0` and `/mnt/h1/h0`, and are configurable. The mirror root must be
+Defaults are `/mnt/h0` and `/mnt/h1`, and are configurable. The mirror root must be
 the directory whose tree *reproduces* the primary's, so that a photo at
 `$PRIMARY_ROOT/rest/of/path` mirrors to `$MIRROR_ROOT/rest/of/path`:
 
 ```bash
 export SIGHTREAD_PRIMARY_ROOT=/mnt/h0
-export SIGHTREAD_MIRROR_ROOT=/mnt/h1/h0
+export SIGHTREAD_MIRROR_ROOT=/mnt/h1
 ```
 
-Get this wrong and nothing is destroyed — every file simply fails verification and stays
-queued, reported as unmirrored. Check with a dry run before trusting it.
+Here `/mnt/h0/Editing/imports/trips/2026_01_Japan/DSCF4526.JPG` mirrors to
+`/mnt/h1/Editing/imports/trips/2026_01_Japan/DSCF4526.JPG` — the roots differ, everything
+after them does not.
+
+Get this wrong and nothing is destroyed — every file fails verification and stays queued,
+reported as unmirrored. That failure is silent enough to look like a no-op, so applying
+deletes refuses outright when the mirror root is not a mounted directory. Confirm with a
+dry run before trusting a changed root.
 
 Preview before committing:
 
