@@ -58,6 +58,11 @@ from video import (
     poster_path as video_poster_path,
     transcode_for_web,
 )
+from exports import (
+    EXPORTS_ROOT,
+    export_favorites,
+    plan_export,
+)
 from clips import (
     EXPORT_DIR_NAME,
     ClipExportError,
@@ -691,6 +696,44 @@ def _scan_videos(ctx: ProjectContext) -> list[str]:
             if not _is_exported_clip(rp, folder):
                 found.append(str(rp))
     return sorted(found)
+
+
+@app.get("/api/exports/preview")
+def preview_favorites_export():
+    """What exporting this trip's favourites would copy, and whether it fits.
+
+    The exports root can sit on the same drive applying deletes just freed, so
+    the caller gets the size and the free space before agreeing to anything.
+    """
+    ctx = _require_active()
+    return plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+
+
+@app.post("/api/exports/favorites")
+def run_favorites_export():
+    """Copy every favourited shot into <EXPORTS_ROOT>/<trip name>/."""
+    ctx = _require_active()
+    # Same reasoning as the mirror guard on apply-deletes: an exports root that
+    # is not there means an unmounted drive, and creating the tree would write
+    # the trip into the empty mountpoint on the system disk instead.
+    if not EXPORTS_ROOT.is_dir():
+        raise HTTPException(
+            409,
+            f"Exports root unavailable: {EXPORTS_ROOT}. Check SIGHTREAD_EXPORTS_ROOT "
+            f"and that the drive is mounted.",
+        )
+    plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    free = plan["free_bytes"]
+    if free is not None and plan["bytes"] > free:
+        raise HTTPException(
+            409,
+            f"Not enough space: {plan['bytes'] / 1024 ** 3:.2f} GB to copy, "
+            f"{free / 1024 ** 3:.2f} GB free on {EXPORTS_ROOT}.",
+        )
+    # No curation lock: this only reads decisions and writes into the exports
+    # tree, so it cannot race with a confirm the way apply-deletes can.
+    report = export_favorites(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    return {"ok": True, **report.as_dict()}
 
 
 @app.get("/api/videos")
