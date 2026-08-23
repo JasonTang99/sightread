@@ -146,3 +146,88 @@ home network is permitted by employer device policy. Orthogonal to the technical
   standalone `scripts/delete_marked.py` (already supports `--dry-run`). Home box can be offline
   during curation. Cost: no video review, no full-res compare. Keep as fallback if the tunnel
   route is blocked by device policy.
+
+---
+
+## Next: finishing a trip end to end (spec, not yet built)
+
+Added 2026-08-23. The gap: curation produces decisions, but turning those decisions into
+*outcomes* — space reclaimed on h0, favourites delivered somewhere useful — is either buried
+or missing. What follows is one linear "finish this trip" flow, in the order it would run.
+
+### Step 1 — Apply the deletes. **Mostly already built.**
+
+`POST /api/apply-deletes` (`webapp/server.py:449`) already unlinks every `to_delete` file from
+the primary drive, and it is already mirror-safe: a file is only removed once its h1 copy is
+confirmed present at a matching size, anything failing that check is skipped and reported, and
+the run refuses outright if the project folder is not mounted. The button exists in
+`TrashPanel` (`components/TrashPanel.tsx:120`).
+
+What is actually missing is placement. `TrashPanel` is rendered inside the clusters, singles
+and timeline tabs (`App.tsx:339,364,381`), so "apply the deletes" reads as a per-tab side panel
+rather than the end of the job. Japan has 349 photos sitting at `to_delete` and nothing in the
+header says so beyond a grey "349 pending".
+
+- Surface it as step 1 of the finish flow, not only as a panel.
+- Keep every existing safety property. Do not reimplement the deletion.
+
+### Step 2 — Export favourites. **New.**
+
+Copy the trip's favourites into `/mnt/h0/Editing/exports/<trip name>/`, where `<trip name>` is
+the project folder's basename (`2026_01_Japan`). The exports root exists and is currently a flat
+dump of PNGs from 2024, so this also gives it structure.
+
+- **What counts as a favourite**: photos with status `favorite` in `decisions.json`
+  (`paths_with_status(decisions, FAVORITE)`, already what `/api/favorites` serves). Videos can be
+  starred too — `VideoView` has the star control and posts to the same `/api/favorite` — so the
+  same status covers both. Japan currently has 16.
+- **Copy the originals**, not the caches. Never the `video_cache` transcode: it is 1440p and
+  bitrate-capped for scrubbing. This is the same rule clip export already follows.
+- **Collisions**: two trips can hold the same filename, and re-exporting must not silently
+  double up. Skip a file already present at a matching size; otherwise suffix it, the way
+  `clips.py` already names its outputs.
+- **Report** how many were copied, skipped and failed. Do not fail the whole export on one bad
+  file.
+
+Open questions to settle before building:
+
+- Favourited **videos**: copy the whole original, or the exported clips (`clips.py` already cuts
+  to `<project folder>/clips/`)? A favourited 4K original can be 20GB+; the clips are the part
+  that was actually wanted. Suggest: whole original by default, with the clips alongside if any
+  exist.
+- The exports root is on **h0 — the drive this flow just freed**. Copying favourites back onto
+  it partly undoes step 1. Worth a size estimate in the confirm dialog, or an exports root on h1.
+- Should the root be configurable, or is `/mnt/h0/Editing/exports` fixed?
+
+### Step 3 — Clear the pipeline and caches. **Partly built.**
+
+Offered *after* a successful export, and only then — it destroys the ability to re-review.
+
+- `POST /api/projects/done` (added 2026-08-22) already deletes `thumb_cache`, `poster_cache` and
+  `video_cache` and marks the project finished. That is the cache half.
+- The pipeline half exists only as CLI: `scripts/clean_cache.py` removes `results.json`,
+  `clusters.json`, the embeddings, the score cache and `video_highlights.json`.
+- Missing: a UI path for the pipeline half, and the decision about `decisions.json`. Clearing it
+  discards the record of what was deleted and why; keeping it means a later rerun starts from
+  the previous verdicts. Suggest keeping it, and saying so on the button.
+
+Guard it properly. Deleting pipeline output after the deletes are applied means the record of
+which photos were removed lives only in `decisions.json` and the mirror manifest.
+
+### Suggested shape
+
+A "Finish trip" panel that walks the three steps, each showing its own count and staying
+disabled until the one before it has run. It is the same three destructive operations already
+scattered across the app, put in the order that makes them safe: delete only what was reviewed,
+export before destroying the ability to re-review, clear last.
+
+### Related, found while measuring — worth folding in
+
+- **~144GB of stale `video_cache` across projects**, 140GB of it under Hawaii: 89 files at
+  4K/194Mbps, output from an older converter whose cache keys the current code no longer
+  computes, so nothing will ever read them. `POST /api/projects/done` reclaims them per project,
+  but orphans in a project still being curated need a keyed sweep — delete any `video_cache` /
+  `thumb_cache` / `poster_cache` entry whose key no source file currently maps to.
+- **Japan reads 324/388 reviewed** because all 64 videos are genuinely undecided. The tab used to
+  badge them "✓ reviewed" from localStorage; that is fixed, but the videos still need reviewing
+  before the finish flow would have a complete set of decisions to act on.
