@@ -474,6 +474,16 @@ def apply_deletes():
     # rather than record a project-wide deletion that never happened.
     if not ctx.folder.is_dir():
         raise HTTPException(409, f"Project folder unavailable: {ctx.folder}. Is the drive mounted?")
+    # A mirror root pointing at nothing — the drive unmounted, or mounted
+    # somewhere else because /dev/sdX letters moved — fails every verification
+    # and defers the whole queue. Safe, but indistinguishable from having
+    # nothing to do, and the reflex is to run it again. Say what is wrong.
+    if not MIRROR_ROOT.is_dir():
+        raise HTTPException(
+            409,
+            f"Mirror drive unavailable: {MIRROR_ROOT}. Nothing can be verified, so nothing "
+            f"was deleted. Check SIGHTREAD_MIRROR_ROOT and that the drive is mounted.",
+        )
 
     deleted: list[str] = []       # queue entries settled — one per shot
     removed_names: list[str] = []  # every file unlinked, sidecars included
