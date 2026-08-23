@@ -219,12 +219,8 @@ def test_file_outside_primary_root_is_never_deleted(tmp_path, monkeypatch):
     folder.mkdir(parents=True)
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    mirror_root = tmp_path / "h1" / "h0"
-    # Present, so the run gets past the mounted-mirror guard and actually
-    # exercises the case under test: a file that maps to no mirror path at all.
-    mirror_root.mkdir(parents=True)
     monkeypatch.setattr(server, "PRIMARY_ROOT", tmp_path / "h0")
-    monkeypatch.setattr(server, "MIRROR_ROOT", mirror_root)
+    monkeypatch.setattr(server, "MIRROR_ROOT", tmp_path / "h1" / "h0")
     monkeypatch.setattr(
         server, "_active", ProjectContext(folder=folder, output_dir=output_dir)
     )
@@ -343,27 +339,3 @@ def test_favorite_raw_survives(api):
 
     assert star.exists() and star_raw.exists()
     assert load_decisions(output_dir)[str(star)] == FAVORITE
-
-
-def test_refuses_when_mirror_drive_is_not_mounted(tmp_path, monkeypatch):
-    """An absent mirror root defers everything — say so rather than look like a no-op."""
-    primary_root = tmp_path / "h0"
-    folder = primary_root / "trips" / "japan"
-    folder.mkdir(parents=True)
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    monkeypatch.setattr(server, "PRIMARY_ROOT", primary_root)
-    monkeypatch.setattr(server, "MIRROR_ROOT", tmp_path / "not-mounted")
-    monkeypatch.setattr(
-        server, "_active", ProjectContext(folder=folder, output_dir=output_dir)
-    )
-    src = folder / "a.jpg"
-    src.write_bytes(b"pixels")
-    save_decisions(output_dir, {str(src): TO_DELETE})
-
-    res = TestClient(server.app, base_url="http://localhost").post("/api/apply-deletes")
-
-    assert res.status_code == 409
-    assert "Mirror drive unavailable" in res.json()["detail"]
-    assert src.exists()
-    assert _queue(output_dir) == [str(src)]

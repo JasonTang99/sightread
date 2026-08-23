@@ -474,16 +474,6 @@ def apply_deletes():
     # rather than record a project-wide deletion that never happened.
     if not ctx.folder.is_dir():
         raise HTTPException(409, f"Project folder unavailable: {ctx.folder}. Is the drive mounted?")
-    # A mirror root pointing at nothing — unmounted drive, or a stale
-    # SIGHTREAD_MIRROR_ROOT after the mount layout changed — fails every
-    # verification and defers the entire queue. That is safe but indistinguishable
-    # from a no-op, and the reflex is to run it again. Say what is wrong instead.
-    if not MIRROR_ROOT.is_dir():
-        raise HTTPException(
-            409,
-            f"Mirror drive unavailable: {MIRROR_ROOT}. Nothing can be verified, so nothing "
-            f"was deleted. Check SIGHTREAD_MIRROR_ROOT and that the drive is mounted.",
-        )
 
     deleted: list[str] = []       # queue entries settled — one per shot
     removed_names: list[str] = []  # every file unlinked, sidecars included
@@ -548,7 +538,7 @@ def apply_deletes():
 # kept whole). The mirror reproduces the primary's tree under a prefix, so the
 # path mapping is a single prefix swap.
 PRIMARY_ROOT = Path(os.environ.get("SIGHTREAD_PRIMARY_ROOT", "/mnt/h0"))
-MIRROR_ROOT = Path(os.environ.get("SIGHTREAD_MIRROR_ROOT", "/mnt/h1"))
+MIRROR_ROOT = Path(os.environ.get("SIGHTREAD_MIRROR_ROOT", "/mnt/h1/h0"))
 MIRROR_MANIFEST_NAME = ".sightread_deleted.txt"
 
 
