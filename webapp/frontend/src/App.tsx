@@ -343,6 +343,7 @@ export default function App() {
         ) : tab === "videos" ? (
           <VideoView
             videos={reviewableVideos}
+            statuses={videoStatuses}
             highlights={videoHighlights}
             userClips={videoUserClips}
             onError={setError}

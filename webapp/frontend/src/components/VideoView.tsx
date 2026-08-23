@@ -1,19 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
-import type { UserClip, UserClipsMap, VideoHighlightsMap } from "../types";
+import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "../types";
 
-const CONFIRMED_KEY = "sightread_confirmed_videos";
 const MIN_CLIP_LEN = 0.5;
 const NEW_CLIP_LEN = 4;
-
-function loadConfirmed(): Set<string> {
-  try { return new Set(JSON.parse(localStorage.getItem(CONFIRMED_KEY) ?? "[]")); }
-  catch { return new Set(); }
-}
-
-function saveConfirmed(s: Set<string>) {
-  try { localStorage.setItem(CONFIRMED_KEY, JSON.stringify([...s])); } catch {}
-}
 
 function fmtTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -170,6 +160,9 @@ function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSe
 
 interface Props {
   videos: string[];
+  // Server-side decision per video. "reviewed" means exactly this, not a
+  // browser-local memory of having pressed enter — see the note on `reviewed`.
+  statuses?: VideoStatuses;
   onError: (msg: string) => void;
   onConfirmed: () => Promise<void>;
   favorites?: string[];
@@ -178,10 +171,25 @@ interface Props {
   userClips?: UserClipsMap;
 }
 
-export function VideoView({ videos, onError, onConfirmed, favorites = [], onToggleFavorite, highlights = {}, userClips = {} }: Props) {
+export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorites = [], onToggleFavorite, highlights = {}, userClips = {} }: Props) {
   const [idx, setIdx] = useState(0);
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
-  const [confirmed, setConfirmed] = useState<Set<string>>(loadConfirmed);
+  // Whether a video has been decided, straight off the server. This used to be
+  // a localStorage set of paths, which drifted the moment the two disagreed:
+  // clearing the decisions server-side left every video still badged "reviewed"
+  // here while the header counted them unreviewed, and the set was one global
+  // key pruned against the open project, so switching projects silently wiped
+  // the other one's marks.
+  // Decisions made since the last refetch. persist() writes through without
+  // reloading, so without this the badge would lag a keystroke behind the
+  // server. Session-only on purpose: a reload takes the server's word, which is
+  // what stops the two from drifting apart the way localStorage did.
+  const [justDecided, setJustDecided] = useState<Set<string>>(new Set());
+  const reviewed = useCallback(
+    (path: string) =>
+      justDecided.has(path) || (path in statuses && statuses[path] !== "undecided"),
+    [statuses, justDecided],
+  );
   const [submitting, setSubmitting] = useState(false);
   // Browsers block autoplay *with sound* until the user interacts with the page.
   // Start muted so the clip always plays, then unmute on the first gesture.
@@ -222,22 +230,16 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       for (const v of videos) next[v] = prev[v] ?? true;
       return next;
     });
-    // Prune confirmed entries for videos that no longer exist (deleted or
-    // moved) so the localStorage set doesn't grow forever.
-    const here = new Set(videos);
-    const stored = loadConfirmed();
-    const pruned = new Set([...stored].filter((v) => here.has(v)));
-    if (pruned.size !== stored.size) saveConfirmed(pruned);
-    setConfirmed(pruned);
     const prevPath = prevCurrentRef.current;
     const stillThere = prevPath != null ? videos.indexOf(prevPath) : -1;
     if (stillThere >= 0) {
       setIdx(stillThere);
     } else {
-      const first = videos.findIndex((v) => !pruned.has(v));
+      // Land on the first thing still needing a decision.
+      const first = videos.findIndex((v) => !reviewed(v));
       setIdx(first >= 0 ? first : 0);
     }
-  }, [videos]);
+  }, [videos, reviewed]);
 
   useEffect(() => {
     prevCurrentRef.current = current;
@@ -472,15 +474,7 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
     ) return;
     if (e.key === "Enter") {
       e.preventDefault();
-      if (current) {
-        persist(current, keeps[current] ?? true);
-        setConfirmed((prev) => {
-          const next = new Set(prev);
-          next.add(current);
-          saveConfirmed(next);
-          return next;
-        });
-      }
+      if (current) persist(current, keeps[current] ?? true);
       setIdx((i) => Math.min(videos.length - 1, i + 1));
       return;
     }
@@ -590,7 +584,10 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ delete_paths: keep ? [] : [path], decided_paths: [path] }),
     })
-      .then((res) => { if (!res.ok) throw new Error(`Confirm failed: ${res.status}`); })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
+        setJustDecided((prev) => new Set(prev).add(path));
+      })
       .catch((e) => onError(e instanceof Error ? e.message : String(e)));
   };
 
@@ -633,7 +630,7 @@ export function VideoView({ videos, onError, onConfirmed, favorites = [], onTogg
         <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${isKept ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
           {isKept ? "Keep" : "Delete"}
         </span>
-        {confirmed.has(current) && (
+        {reviewed(current) && (
           <span className="text-xs font-medium px-2 py-0.5 rounded shrink-0 bg-blue-50 text-blue-600" title="Reviewed (enter)">
             ✓ reviewed
           </span>
