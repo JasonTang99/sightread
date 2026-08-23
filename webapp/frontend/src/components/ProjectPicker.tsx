@@ -165,7 +165,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           ) : (
             <ul>
               {recents.map((p) => {
-                const badge = STATUS_BADGE[p.status];
+                const badge = p.done_at
+                  ? { label: "Done", cls: "bg-green-100 text-green-700" }
+                  : STATUS_BADGE[p.status];
                 const isSelected = selected === p.folder;
                 return (
                   <li key={p.folder}>

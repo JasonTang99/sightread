@@ -34,6 +34,9 @@ export interface AppState {
   undo_available: boolean;
   photo_decisions: PhotoDecisions;
   favorites: string[];
+  // When curation was marked finished, or null. A finished project has had its
+  // thumbnails, posters and transcodes deleted and is not prewarmed.
+  done_at: string | null;
 }
 
 // What a grid draws: the four stored decisions collapsed to survives / doomed /
@@ -59,6 +62,7 @@ export interface ProjectEntry {
   last_pipeline_run: string | null;
   image_count: number;
   status: ProjectStatus;
+  done_at: string | null;
 }
 
 export interface FsEntry {

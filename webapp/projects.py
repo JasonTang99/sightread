@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,3 +194,67 @@ def known_projects() -> list[dict]:
         reverse=True,
     )
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Finished projects
+# ---------------------------------------------------------------------------
+DONE_FILENAME = "curation_done.json"
+
+# Everything under these is derived from files that still exist: thumbnails and
+# posters re-render from the originals, transcodes re-encode from them. They are
+# also nearly all of what a project occupies — one finished trip here holds
+# 298MB of thumbnails and 430MB of transcodes against 2MB of actual decisions.
+# Deliberately not listed: results.json, decisions.json, the embeddings, and
+# video_highlights_cache. The first two are the curation itself, and the other
+# two are model output that costs a pipeline run to rebuild, not a resize.
+DERIVED_CACHE_DIRS = ("thumb_cache", "poster_cache", "video_cache")
+
+
+def done_file(output_dir: Path) -> Path:
+    return Path(output_dir) / DONE_FILENAME
+
+
+def is_done(output_dir: Path) -> str | None:
+    """When curation was marked finished, or None if it wasn't."""
+    try:
+        return json.loads(done_file(output_dir).read_text()).get("done_at")
+    except Exception:
+        return None
+
+
+def mark_done(output_dir: Path) -> str:
+    done_at = datetime.now(timezone.utc).isoformat()
+    path = done_file(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"schema_version": 1, "done_at": done_at}, indent=2) + "\n")
+    tmp.replace(path)
+    return done_at
+
+
+def clear_done(output_dir: Path) -> None:
+    done_file(output_dir).unlink(missing_ok=True)
+
+
+def evict_derived_caches(output_dir: Path) -> int:
+    """Delete the regenerable caches for a project. Returns bytes freed.
+
+    Missing directories are not an error: a project may never have had videos,
+    and marking an already-evicted project done again should be a no-op rather
+    than a failure.
+    """
+    output_dir = Path(output_dir)
+    freed = 0
+    for name in DERIVED_CACHE_DIRS:
+        d = output_dir / name
+        if not d.is_dir():
+            continue
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    freed += f.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(d, ignore_errors=True)
+    return freed
