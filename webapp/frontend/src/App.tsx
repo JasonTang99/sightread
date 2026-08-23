@@ -11,12 +11,20 @@ import { TrashPanel } from "./components/TrashPanel";
 import { VideoView } from "./components/VideoView";
 import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "./types";
 
+function formatBytes(n: number): string {
+  if (n < 1e6) return `${Math.round(n / 1e3)} KB`;
+  if (n < 1e9) return `${Math.round(n / 1e6)} MB`;
+  return `${(n / 1e9).toFixed(1)} GB`;
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"clusters" | "singles" | "videos" | "favorites" | "timeline">("clusters");
   const [undoing, setUndoing] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [freedNote, setFreedNote] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [videos, setVideos] = useState<string[]>([]);
   const [videoStatuses, setVideoStatuses] = useState<VideoStatuses>({});
@@ -131,6 +139,31 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setUndoing(false);
+    }
+  };
+
+  const handleToggleDone = async () => {
+    const finishingNow = !state?.done_at;
+    if (finishingNow && !confirm(
+      "Mark this project done?\n\nIts thumbnails, posters and video transcodes " +
+      "are deleted to reclaim the space. Your decisions, favourites and pipeline " +
+      "results are kept, and the previews rebuild if you resume curating."
+    )) return;
+    setFinishing(true);
+    try {
+      const res = await fetch("/api/projects/done", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ done: finishingNow }),
+      });
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      const { freed_bytes } = await res.json();
+      setFreedNote(finishingNow ? `Freed ${formatBytes(freed_bytes)}` : null);
+      await reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFinishing(false);
     }
   };
 
@@ -256,6 +289,23 @@ export default function App() {
           {state.pending_delete_count > 0 && (
             <span className="text-xs text-gray-400">{state.pending_delete_count} pending</span>
           )}
+          {freedNote && <span className="text-xs text-green-600">{freedNote}</span>}
+          <button
+            onClick={handleToggleDone}
+            disabled={finishing}
+            title={
+              state.done_at
+                ? `Marked done ${new Date(state.done_at).toLocaleDateString()}. Resume to prewarm previews again.`
+                : "Finish curating and delete this project's cached previews"
+            }
+            className={`px-2 py-1 text-xs border rounded disabled:opacity-40 ${
+              state.done_at
+                ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+                : "border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {finishing ? "…" : state.done_at ? "✓ Done — resume" : "Mark done"}
+          </button>
           <button
             onClick={handleUndo}
             disabled={!state.undo_available || undoing}

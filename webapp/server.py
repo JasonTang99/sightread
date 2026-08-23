@@ -41,7 +41,11 @@ from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
     image_files_in,
+    clear_done,
+    evict_derived_caches,
+    is_done,
     known_projects,
+    mark_done,
     project_output_dir,
     project_status,
     upsert_recent,
@@ -308,6 +312,7 @@ def get_state():
         "undo_available": len(_undo_stack) > 0,
         "photo_decisions": decisions,
         "favorites": paths_with_status(decisions, FAVORITE),
+        "done_at": is_done(ctx.output_dir),
     }
 
 
@@ -1063,6 +1068,11 @@ def _start_thumb_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
     the server could have done while the user was reading the one before it.
     Prewarming turns both into cache hits.
     """
+    # A finished project has had these deleted on purpose. Rebuilding hundreds
+    # of megabytes because someone opened it to look something up would undo
+    # that silently; it renders on demand instead until curation resumes.
+    if is_done(ctx.output_dir):
+        return
     key = str(ctx.output_dir)
     with _prewarm_lock:
         if key in _prewarm_started:
@@ -1188,6 +1198,7 @@ def list_projects():
             "last_pipeline_run": e.get("last_pipeline_run"),
             "image_count": e.get("image_count", 0),
             "status": status,
+            "done_at": is_done(out_dir),
         })
     return result
 
@@ -1214,7 +1225,12 @@ def open_project(req: FolderRequest):
         _prewarm_started.discard(f"posters:{out_dir}")
     upsert_recent(folder, out_dir)
     status = project_status(folder, out_dir)
-    return {"folder": str(folder), "output_dir": str(out_dir), "status": status}
+    return {
+        "folder": str(folder),
+        "output_dir": str(out_dir),
+        "status": status,
+        "done_at": is_done(out_dir),
+    }
 
 
 @app.post("/api/projects/run-pipeline")
@@ -1234,12 +1250,42 @@ def run_pipeline_endpoint(req: FolderRequest):
     # path, so the stack stays meaningful across it.
     _load_undo(_active)
     invalidate_results_cache(out_dir / "results.json")
+    clear_done(out_dir)  # new output to review; the project is no longer finished
     start_pipeline(
         folder, out_dir, PROJECT_ROOT,
         on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True),
     )
     upsert_recent(folder, out_dir)
     return {"ok": True, "folder": str(folder)}
+
+
+class DoneRequest(BaseModel):
+    done: bool = True
+
+
+@app.post("/api/projects/done")
+def set_project_done(req: DoneRequest):
+    """Mark the active project finished, and reclaim what it was caching.
+
+    Thumbnails, posters and transcodes are the whole cost of a project on disk
+    — one finished trip here was holding 298MB of thumbnails and 430MB of
+    transcodes — and once curation is over none of it is worth keeping, since
+    every byte re-derives from originals that are still there. Unmarking does
+    not restore them; reopening the project rebuilds what it needs.
+    """
+    ctx = _require_active()
+    if not req.done:
+        clear_done(ctx.output_dir)
+        return {"done_at": None, "freed_bytes": 0}
+    done_at = mark_done(ctx.output_dir)
+    freed = evict_derived_caches(ctx.output_dir)
+    # The prewarmer skips finished projects, but it may already be mid-pass on
+    # this one and would write into the directory that was just removed.
+    with _prewarm_lock:
+        _prewarm_started.discard(str(ctx.output_dir))
+        _prewarm_started.discard(f"posters:{ctx.output_dir}")
+    log.info("Marked %s done, freed %.1f MB", ctx.folder, freed / 1e6)
+    return {"done_at": done_at, "freed_bytes": freed}
 
 
 @app.get("/api/projects/job-status")
