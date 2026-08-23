@@ -47,34 +47,88 @@ Then open http://127.0.0.1:8765 in a browser.
 - **Tournament compare** — step through head-to-head matchups, pick winners
 - **Manual compare** — choose any two images for side-by-side comparison
 - **Cluster-by-cluster** — navigate with Prev/Next or jump with dropdown
-- **Mirror-verified deletion** — confirmed deletions go to a pending list; apply them from the Trash panel (or `scripts/delete_marked.py`) to reclaim space on the primary drive. See below.
+- **Mirror-verified deletion** — confirmed deletions go to a pending list; apply them from the Trash panel (or `scripts/delete_marked.py`) to reclaim space on the primary drive. Each shot takes its raw and `.xmp` sidecars with it. See below.
 - **Photo-first UI** — minimal chrome, images fill the screen
 
-## Deletion and the two drives
+## Deletion and the two drives — what to expect
 
 Photos live on two drives: a **primary** (small, curated) and a **mirror** (large, kept whole).
 
-Applying deletes reclaims space on the primary by unlinking files there. A file is
-only unlinked once its copy on the mirror has been verified to exist at a matching
-size; anything that fails the check is left in place and reported, and stays on the
-pending list for a later run. Starred photos are never deleted.
+### What actually gets deleted
+
+**You curate JPEGs; the tool deletes shots.** The pipeline ranks the camera JPEG, so
+that is the only path in the delete queue — but on disk one shot is several files, and
+all of them go together:
+
+| file | example | deleted? |
+| --- | --- | --- |
+| the JPEG you reviewed | `DSCF4526.JPG` | yes |
+| its raw | `DSCF4526.RAF` | yes |
+| `.xmp` sidecars, either spelling | `DSCF4526.JPG.xmp`, `DSCF4526.RAF.xmp`, `DSCF4526.xmp` | yes |
+| a **neighbouring** shot's raw | `DSCF4527.RAF` | no — matched by stem, not by scanning |
+| the web transcode / thumb / poster caches | under the project's output dir | no — separate step, see below |
+
+Raw extensions recognised: `.raf .cr2 .cr3 .crw .nef .nrw .arw .srf .sr2 .dng .orf .rw2
+.raw .pef .srw .3fr .erf .mef .mos .iiq .x3f`, either case.
+
+**This is where the space is.** On a 349-shot Fujifilm queue, measured:
+
+```
+JPG 349   6.64 GB     <- all that a JPEG-only delete would reclaim
+RAF 348  56.48 GB     <- the actual payload
+xmp 697   ~0    GB
+        --------
+total    63.13 GB
+```
+
+### The safety rules
+
+- **Mirror-verified, per file.** Nothing is unlinked until its copy on the mirror is
+  confirmed present *at a matching size*.
+- **All or nothing, per shot.** If any member of the group fails that check — raw not
+  mirrored, sizes differ — the *entire* shot is left in place and stays queued for a
+  later run. A shot is never left half on one drive and half on the other.
+- **Starred photos are unreachable.** `favorite` and `to_delete` are one status field,
+  so a starred shot cannot be in the queue at all. Its raw is safe for the same reason.
+- **Refuses to run unmounted.** If the project folder is not present, the whole call
+  fails with a `409` rather than recording an entire project as deleted.
+- **Not undoable in-app.** Applying deletes clears the undo stack, on disk as well as in
+  memory. Recovery means copying back from the mirror.
 
 The mirror is never pruned by this tool — it keeps every file, and remains the copy
 you recover from. Each mirrored directory gets an appended `.sightread_deleted.txt`
-naming what was removed from the primary, so you can prune the mirror yourself later.
+naming **every file** removed from the primary, raws and sidecars included, so you can
+prune the mirror yourself later.
 
-Drive roots default to `/mnt/h0` and `/mnt/h1/h0` and are configurable:
+### What is *not* deleted here
+
+Applying deletes never touches the derived caches (`thumb_cache/`, `poster_cache/`,
+`video_cache/`). Those live under the project's output dir in `~/.local/share/sightread/`
+— usually a different physical drive from the photos — and are reclaimed separately by
+marking a project done (`POST /api/projects/done`) or by `scripts/clean_cache.py`.
+Freeing the photo drive and freeing the cache drive are two different operations.
+
+### Drive roots
+
+Defaults are `/mnt/h0` and `/mnt/h1/h0`, and are configurable. The mirror root must be
+the directory whose tree *reproduces* the primary's, so that a photo at
+`$PRIMARY_ROOT/rest/of/path` mirrors to `$MIRROR_ROOT/rest/of/path`:
 
 ```bash
 export SIGHTREAD_PRIMARY_ROOT=/mnt/h0
 export SIGHTREAD_MIRROR_ROOT=/mnt/h1/h0
 ```
 
+Get this wrong and nothing is destroyed — every file simply fails verification and stays
+queued, reported as unmirrored. Check with a dry run before trusting it.
+
 Preview before committing:
 
 ```bash
 python scripts/delete_marked.py --dry-run
 ```
+
+The dry run names the sidecars it would take alongside each JPEG, and totals the bytes.
 
 ## Cache
 

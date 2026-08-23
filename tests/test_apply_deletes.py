@@ -234,3 +234,108 @@ def test_file_outside_primary_root_is_never_deleted(tmp_path, monkeypatch):
     assert data["deleted"] == 0
     assert data["unmirrored"] == [str(src)]
     assert src.exists()
+
+
+# ---------------------------------------------------------------------------
+# Raw + sidecar sweep
+#
+# The decision queue holds JPEGs, but the camera wrote a raw beside each one and
+# editors leave .xmp files next to both. Before this, applying deletes reclaimed
+# the JPEG alone — a tenth of the space on a Fujifilm trip — and orphaned the
+# raw. These pin down that the whole shot goes, and that it goes all-or-nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_deletes_raw_and_xmp_alongside_the_jpeg(api):
+    client, folder, output_dir, mirror_folder = api
+    jpg = _photo(folder, mirror_folder, "DSCF1.JPG")
+    raw = _photo(folder, mirror_folder, "DSCF1.RAF", body=b"raw" * 100, mirror_body=b"raw" * 100)
+    jpg_xmp = _photo(folder, mirror_folder, "DSCF1.JPG.xmp", body=b"<x/>", mirror_body=b"<x/>")
+    raw_xmp = _photo(folder, mirror_folder, "DSCF1.RAF.xmp", body=b"<x/>", mirror_body=b"<x/>")
+    _pending(output_dir, jpg)
+
+    data = client.post("/api/apply-deletes").json()
+
+    assert data["deleted"] == 1
+    assert data["companions"] == 3
+    assert not jpg.exists() and not raw.exists()
+    assert not jpg_xmp.exists() and not raw_xmp.exists()
+    assert data["freed_bytes"] == len(b"pixels") + 300 + 4 + 4
+    assert _queue(output_dir) == []
+
+
+def test_manifest_names_every_file_removed(api):
+    client, folder, output_dir, mirror_folder = api
+    jpg = _photo(folder, mirror_folder, "DSCF2.JPG")
+    _photo(folder, mirror_folder, "DSCF2.RAF", body=b"raw", mirror_body=b"raw")
+    _pending(output_dir, jpg)
+
+    client.post("/api/apply-deletes")
+
+    assert sorted(_manifest_lines(mirror_folder)) == ["DSCF2.JPG", "DSCF2.RAF"]
+
+
+def test_unmirrored_raw_defers_the_whole_shot(api):
+    """A shot half on each drive is worse than one left queued for a later run."""
+    client, folder, output_dir, mirror_folder = api
+    jpg = _photo(folder, mirror_folder, "DSCF3.JPG")
+    raw = _photo(folder, mirror_folder, "DSCF3.RAF", body=b"raw", mirror_body=None)
+    _pending(output_dir, jpg)
+
+    data = client.post("/api/apply-deletes").json()
+
+    assert data["deleted"] == 0
+    assert data["unmirrored"] == [str(jpg)]
+    assert jpg.exists() and raw.exists()
+    assert _queue(output_dir) == [str(jpg)]
+
+
+def test_raw_of_a_kept_photo_is_untouched(api):
+    """Only the queued shot's own sidecars go — a neighbour's raw is not a companion."""
+    client, folder, output_dir, mirror_folder = api
+    doomed = _photo(folder, mirror_folder, "DSCF4.JPG")
+    _photo(folder, mirror_folder, "DSCF4.RAF", body=b"raw", mirror_body=b"raw")
+    keeper = _photo(folder, mirror_folder, "DSCF5.JPG")
+    keeper_raw = _photo(folder, mirror_folder, "DSCF5.RAF", body=b"raw", mirror_body=b"raw")
+    save_decisions(output_dir, {str(doomed): TO_DELETE, str(keeper): KEPT})
+
+    client.post("/api/apply-deletes")
+
+    assert keeper.exists() and keeper_raw.exists()
+
+
+def test_replaced_spelling_xmp_is_swept(api):
+    """Some editors write DSCF6.xmp rather than DSCF6.JPG.xmp."""
+    client, folder, output_dir, mirror_folder = api
+    jpg = _photo(folder, mirror_folder, "DSCF6.JPG")
+    xmp = _photo(folder, mirror_folder, "DSCF6.xmp", body=b"<x/>", mirror_body=b"<x/>")
+    _pending(output_dir, jpg)
+
+    data = client.post("/api/apply-deletes").json()
+
+    assert data["companions"] == 1
+    assert not xmp.exists()
+
+
+def test_jpeg_with_no_sidecars_still_works(api):
+    client, folder, output_dir, mirror_folder = api
+    src = _photo(folder, mirror_folder, "lonely.jpg")
+    _pending(output_dir, src)
+
+    data = client.post("/api/apply-deletes").json()
+
+    assert data["deleted"] == 1 and data["companions"] == 0
+    assert not src.exists()
+
+
+def test_favorite_raw_survives(api):
+    """A starred shot cannot be queued, so neither it nor its raw is reachable."""
+    client, folder, output_dir, mirror_folder = api
+    star = _photo(folder, mirror_folder, "DSCF7.JPG")
+    star_raw = _photo(folder, mirror_folder, "DSCF7.RAF", body=b"raw", mirror_body=b"raw")
+    save_decisions(output_dir, {str(star): FAVORITE})
+
+    client.post("/api/apply-deletes")
+
+    assert star.exists() and star_raw.exists()
+    assert load_decisions(output_dir)[str(star)] == FAVORITE

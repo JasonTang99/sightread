@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Delete every photo marked `to_delete` in a project's decisions.json.
 
+A queued entry is a JPEG, but a shot is several files: the camera's raw sits
+beside the JPEG and each may carry an `.xmp`. All of them go together, and only
+together — if any member of the group fails the mirror check the whole shot
+stays queued, so a shot is never left half on one drive.
+
 Photos live on two drives: the primary (small, curated) and the mirror (large,
 kept whole). Reclaiming space means actually removing files from the primary, so
 each listed image is unlinked — but only after its copy on the mirror has been
@@ -40,6 +45,7 @@ from utils import (  # noqa: E402
     migrate_project_state,
     paths_with_status,
     save_decisions,
+    sidecars_of,
 )
 
 _OUTPUT_DIR = Path(os.environ.get("SIGHTREAD_OUTPUT_DIR", "outputs"))
@@ -122,6 +128,7 @@ def delete_marked(
 
     deleted = 0
     skipped = 0
+    companions = 0
     freed_bytes = 0
     unmirrored: list[str] = []
     manifest_by_dir: dict[Path, list[str]] = {}
@@ -143,26 +150,37 @@ def delete_marked(
             skipped += 1
             continue
 
-        mirror, problem = _mirror_verdict(src)
-        if problem is not None:
-            print(f"  KEEP (unverified): {p} — {problem}")
+        # The queue holds JPEGs, but a shot is the JPEG plus its raw and their
+        # .xmp sidecars. Verify the whole group before touching any of it: a
+        # shot left half on each drive is worse than one deferred to a later run.
+        group = [src, *sidecars_of(src)]
+        verdicts = [(g, *_mirror_verdict(g)) for g in group]
+        problems = [(g, why) for g, _, why in verdicts if why is not None]
+        if problems:
+            g, why = problems[0]
+            extra = f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
+            print(f"  KEEP (unverified): {p} — {g.name}: {why}{extra}")
             unmirrored.append(p)
             continue
 
-        size = src.stat().st_size
+        size = sum(g.stat().st_size for g in group)
+        companions += len(group) - 1
         if dry_run:
-            print(f"  Would delete: {p}  (mirror ok: {mirror})")
+            names = ", ".join(g.name for g in group[1:])
+            with_str = f"  + {names}" if names else ""
+            print(f"  Would delete: {p}{with_str}")
         else:
-            src.unlink()
-            print(f"  Deleted: {p}")
-            manifest_by_dir.setdefault(mirror.parent, []).append(src.name)
+            for g, mirror, _ in verdicts:
+                g.unlink()
+                manifest_by_dir.setdefault(mirror.parent, []).append(g.name)
+            print(f"  Deleted: {p}" + (f" (+{len(group) - 1} sidecar file(s))" if len(group) > 1 else ""))
             settled[p] = DELETED
         deleted += 1
         freed_bytes += size
 
     gb = freed_bytes / 1024 ** 3
     if dry_run:
-        print(f"\n🔍 Would delete {deleted} image(s), freeing {gb:.2f} GB")
+        print(f"\n🔍 Would delete {deleted} image(s) + {companions} sidecar file(s), freeing {gb:.2f} GB")
         print(f"   {skipped} skipped, {len(unmirrored)} kept for want of a verified mirror")
         return
 
@@ -171,7 +189,10 @@ def delete_marked(
     # their to_delete status so a later run retries them once mirrored.
     if settled:
         save_decisions(out, settled)
-    print(f"\n✅ Deleted {deleted} image(s) from {PRIMARY_ROOT}, freeing {gb:.2f} GB ({skipped} skipped)")
+    print(
+        f"\n✅ Deleted {deleted} image(s) + {companions} sidecar file(s) from {PRIMARY_ROOT}, "
+        f"freeing {gb:.2f} GB ({skipped} skipped)"
+    )
     if unmirrored:
         print(f"⚠️  Kept {len(unmirrored)} image(s) with no verified mirror — still marked to_delete")
     else:
