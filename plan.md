@@ -1,6 +1,6 @@
 # Sightread — Improvement Plan
 
-Updated: 2026-04-29
+Updated: 2026-08-23
 
 ---
 
@@ -149,70 +149,88 @@ home network is permitted by employer device policy. Orthogonal to the technical
 
 ---
 
-## Next: finishing a trip end to end (spec, not yet built)
+## Next: finishing a trip end to end (steps 1–2 built, step 3 open)
 
-Added 2026-08-23. The gap: curation produces decisions, but turning those decisions into
-*outcomes* — space reclaimed on h0, favourites delivered somewhere useful — is either buried
-or missing. What follows is one linear "finish this trip" flow, in the order it would run.
+Spec added 2026-08-23; steps 1 and 2 built the same day. The gap this closes: curation
+produces decisions, but turning those decisions into *outcomes* — space reclaimed on h0,
+favourites delivered somewhere useful — was either buried or missing.
 
-### Step 1 — Apply the deletes. **Mostly already built.**
+### Step 1 — Apply the deletes. **Built. Not yet run on Japan.**
 
-`POST /api/apply-deletes` (`webapp/server.py:449`) already unlinks every `to_delete` file from
-the primary drive, and it is already mirror-safe: a file is only removed once its h1 copy is
-confirmed present at a matching size, anything failing that check is skipped and reported, and
-the run refuses outright if the project folder is not mounted. The button exists in
-`TrashPanel` (`components/TrashPanel.tsx:120`).
+`POST /api/apply-deletes` (`webapp/server.py`) unlinks every `to_delete` file from the
+primary drive once its h1 copy is confirmed at a matching size, refuses if the project
+folder is unmounted, and appends `.sightread_deleted.txt` to the mirror directory.
 
-What is actually missing is placement. `TrashPanel` is rendered inside the clusters, singles
-and timeline tabs (`App.tsx:339,364,381`), so "apply the deletes" reads as a per-tab side panel
-rather than the end of the job. Japan has 349 photos sitting at `to_delete` and nothing in the
-header says so beyond a grey "349 pending".
+Two things landed 2026-08-23 that the original spec missed:
 
-- Surface it as step 1 of the finish flow, not only as a panel.
-- Keep every existing safety property. Do not reimplement the deletion.
+- **A queued entry is a shot, not a file** (`6b1c427`). The queue holds JPEGs, but the
+  camera wrote a raw beside each one and editors leave `.xmp` next to both. Deleting only
+  the JPEG reclaimed a tenth of the space and orphaned the raw — on Japan's 349-shot queue,
+  6.64 GB of 63.13 GB, with 348 stranded `.RAF` files. `utils.sidecars_of` now groups them,
+  both deleters share it, and the group is verified and unlinked atomically: any member
+  failing the mirror check defers the whole shot, because a shot split across two drives is
+  worse than one deferred.
+- **A guard for an unreachable mirror root** (`c28deb4`). An unmountable mirror fails every
+  size check and defers the entire queue — safe, but reported identically to having nothing
+  to do. Both deleters now refuse up front and name `SIGHTREAD_MIRROR_ROOT`.
 
-### Step 2 — Export favourites. **New.**
+**Dry run against the correctly-mounted pair, 2026-08-23:** 349 shots + 1045 sidecars,
+58.79 GiB, 0 skipped, 0 unmirrored. Ready to apply; the command is
 
-Copy the trip's favourites into `/mnt/h0/Editing/exports/<trip name>/`, where `<trip name>` is
-the project folder's basename (`2026_01_Japan`). The exports root exists and is currently a flat
-dump of PNGs from 2024, so this also gives it structure.
+```bash
+python3 scripts/delete_marked.py --output-dir ~/.local/share/sightread/projects/644ad1423896f32844c61d87c1cdcc6b
+```
 
-- **What counts as a favourite**: photos with status `favorite` in `decisions.json`
-  (`paths_with_status(decisions, FAVORITE)`, already what `/api/favorites` serves). Videos can be
-  starred too — `VideoView` has the star control and posts to the same `/api/favorite` — so the
-  same status covers both. Japan currently has 16.
-- **Copy the originals**, not the caches. Never the `video_cache` transcode: it is 1440p and
-  bitrate-capped for scrubbing. This is the same rule clip export already follows.
-- **Collisions**: two trips can hold the same filename, and re-exporting must not silently
-  double up. Skip a file already present at a matching size; otherwise suffix it, the way
-  `clips.py` already names its outputs.
-- **Report** how many were copied, skipped and failed. Do not fail the whole export on one bad
-  file.
+Still open:
 
-Open questions to settle before building:
+- **Run it.** 1394 files, irreversible in-app (the undo stack is cleared in the same call);
+  recovery means copying back from h1 by hand.
+- **Placement.** `TrashPanel` still renders inside the clusters, singles and timeline tabs,
+  so "apply the deletes" reads as a per-tab side panel rather than the end of the job.
+  Surface it as step 1 of the finish flow. Do not reimplement the deletion.
 
-- Favourited **videos**: copy the whole original, or the exported clips (`clips.py` already cuts
-  to `<project folder>/clips/`)? A favourited 4K original can be 20GB+; the clips are the part
-  that was actually wanted. Suggest: whole original by default, with the clips alongside if any
-  exist.
-- The exports root is on **h0 — the drive this flow just freed**. Copying favourites back onto
-  it partly undoes step 1. Worth a size estimate in the confirm dialog, or an exports root on h1.
-- Should the root be configurable, or is `/mnt/h0/Editing/exports` fixed?
+### Step 2 — Export favourites. **Built 2026-08-23 (`66ad867`). Not yet run.**
 
-### Step 3 — Clear the pipeline and caches. **Partly built.**
+`webapp/exports.py` + `GET /api/exports/preview` + `POST /api/exports/favorites`, with a
+button in `FavoritesView`. Copies to `<SIGHTREAD_EXPORTS_ROOT>/<trip folder name>/`,
+defaulting to `/mnt/h0/Editing/exports`.
+
+The open questions from the spec, as settled:
+
+- **Exports root**: `/mnt/h0/Editing/exports`, configurable by env var. The h0-vs-h1
+  concern was overstated in the spec — the 145GB of cache bloat is on the **nvme**
+  (`~/.local/share/sightread/`), not on h0, so exporting does not meaningfully undo step 1.
+  The confirm dialog prices the copy and shows free space regardless.
+- **Favourited videos**: the whole original, never the `video_cache` transcode. No clips
+  alongside — a starred video exports as one file.
+- **Collisions**: a destination name holding a file of the same size counts as delivered and
+  is skipped, which makes re-running idempotent; a name holding a *different* file gets a
+  numeric suffix. Nothing is overwritten. Copies land on `.sightread-part` and are renamed
+  into place so an interrupted run cannot leave a truncated file that the next run's size
+  check would mistake for a finished one.
+
+**Preview against Japan, 2026-08-23:** 16 shots, 64 files, 2.20 GiB, 452 GiB free, none missing.
+
+Still open:
+
+- **Run it.** Non-destructive; only ever writes into the exports tree.
+- **Decide whether a favourite should export as a shot or as a JPEG.** Currently it exports
+  the whole shot — JPEG + raw + both `.xmp` — on the reasoning that the raw is the file that
+  actually gets edited, which is why 16 favourites are 64 files. Flagged to the user
+  2026-08-23, unanswered. A JPEG-only deliverable is a one-line change to
+  `exports.files_for()`.
+
+### Step 3 — Clear the pipeline and caches. **Partly built. The remaining piece.**
 
 Offered *after* a successful export, and only then — it destroys the ability to re-review.
 
-- `POST /api/projects/done` (added 2026-08-22) already deletes `thumb_cache`, `poster_cache` and
-  `video_cache` and marks the project finished. That is the cache half.
+- `POST /api/projects/done` already deletes `thumb_cache`, `poster_cache` and `video_cache`
+  and marks the project finished. That is the cache half.
 - The pipeline half exists only as CLI: `scripts/clean_cache.py` removes `results.json`,
   `clusters.json`, the embeddings, the score cache and `video_highlights.json`.
-- Missing: a UI path for the pipeline half, and the decision about `decisions.json`. Clearing it
-  discards the record of what was deleted and why; keeping it means a later rerun starts from
-  the previous verdicts. Suggest keeping it, and saying so on the button.
-
-Guard it properly. Deleting pipeline output after the deletes are applied means the record of
-which photos were removed lives only in `decisions.json` and the mirror manifest.
+- Missing: a UI path for the pipeline half.
+- **`decisions.json` survives** — settled 2026-08-23. After the deletes are applied it is the
+  only record of what was removed and why, alongside the mirror manifest. Say so on the button.
 
 ### Suggested shape
 
@@ -221,13 +239,28 @@ disabled until the one before it has run. It is the same three destructive opera
 scattered across the app, put in the order that makes them safe: delete only what was reviewed,
 export before destroying the ability to re-review, clear last.
 
-### Related, found while measuring — worth folding in
+### Related, still open
 
-- **~144GB of stale `video_cache` across projects**, 140GB of it under Hawaii: 89 files at
+- **~145GB of derived cache on the nvme**, 140GB of it Hawaii's `video_cache`: 89 files at
   4K/194Mbps, output from an older converter whose cache keys the current code no longer
-  computes, so nothing will ever read them. `POST /api/projects/done` reclaims them per project,
-  but orphans in a project still being curated need a keyed sweep — delete any `video_cache` /
-  `thumb_cache` / `poster_cache` entry whose key no source file currently maps to.
-- **Japan reads 324/388 reviewed** because all 64 videos are genuinely undecided. The tab used to
-  badge them "✓ reviewed" from localStorage; that is fixed, but the videos still need reviewing
-  before the finish flow would have a complete set of decisions to act on.
+  computes, so nothing will ever read them. Note this is the **system disk**, not h0 — freeing
+  the photo drive and freeing the cache drive are two different operations. `POST
+  /api/projects/done` reclaims them per project, but orphans in a project still being curated
+  need a keyed sweep: delete any `video_cache` / `thumb_cache` / `poster_cache` entry whose key
+  no source file currently maps to.
+- **Japan reads 326/388 reviewed, and that number is correct.** 79 clusters + 245 singletons
+  are fully decided; of 64 videos, 2 are `keep` and **62 are undecided**. Verified against the
+  live server 2026-08-23 — the counter was never the bug (the localStorage "✓ reviewed" *badge*
+  was, fixed in `55e630e`). Nothing in the finish flow is blocked by this: the photo queue and
+  the starred set are complete and independent. It only affects whether more videos get starred
+  into the export, and whether step 3 should wait. There is no bulk sweep for videos the way
+  `⚡ Auto-best` works for clusters — all 62 need a look.
+
+### Machine-level, not a code change — worth remembering
+
+`/etc/fstab` mounted the photo drives by `/dev/sdX`, which the kernel assigns in probe order.
+A plugged-in Kindle claimed `sda`, everything shifted, and **h0 was mounted at `/mnt/h1`** while
+`/mnt/h0` stayed empty — so the mirror check was comparing the primary drive against itself.
+Fixed 2026-08-23 by switching all three entries to `UUID=` (h0 `f392ce70…`, h1 `381a1f01…`,
+shared `15EA-CBBF`; backup at `/etc/fstab.bak-20260823`). If verification ever starts failing
+for everything at once, check `lsblk -f` first.
