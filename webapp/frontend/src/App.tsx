@@ -31,6 +31,7 @@ export default function App() {
   const [videoShotTimes, setVideoShotTimes] = useState<Record<string, string | null>>({});
   const [videoHighlights, setVideoHighlights] = useState<VideoHighlightsMap>({});
   const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
+  const [videosLoaded, setVideosLoaded] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -59,6 +60,11 @@ export default function App() {
       setVideoUserClips(d.user_clips ?? {});
     } catch {
       /* video list is non-critical */
+    } finally {
+      // Even a failed fetch counts as loaded: the landing choice waits on this
+      // flag, and a video list that never arrives must not strand the app on
+      // the clusters tab.
+      setVideosLoaded(true);
     }
   }, []);
 
@@ -76,21 +82,27 @@ export default function App() {
   }, [projectOpen, tab, refetchVideos]);
 
   // Pick the landing tab once, on the first load of a project: whatever still
-  // needs triage, or — when every cluster and single is already decided — the
-  // timeline, which reviews the whole trip, videos included. Deliberately does
-  // not re-run on later state changes; confirming the last cluster shouldn't
-  // yank you off the tab you're working in.
+  // needs triage, and only the timeline once clusters, singles *and* videos are
+  // all decided. Videos used to be left out, so reloading mid-way through the
+  // Videos tab dropped you on the timeline with footage still undecided.
+  // Deliberately does not re-run on later state changes; confirming the last
+  // cluster shouldn't yank you off the tab you're working in.
   const landedRef = useRef(false);
   useEffect(() => {
     if (!state || state.no_project || landedRef.current) return;
+    // Wait for /api/videos: it lands separately from /api/state, and deciding
+    // before it arrives would read every video as undecided.
+    if (!videosLoaded) return;
     landedRef.current = true;
     const decisions = state.photo_decisions ?? {};
     const clusters = state.clusters ?? [];
     const singletons = state.singletons ?? [];
     if (clusters.length + singletons.length === 0) return;  // nothing curated yet
     if (clusters.some((c) => !isDecided(c, decisions))) return;  // stay on clusters
-    setTab(singletons.some((c) => !isDecided(c, decisions)) ? "singles" : "timeline");
-  }, [state]);
+    if (singletons.some((c) => !isDecided(c, decisions))) { setTab("singles"); return; }
+    const videosPending = videos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
+    setTab(videosPending ? "videos" : "timeline");
+  }, [state, videosLoaded, videos, videoStatuses]);
 
   // A different project gets its own landing decision.
   useEffect(() => { landedRef.current = false; }, [state?.no_project]);
