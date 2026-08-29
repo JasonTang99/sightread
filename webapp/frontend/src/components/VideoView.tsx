@@ -158,6 +158,31 @@ function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSe
   );
 }
 
+/** Off-screen buffer warmer for a neighbouring video.
+ *
+ * Tears its own load down on unmount. Detaching a <video> is not enough: Chrome
+ * keeps a detached media element's request alive until the element is garbage
+ * collected, and each live request holds one of the six connections the browser
+ * will open to a host. Stepping through footage mounts a fresh element per
+ * video, so the zombie loads pile up and after roughly ten videos every socket
+ * is taken — new videos and even /api/confirm just queue, and the page looks
+ * dead until a reload drops the connections. Clearing src and calling load()
+ * frees the socket at once.
+ */
+function PreloadVideo({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    return () => {
+      if (!el) return;
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    };
+  }, []);
+  return <video ref={ref} src={src} preload="auto" muted style={{ display: "none" }} onError={() => {}} />;
+}
+
 interface Props {
   videos: string[];
   // Server-side decision per video. "reviewed" means exactly this, not a
@@ -271,6 +296,20 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
     el.muted = !soundOn;
     el.play().catch(() => { /* autoplay race; controls let user start */ });
   }, [current, soundOn]);
+
+  // Release the outgoing video's connection when we move on — same zombie-load
+  // problem as PreloadVideo, and this element is the one still streaming. `el`
+  // is captured at setup, so the cleanup tears down the video being left, not
+  // the one being switched to.
+  useEffect(() => {
+    const el = videoRef.current;
+    return () => {
+      if (!el) return;
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    };
+  }, [current]);
 
   // --- Clip persistence: debounce a PUT per video path after any change. ---
   const putTimers = useRef<Record<string, number>>({});
@@ -699,18 +738,14 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
         {/* Warm the browser's cache for neighboring videos so j/k doesn't hit a cold fetch,
             in either direction — going back is just as common as going forward.
             cached_only=1: only pull the bitrate-capped transcode, never the raw
-            (often ~190Mbps) original — a 404 here just means "not baked yet". */}
-        {[videos[idx - 2], videos[idx - 1], videos[idx + 1], videos[idx + 2]]
+            (often ~190Mbps) original — a 404 here just means "not baked yet".
+            One neighbour each way, not two: the browser opens six connections
+            per host, and five simultaneous media loads left nothing for
+            /api/confirm and /api/state. */}
+        {[videos[idx - 1], videos[idx + 1]]
           .filter((v): v is string => v != null)
           .map((v) => (
-            <video
-              key={`preload-${v}`}
-              src={`/api/video?path=${encodeURIComponent(v)}&cached_only=1`}
-              preload="auto"
-              muted
-              style={{ display: "none" }}
-              onError={() => {}}
-            />
+            <PreloadVideo key={`preload-${v}`} src={`/api/video?path=${encodeURIComponent(v)}&cached_only=1`} />
           ))}
       </div>
 
