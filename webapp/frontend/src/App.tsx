@@ -7,24 +7,16 @@ import { HelpOverlay } from "./components/HelpOverlay";
 import { ProjectPicker } from "./components/ProjectPicker";
 import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
-import { TrashPanel } from "./components/TrashPanel";
+import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
 import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "./types";
-
-function formatBytes(n: number): string {
-  if (n < 1e6) return `${Math.round(n / 1e3)} KB`;
-  if (n < 1e9) return `${Math.round(n / 1e6)} MB`;
-  return `${(n / 1e9).toFixed(1)} GB`;
-}
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"clusters" | "singles" | "videos" | "favorites" | "timeline">("clusters");
+  const [tab, setTab] = useState<"clusters" | "singles" | "videos" | "favorites" | "timeline" | "finish">("clusters");
   const [undoing, setUndoing] = useState(false);
-  const [finishing, setFinishing] = useState(false);
-  const [freedNote, setFreedNote] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [videos, setVideos] = useState<string[]>([]);
   const [videoStatuses, setVideoStatuses] = useState<VideoStatuses>({});
@@ -154,31 +146,6 @@ export default function App() {
     }
   };
 
-  const handleToggleDone = async () => {
-    const finishingNow = !state?.done_at;
-    if (finishingNow && !confirm(
-      "Mark this project done?\n\nIts thumbnails, posters and video transcodes " +
-      "are deleted to reclaim the space. Your decisions, favourites and pipeline " +
-      "results are kept, and the previews rebuild if you resume curating."
-    )) return;
-    setFinishing(true);
-    try {
-      const res = await fetch("/api/projects/done", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ done: finishingNow }),
-      });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      const { freed_bytes } = await res.json();
-      setFreedNote(finishingNow ? `Freed ${formatBytes(freed_bytes)}` : null);
-      await reload();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFinishing(false);
-    }
-  };
-
   const handleChangeProject = async () => {
     setState(null);
     setVideos([]);
@@ -281,6 +248,15 @@ export default function App() {
         >
           Timeline
         </button>
+        <button
+          onClick={selectTab("finish")}
+          className={`px-3 py-1 text-sm border-b-2 transition-colors ${
+            tab === "finish" ? "border-green-600 text-green-600" : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+          data-testid="finish-tab"
+        >
+          Finish{state.done_at ? " ✓" : ""}
+        </button>
 
         <div className="ml-auto flex items-center gap-2">
           {totalUnits > 0 && (
@@ -301,23 +277,11 @@ export default function App() {
           {state.pending_delete_count > 0 && (
             <span className="text-xs text-gray-400">{state.pending_delete_count} pending</span>
           )}
-          {freedNote && <span className="text-xs text-green-600">{freedNote}</span>}
-          <button
-            onClick={handleToggleDone}
-            disabled={finishing}
-            title={
-              state.done_at
-                ? `Marked done ${new Date(state.done_at).toLocaleDateString()}. Resume to prewarm previews again.`
-                : "Finish curating and delete this project's cached previews"
-            }
-            className={`px-2 py-1 text-xs border rounded disabled:opacity-40 ${
-              state.done_at
-                ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
-                : "border-gray-200 text-gray-600 hover:bg-gray-50"
-            }`}
-          >
-            {finishing ? "…" : state.done_at ? "✓ Done — resume" : "Mark done"}
-          </button>
+          {state.done_at && (
+            <span className="text-xs text-green-600" title={state.done_at}>
+              Trip finished
+            </span>
+          )}
           <button
             onClick={handleUndo}
             disabled={!state.undo_available || undoing}
@@ -336,20 +300,23 @@ export default function App() {
           </div>
         )}
 
-        {tab === "timeline" ? (
-          // Timeline is where a finished project lands, so the apply-deletes
-          // control has to live here too or it becomes unreachable.
-          <div className="space-y-2">
-            <TimelineView
-              onError={setError}
-              videos={videos}
-              videoStatuses={videoStatuses}
-              videoShotTimes={videoShotTimes}
-              highlights={videoHighlights}
-              onVideosChanged={refetchVideos}
-            />
-            <TrashPanel pendingCount={state.pending_delete_count} onRefresh={reload} onError={setError} />
-          </div>
+        {tab === "finish" ? (
+          <FinishTripPanel
+            pendingCount={state.pending_delete_count}
+            favoriteCount={favorites.length}
+            onRefresh={reload}
+            onError={setError}
+            onFinished={reload}
+          />
+        ) : tab === "timeline" ? (
+          <TimelineView
+            onError={setError}
+            videos={videos}
+            videoStatuses={videoStatuses}
+            videoShotTimes={videoShotTimes}
+            highlights={videoHighlights}
+            onVideosChanged={refetchVideos}
+          />
         ) : tab === "favorites" ? (
           <FavoritesView favorites={favorites} onToggleFavorite={toggleFavorite} onRefresh={reload} onError={setError} />
         ) : tab === "videos" ? (
@@ -364,17 +331,20 @@ export default function App() {
             onConfirmed={async () => { await reload(); await refetchVideos(); }}
           />
         ) : !hasClusters && !hasUnconfirmedSingles ? (
-          <div className="space-y-2">
-            <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">
-              <p className="text-2xl mb-2">🎉</p>
-              <p className="text-gray-700 font-medium">All done!</p>
-              <p className="text-sm text-gray-500 mt-1">
-                {state.pending_delete_count > 0
-                  ? `${state.pending_delete_count} images pending deletion — apply them from the Trash panel below`
-                  : "Nothing pending."}
-              </p>
-            </div>
-            <TrashPanel pendingCount={state.pending_delete_count} onRefresh={reload} onError={setError} />
+          <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">
+            <p className="text-2xl mb-2">🎉</p>
+            <p className="text-gray-700 font-medium">All done!</p>
+            <p className="text-sm text-gray-500 mt-1">
+              {state.pending_delete_count > 0 || favorites.length > 0
+                ? "Open the Finish tab to apply deletes, export favourites, and clear caches."
+                : "Nothing pending."}
+            </p>
+            <button
+              onClick={selectTab("finish")}
+              className="mt-4 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded hover:bg-green-700"
+            >
+              Go to Finish
+            </button>
           </div>
         ) : (
           <>
@@ -391,7 +361,6 @@ export default function App() {
                 onToggleFavorite={toggleFavorite}
               />
             )}
-            <TrashPanel pendingCount={state.pending_delete_count} onRefresh={reload} onError={setError} />
           </>
         )}
       </main>

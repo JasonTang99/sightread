@@ -210,6 +210,19 @@ DONE_FILENAME = "curation_done.json"
 # two are model output that costs a pipeline run to rebuild, not a resize.
 DERIVED_CACHE_DIRS = ("thumb_cache", "poster_cache", "video_cache")
 
+# Pipeline outputs a re-run recomputes. decisions.json is kept on purpose.
+PIPELINE_CACHE_FILES = (
+    "embeddings_dinov3_mpcls_tta.npy",
+    "embeddings_dinov3_mpcls_tta.paths.json",
+    "embeddings_dinov3_mpcls_tta.hash",
+    "scores_ensemble.npz",
+    "scores_ensemble.paths.json",
+    "clusters.json",
+    "results.json",
+    "video_highlights.json",
+)
+PIPELINE_CACHE_DIRS = ("video_highlights_cache",)
+
 
 def done_file(output_dir: Path) -> Path:
     return Path(output_dir) / DONE_FILENAME
@@ -258,3 +271,65 @@ def evict_derived_caches(output_dir: Path) -> int:
                     pass
         shutil.rmtree(d, ignore_errors=True)
     return freed
+
+
+def pipeline_cache_inventory(output_dir: Path) -> dict:
+    """Bytes and paths of removable pipeline artifacts (not derived previews)."""
+    output_dir = Path(output_dir)
+    files: list[str] = []
+    bytes_total = 0
+    for name in PIPELINE_CACHE_FILES:
+        p = output_dir / name
+        if not p.is_file():
+            continue
+        try:
+            bytes_total += p.stat().st_size
+        except OSError:
+            pass
+        files.append(name)
+    for name in PIPELINE_CACHE_DIRS:
+        d = output_dir / name
+        if not d.is_dir():
+            continue
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    bytes_total += f.stat().st_size
+                except OSError:
+                    pass
+        files.append(f"{name}/")
+    return {"files": files, "bytes": bytes_total}
+
+
+def clean_pipeline_cache(output_dir: Path) -> dict:
+    """Remove pipeline outputs so the project cannot be re-reviewed.
+
+    decisions.json and other curation artifacts are kept. Returns a summary for
+    the finish-trip UI.
+    """
+    output_dir = Path(output_dir)
+    removed: list[str] = []
+    freed = 0
+    for name in PIPELINE_CACHE_FILES:
+        p = output_dir / name
+        if not p.is_file():
+            continue
+        try:
+            freed += p.stat().st_size
+        except OSError:
+            pass
+        p.unlink()
+        removed.append(name)
+    for name in PIPELINE_CACHE_DIRS:
+        d = output_dir / name
+        if not d.is_dir():
+            continue
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    freed += f.stat().st_size
+                except OSError:
+                    pass
+        shutil.rmtree(d, ignore_errors=True)
+        removed.append(f"{name}/")
+    return {"removed": removed, "freed_bytes": freed}

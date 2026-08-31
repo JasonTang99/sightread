@@ -85,6 +85,11 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
 
     Feeds the confirmation dialog: the exports root may sit on the same drive
     the deletes just freed, so the size is worth seeing before agreeing to it.
+
+    `files`/`bytes` describe the whole favourite set; `pending`/`pending_bytes`
+    describe what this run would actually copy, with `delivered` counting what
+    an earlier run already put there. The finish panel needs that split to tell
+    "not exported yet" from "exported, then the page was reloaded".
     """
     dest = export_dir_for(folder, root)
     shots = favorite_shots(output_dir)
@@ -96,16 +101,35 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
             continue
         files.extend(files_for(shot))
     total = 0
+    delivered = 0
+    pending = 0
+    pending_bytes = 0
     for f in files:
         try:
-            total += f.stat().st_size
+            size = f.stat().st_size
         except OSError:
-            pass
+            size = 0
+        total += size
+        # Same check the copy itself makes, so the plan and the run agree on
+        # what is left to do. A destination we cannot inspect counts as pending
+        # rather than delivered: over-reporting work is the safe direction.
+        try:
+            already = dest.is_dir() and _destination_for(f, dest) is None
+        except OSError:
+            already = False
+        if already:
+            delivered += 1
+        else:
+            pending += 1
+            pending_bytes += size
     return {
         "dest": str(dest),
         "shots": len(shots) - len(missing),
         "files": len(files),
         "bytes": total,
+        "delivered": delivered,
+        "pending": pending,
+        "pending_bytes": pending_bytes,
         "missing": missing,
         "free_bytes": _free_bytes(dest),
     }

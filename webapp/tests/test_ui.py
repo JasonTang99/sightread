@@ -296,21 +296,28 @@ class TestSingles:
 # Trash panel
 # ---------------------------------------------------------------------------
 class TestTrashPanel:
+    def _open_finish(self, page: Page) -> None:
+        page.get_by_test_id("finish-tab").click()
+        settle(page)
+
     def _confirm_cluster(self, page: Page) -> None:
         page.get_by_role("button", name="✓ Confirm").click()
         settle(page)
 
     def test_trash_panel_shows_after_confirm(self, page_loaded: Page):
         self._confirm_cluster(page_loaded)
+        self._open_finish(page_loaded)
         expect(page_loaded.get_by_text("Trash —")).to_be_visible()
 
     def test_trash_panel_expands(self, page_loaded: Page):
         self._confirm_cluster(page_loaded)
+        self._open_finish(page_loaded)
         page_loaded.get_by_text("▼ expand").click()
         expect(page_loaded.get_by_role("button", name="🗑️ Delete 2 from primary drive")).to_be_visible()
 
     def test_trash_restore_removes_from_delete_list(self, page_loaded: Page, output_dir):
         self._confirm_cluster(page_loaded)
+        self._open_finish(page_loaded)
         page_loaded.get_by_text("▼ expand").click()
         trash_filename = page_loaded.locator(".grid .rounded p.text-xs").first
         expect(trash_filename).to_be_visible(timeout=10_000)
@@ -324,6 +331,7 @@ class TestTrashPanel:
         # Nonexistent paths: apply must not touch real files during tests
         seed_queue(output_dir, "demo_photos/NOPE_1.JPG", "demo_photos/NOPE_2.JPG")
         page_loaded.reload()
+        self._open_finish(page_loaded)
         page_loaded.get_by_text("▼ expand").click()
         page_loaded.once("dialog", lambda d: d.accept())
         page_loaded.get_by_role("button", name="🗑️ Delete 2 from primary drive").click()

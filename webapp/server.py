@@ -42,11 +42,13 @@ from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
     image_files_in,
+    clean_pipeline_cache,
     clear_done,
     evict_derived_caches,
     is_done,
     known_projects,
     mark_done,
+    pipeline_cache_inventory,
     project_output_dir,
     project_status,
     upsert_recent,
@@ -1336,6 +1338,55 @@ def run_pipeline_endpoint(req: FolderRequest):
 
 class DoneRequest(BaseModel):
     done: bool = True
+
+
+@app.get("/api/finish/preview")
+def finish_trip_preview():
+    """Counts and sizes for the three-step finish flow."""
+    ctx = _require_active()
+    decisions = load_decisions(ctx.output_dir)
+    pending = len(paths_with_status(decisions, TO_DELETE))
+    favorites = paths_with_status(decisions, FAVORITE)
+    export = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    pipeline = pipeline_cache_inventory(ctx.output_dir)
+    derived_bytes = 0
+    for name in ("thumb_cache", "poster_cache", "video_cache"):
+        d = ctx.output_dir / name
+        if not d.is_dir():
+            continue
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    derived_bytes += f.stat().st_size
+                except OSError:
+                    pass
+    return {
+        "pending_deletes": pending,
+        "favorites": len(favorites),
+        "export": export,
+        "pipeline_cache_bytes": pipeline["bytes"],
+        "pipeline_cache_files": pipeline["files"],
+        "derived_cache_bytes": derived_bytes,
+        "done_at": is_done(ctx.output_dir),
+    }
+
+
+@app.post("/api/projects/clean-pipeline")
+def clean_project_pipeline():
+    """Remove pipeline outputs. Keeps decisions.json and curation state."""
+    ctx = _require_active()
+    summary = clean_pipeline_cache(ctx.output_dir)
+    invalidate_results_cache(ctx.output_dir / "results.json")
+    with _prewarm_lock:
+        _prewarm_started.discard(str(ctx.output_dir))
+        _prewarm_started.discard(f"posters:{ctx.output_dir}")
+    log.info(
+        "Cleaned pipeline cache for %s: %d item(s), %.1f MB",
+        ctx.folder,
+        len(summary["removed"]),
+        summary["freed_bytes"] / 1e6,
+    )
+    return {"ok": True, **summary}
 
 
 @app.post("/api/projects/done")
