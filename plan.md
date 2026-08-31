@@ -1,6 +1,6 @@
 # Sightread — Improvement Plan
 
-Updated: 2026-08-23
+Updated: 2026-08-31
 
 ---
 
@@ -185,9 +185,8 @@ Still open:
 
 - **Run it.** 1394 files, irreversible in-app (the undo stack is cleared in the same call);
   recovery means copying back from h1 by hand.
-- **Placement.** `TrashPanel` still renders inside the clusters, singles and timeline tabs,
-  so "apply the deletes" reads as a per-tab side panel rather than the end of the job.
-  Surface it as step 1 of the finish flow. Do not reimplement the deletion.
+- ~~**Placement.** `TrashPanel` still renders inside the clusters, singles and timeline tabs~~
+  **Done 2026-08-31.** Finish tab + `FinishTripPanel` — apply-deletes is step 1 there.
 
 ### Step 2 — Export favourites. **Built 2026-08-23 (`66ad867`). Not yet run.**
 
@@ -214,30 +213,38 @@ The open questions from the spec, as settled:
 Still open:
 
 - **Run it.** Non-destructive; only ever writes into the exports tree.
+- ~~**Re-arming on reload.**~~ **Done 2026-08-31.** `plan_export` now splits the favourite
+  set into `delivered` / `pending` using the same size check the copy makes, so a reload
+  after a successful export leaves step 2 ticked instead of demanding a no-op click before
+  step 3 unlocks. The confirm dialog prices only the pending files.
 - **Decide whether a favourite should export as a shot or as a JPEG.** Currently it exports
   the whole shot — JPEG + raw + both `.xmp` — on the reasoning that the raw is the file that
   actually gets edited, which is why 16 favourites are 64 files. Flagged to the user
   2026-08-23, unanswered. A JPEG-only deliverable is a one-line change to
   `exports.files_for()`.
 
-### Step 3 — Clear the pipeline and caches. **Partly built. The remaining piece.**
+### Step 3 — Clear the pipeline and caches. **Built 2026-08-31.**
 
 Offered *after* a successful export, and only then — it destroys the ability to re-review.
 
-- `POST /api/projects/done` already deletes `thumb_cache`, `poster_cache` and `video_cache`
-  and marks the project finished. That is the cache half.
-- The pipeline half exists only as CLI: `scripts/clean_cache.py` removes `results.json`,
-  `clusters.json`, the embeddings, the score cache and `video_highlights.json`.
-- Missing: a UI path for the pipeline half.
+- `POST /api/projects/done` deletes `thumb_cache`, `poster_cache` and `video_cache`
+  and marks the project finished. That is the preview-cache half.
+- `POST /api/projects/clean-pipeline` removes `results.json`, `clusters.json`, the
+  embeddings, the score cache and `video_highlights.json` (+ `video_highlights_cache/`).
+  That is the pipeline half (same set as `scripts/clean_cache.py`, minus derived dirs).
+- **Finish tab UI** (`FinishTripPanel`) walks all three steps in order with gating.
+  `GET /api/finish/preview` prices each step. Header "Mark done" removed — step 3 only.
 - **`decisions.json` survives** — settled 2026-08-23. After the deletes are applied it is the
   only record of what was removed and why, alongside the mirror manifest. Say so on the button.
 
+Still open:
+
+- **Run steps 1–3 on Japan** (operational, not code).
+- **Orphan cache sweep** on nvme (see Related below) — not part of the finish panel yet.
+
 ### Suggested shape
 
-A "Finish trip" panel that walks the three steps, each showing its own count and staying
-disabled until the one before it has run. It is the same three destructive operations already
-scattered across the app, put in the order that makes them safe: delete only what was reviewed,
-export before destroying the ability to re-review, clear last.
+~~A "Finish trip" panel that walks the three steps~~ **Done 2026-08-31** — see Finish tab.
 
 ### Related, still open
 

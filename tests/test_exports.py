@@ -217,8 +217,43 @@ def test_preview_counts_shots_and_files_without_copying(project):
 
     assert plan["shots"] == 1 and plan["files"] == 4
     assert plan["bytes"] == 4 + 4 + 30 + 4
+    assert plan["pending"] == 4 and plan["delivered"] == 0
+    assert plan["pending_bytes"] == plan["bytes"]
     assert plan["free_bytes"] > 0
     assert not (root / "2026_01_Japan").exists()
+
+
+def test_preview_counts_an_earlier_run_as_delivered(project):
+    folder, output_dir, root = project
+    fav = _shot(folder, "DSCF1")
+    save_decisions(output_dir, {str(fav): FAVORITE})
+    export_favorites(output_dir, folder, root)
+
+    plan = plan_export(output_dir, folder, root)
+
+    # The whole set is still described, but nothing is left to copy — this is
+    # what tells the finish panel step 2 is done after a page reload.
+    assert plan["files"] == 4 and plan["bytes"] == 4 + 4 + 30 + 4
+    assert plan["delivered"] == 4
+    assert plan["pending"] == 0 and plan["pending_bytes"] == 0
+
+
+def test_preview_splits_a_partly_delivered_export(project):
+    folder, output_dir, root = project
+    fav = _shot(folder, "DSCF1")
+    save_decisions(output_dir, {str(fav): FAVORITE})
+    export_favorites(output_dir, folder, root)
+    _shot(folder, "DSCF2")
+    save_decisions(
+        output_dir,
+        {str(fav): FAVORITE, str(folder / "DSCF2.JPG"): FAVORITE},
+    )
+
+    plan = plan_export(output_dir, folder, root)
+
+    assert plan["files"] == 8
+    assert plan["delivered"] == 4 and plan["pending"] == 4
+    assert plan["pending_bytes"] == 4 + 4 + 30 + 4
 
 
 # ---------------------------------------------------------------------------
