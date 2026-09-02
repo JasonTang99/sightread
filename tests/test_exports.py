@@ -92,7 +92,10 @@ def test_only_favourites_are_exported(project):
 
 
 def test_video_favourite_exports_as_a_single_file(project):
-    """A video has no raw, so the shot grouping delivers just the original."""
+    """A video has no raw, so the shot grouping delivers just the original.
+
+    Untagged, so it lands in the videos-only `untagged/` folder.
+    """
     folder, output_dir, root = project
     mov = folder / "DSCF9.MOV"
     mov.write_bytes(b"video")
@@ -100,7 +103,7 @@ def test_video_favourite_exports_as_a_single_file(project):
 
     export_favorites(output_dir, folder, root)
 
-    assert _names(root / "2026_01_Japan") == ["DSCF9.MOV"]
+    assert _names(root / "2026_01_Japan" / "untagged") == ["DSCF9.MOV"]
 
 
 def test_export_dir_is_named_for_the_trip(project):

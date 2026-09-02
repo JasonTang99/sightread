@@ -253,10 +253,14 @@ Named tags on favourited videos, routed into export subfolders at copy time. Bui
 `mirror-aware-deletes`; not yet merged to `main`.
 
 - **Storage:** `<output_dir>/video_tags.json` — `tags` list + per-video assignments
-  (`webapp/video_tags.py`).
-- **Export:** `exports.py` sends tagged videos to `<EXPORTS_ROOT>/<trip>/<tag>/`; photos
-  and untagged videos unchanged. `plan_export` adds a `destinations` breakdown for the
-  finish-panel confirm dialog.
+  (`webapp/video_tags.py`). A project with no file yet starts on `DEFAULT_TAGS` —
+  `vibes`, `people`, `action` — so `1`/`2`/`3` mean the same thing on every trip.
+  A file that exists is taken as written, so an emptied list stays empty.
+- **Export:** `exports.py` sends every favourited video to a subfolder —
+  `<EXPORTS_ROOT>/<trip>/<tag>/`, or `<trip>/untagged/` when it has no tag. Photos stay
+  in the trip root, so the root is stills-only and an untagged clip reads as "not sorted
+  yet" instead of vanishing among the JPEGs. `plan_export` adds a `destinations`
+  breakdown (root, each tag, `untagged`) for the finish-panel confirm dialog.
 - **API:** `GET/PUT /api/video-tags`; `/api/videos` includes `video_tags`.
 - **UI:** Videos tab — star a clip, then pick/create tags on the toolbar. `1`–`9` apply
   tags by slot (same convention as cluster rank keys); `t` cycles tag or clears.
@@ -266,8 +270,14 @@ Named tags on favourited videos, routed into export subfolders at copy time. Bui
 Still open:
 
 - **Use while reviewing Japan's 62 undecided videos** — tag before export so delivery
-  folders match the edit (e.g. `b-roll`, `timelapse`). First action: open Videos tab on
-  Japan, create tags with `+`, star + `1`/`2`/`3` as you go.
+  folders match the edit. First action: open Videos tab on Japan, star + `1` vibes /
+  `2` people / `3` action as you go; anything left untagged still exports, into
+  `untagged/`.
+- **Copies vs. links.** Raised 2026-09-01: the export could hardlink instead of copying.
+  `/mnt/h0/Editing/imports` and `/mnt/h0/Editing/exports` are the same ext4 filesystem
+  (`/dev/sda1`), so hardlinks are available and cost no bytes; a cross-filesystem
+  `SIGHTREAD_EXPORTS_ROOT` would have to fall back to copying. Open alongside the
+  shot-vs-JPEG question below — both change what a delivery folder contains.
 - **Merge `mirror-aware-deletes` → `main`** after Japan finish flow validates end-to-end.
 
 ### Related, still open

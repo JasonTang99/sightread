@@ -8,7 +8,7 @@ import server
 from exports import export_favorites, plan_export
 from projects import ProjectContext
 from utils import FAVORITE, save_decisions
-from video_tags import load_video_tags, sanitize_tag, update_video_tags
+from video_tags import DEFAULT_TAGS, load_video_tags, sanitize_tag, update_video_tags
 
 
 @pytest.fixture()
@@ -58,7 +58,7 @@ def test_assign_auto_adds_tag(project):
     _, output_dir, _ = project
     mov = _video(project[0])
     data = update_video_tags(output_dir, assign={str(mov): "b-roll"})
-    assert data["tags"] == ["b-roll"]
+    assert data["tags"] == [*DEFAULT_TAGS, "b-roll"]
     assert data["videos"][str(mov)] == "b-roll"
 
 
@@ -95,9 +95,10 @@ def test_tagged_video_exports_to_tag_subfolder(project):
 
     export_favorites(output_dir, folder, root)
 
-    assert (root / "2026_01_Japan" / "other.MOV").is_file()
+    assert (root / "2026_01_Japan" / "untagged" / "other.MOV").is_file()
     assert (root / "2026_01_Japan" / "b-roll" / "clip.MOV").is_file()
     assert not (root / "2026_01_Japan" / "clip.MOV").exists()
+    assert not (root / "2026_01_Japan" / "other.MOV").exists()
 
 
 def test_plan_export_lists_destinations(project):
@@ -125,7 +126,7 @@ def test_get_video_tags(api):
 
     data = client.get("/api/video-tags").json()
 
-    assert data["tags"] == ["b-roll"]
+    assert data["tags"] == [*DEFAULT_TAGS, "b-roll"]
     assert data["assignments"][str(mov)] == "b-roll"
 
 
@@ -146,7 +147,7 @@ def test_videos_endpoint_includes_tags(api):
 
     body = client.get("/api/videos").json()
 
-    assert body["video_tags"]["tags"] == ["b-roll"]
+    assert body["video_tags"]["tags"] == [*DEFAULT_TAGS, "b-roll"]
     assert body["video_tags"]["assignments"][str(mov)] == "b-roll"
 
 
@@ -156,13 +157,55 @@ def test_corrupt_tags_file_degrades(api, project):
 
     data = client.get("/api/video-tags").json()
 
-    assert data == {"tags": [], "assignments": {}}
+    assert data == {"tags": DEFAULT_TAGS, "assignments": {}}
 
 
 def test_load_video_tags_missing_file(project):
     _, output_dir, _ = project
     assert load_video_tags(output_dir) == {
         "schema_version": 1,
-        "tags": [],
+        "tags": DEFAULT_TAGS,
         "videos": {},
     }
+
+
+def test_default_tags_are_the_review_vocabulary(project):
+    """1/2/3 in the Videos tab mean the same thing on a project never tagged."""
+    _, output_dir, _ = project
+    assert load_video_tags(output_dir)["tags"] == ["vibes", "people", "action"]
+
+
+def test_an_emptied_tag_list_is_not_reseeded(project):
+    """Defaults seed a fresh project; they do not fight a deliberate clear."""
+    _, output_dir, _ = project
+    update_video_tags(output_dir, tags=[])
+    assert load_video_tags(output_dir)["tags"] == []
+
+
+def test_untagged_video_exports_to_its_own_folder(project):
+    """An untagged clip is unsorted, not a still: it never lands beside photos."""
+    folder, output_dir, root = project
+    mov = _video(folder)
+    jpg = folder / "photo.JPG"
+    jpg.write_bytes(b"j")
+    save_decisions(output_dir, {str(mov): FAVORITE, str(jpg): FAVORITE})
+
+    export_favorites(output_dir, folder, root)
+
+    assert (root / "2026_01_Japan" / "untagged" / "clip.MOV").is_file()
+    assert (root / "2026_01_Japan" / "photo.JPG").is_file()
+
+
+def test_plan_export_rows_untagged_separately(project):
+    folder, output_dir, root = project
+    tagged = _video(folder)
+    untagged = folder / "other.MOV"
+    untagged.write_bytes(b"mov-b")
+    save_decisions(output_dir, {str(tagged): FAVORITE, str(untagged): FAVORITE})
+    update_video_tags(output_dir, assign={str(tagged): "b-roll"})
+
+    plan = plan_export(output_dir, folder, root)
+
+    rows = {r["tag"]: r for r in plan["destinations"]}
+    assert set(rows) == {"b-roll", "untagged"}
+    assert rows["untagged"]["pending"] == 1
