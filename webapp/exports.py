@@ -4,6 +4,7 @@ This is the delivery step: curation decides what is worth keeping, and this puts
 those files somewhere an editor will look, grouped per trip:
 
     <EXPORTS_ROOT>/<project folder name>/DSCF4539.JPG
+    <EXPORTS_ROOT>/<project folder name>/<tag or "untagged">/DSCF4601.MOV
 
 Two rules shape the rest of it.
 
@@ -40,6 +41,11 @@ PARTIAL_SUFFIX = ".sightread-part"
 # Collision suffixes to try before giving up on a name.
 MAX_NAME_ATTEMPTS = 100
 
+# Every favourited video lands in a subfolder, tagged or not, so the trip root
+# stays photos-only and an untagged clip reads as "not sorted yet" rather than
+# disappearing among the stills.
+UNTAGGED_DIR = "untagged"
+
 
 @dataclass
 class ExportReport:
@@ -62,7 +68,7 @@ class ExportReport:
 
 
 def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = None) -> Path:
-    """Where favourites land: <root>/<trip>, or <root>/<trip>/<tag> for tagged videos."""
+    """Where favourites land: <root>/<trip>, or <root>/<trip>/<tag> for videos."""
     base = (root or EXPORTS_ROOT) / folder.name
     if tag:
         return base / sanitize_tag(tag)
@@ -72,9 +78,9 @@ def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = Non
 def _dest_for_shot(
     folder: Path, root: Path | None, shot: Path, tag: str | None
 ) -> Path:
-    """Export directory for one favourite — photos ignore tags."""
-    if is_video(shot) and tag:
-        return export_dir_for(folder, root, tag)
+    """Export directory for one favourite — photos ignore tags, videos never do."""
+    if is_video(shot):
+        return export_dir_for(folder, root, tag or UNTAGGED_DIR)
     return export_dir_for(folder, root)
 
 
@@ -104,8 +110,8 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
     an earlier run already put there. The finish panel needs that split to tell
     "not exported yet" from "exported, then the page was reloaded".
 
-    `destinations` breaks the same counts down by export folder — untagged
-    favourites and each video tag get their own row.
+    `destinations` breaks the same counts down by export folder — the trip root
+    (photos), each video tag, and `untagged` all get their own row.
     """
     tags_data = load_video_tags(output_dir)
     assignments = tags_data["videos"]
@@ -224,9 +230,9 @@ def export_favorites(
 ) -> ExportReport:
     """Copy every favourited shot into the trip's export directory.
 
-    Tagged videos land in <trip>/<tag>/; photos and untagged videos stay in
-    <trip>/. One bad file does not sink the run: failures are collected per
-    file and reported.
+    Tagged videos land in <trip>/<tag>/ and untagged ones in <trip>/untagged/;
+    photos stay in <trip>/. One bad file does not sink the run: failures are
+    collected per file and reported.
     """
     tags_data = load_video_tags(output_dir)
     assignments = tags_data["videos"]

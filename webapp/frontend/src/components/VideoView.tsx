@@ -768,7 +768,7 @@ export function VideoView({
                   ? "bg-violet-100 border-violet-300 text-violet-800"
                   : "border-gray-200 text-gray-500 hover:bg-gray-50"
               }`}
-              title="No export tag"
+              title="No tag → …/untagged/"
             >—</button>
             {videoTags.tags.map((tag, i) => (
               <button

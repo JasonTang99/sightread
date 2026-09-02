@@ -9,7 +9,8 @@ Persistence lives in <output_dir>/video_tags.json:
     }
 
 Tags are project-scoped. Only videos use them at export time: photos always land
-in the trip root; a tagged video goes to <trip>/<tag>/.
+in the trip root; a video goes to <trip>/<tag>/, or <trip>/untagged/ when it has
+no tag.
 """
 import json
 import re
@@ -18,7 +19,13 @@ from pathlib import Path
 VIDEO_TAGS_FILENAME = "video_tags.json"
 SCHEMA_VERSION = 1
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".m2ts", ".mts", ".webm"}
+
+# A project that has never been tagged starts with these, so the 1/2/3 keys in
+# the Videos tab mean the same thing on every trip. They are a starting point,
+# not a fixed set: tags can be added, and a project whose video_tags.json exists
+# is taken exactly as written, including one whose list has been emptied.
+DEFAULT_TAGS = ["vibes", "people", "action"]
 
 
 def is_video(path: Path | str) -> bool:
@@ -54,7 +61,7 @@ def _normalize_tags(tags: list) -> list[str]:
 
 
 def _empty() -> dict:
-    return {"schema_version": SCHEMA_VERSION, "tags": [], "videos": {}}
+    return {"schema_version": SCHEMA_VERSION, "tags": list(DEFAULT_TAGS), "videos": {}}
 
 
 def load_video_tags(output_dir: Path) -> dict:
