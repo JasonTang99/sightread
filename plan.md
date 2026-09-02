@@ -1,6 +1,6 @@
 # Sightread — Improvement Plan
 
-Updated: 2026-08-31
+Updated: 2026-09-01
 
 ---
 
@@ -149,9 +149,9 @@ home network is permitted by employer device policy. Orthogonal to the technical
 
 ---
 
-## Next: finishing a trip end to end (steps 1–2 built, step 3 open)
+## Next: finishing a trip end to end (built; Japan not run)
 
-Spec added 2026-08-23; steps 1 and 2 built the same day. The gap this closes: curation
+Spec added 2026-08-23; all three steps built by 2026-08-31. The gap this closes: curation
 produces decisions, but turning those decisions into *outcomes* — space reclaimed on h0,
 favourites delivered somewhere useful — was either buried or missing.
 
@@ -192,7 +192,8 @@ Still open:
 
 `webapp/exports.py` + `GET /api/exports/preview` + `POST /api/exports/favorites`, with a
 button in `FavoritesView`. Copies to `<SIGHTREAD_EXPORTS_ROOT>/<trip folder name>/`,
-defaulting to `/mnt/h0/Editing/exports`.
+defaulting to `/mnt/h0/Editing/exports`. **Tagged videos** (see below) land in
+`<trip>/<tag>/`; photos and untagged favourited videos stay in `<trip>/`.
 
 The open questions from the spec, as settled:
 
@@ -245,6 +246,29 @@ Still open:
 ### Suggested shape
 
 ~~A "Finish trip" panel that walks the three steps~~ **Done 2026-08-31** — see Finish tab.
+
+### Video tags for export routing — **Built 2026-09-01.**
+
+Named tags on favourited videos, routed into export subfolders at copy time. Built on
+`mirror-aware-deletes`; not yet merged to `main`.
+
+- **Storage:** `<output_dir>/video_tags.json` — `tags` list + per-video assignments
+  (`webapp/video_tags.py`).
+- **Export:** `exports.py` sends tagged videos to `<EXPORTS_ROOT>/<trip>/<tag>/`; photos
+  and untagged videos unchanged. `plan_export` adds a `destinations` breakdown for the
+  finish-panel confirm dialog.
+- **API:** `GET/PUT /api/video-tags`; `/api/videos` includes `video_tags`.
+- **UI:** Videos tab — star a clip, then pick/create tags on the toolbar. `1`–`9` apply
+  tags by slot (same convention as cluster rank keys); `t` cycles tag or clears.
+- **Tests:** `tests/test_video_tags.py` (persistence, API, export routing); 42 export/tag
+  tests pass; frontend rebuilt.
+
+Still open:
+
+- **Use while reviewing Japan's 62 undecided videos** — tag before export so delivery
+  folders match the edit (e.g. `b-roll`, `timelapse`). First action: open Videos tab on
+  Japan, create tags with `+`, star + `1`/`2`/`3` as you go.
+- **Merge `mirror-aware-deletes` → `main`** after Japan finish flow validates end-to-end.
 
 ### Related, still open
 

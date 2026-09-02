@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
-import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "../types";
+import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 const MIN_CLIP_LEN = 0.5;
 const NEW_CLIP_LEN = 4;
@@ -194,9 +194,22 @@ interface Props {
   onToggleFavorite?: (path: string) => Promise<void>;
   highlights?: VideoHighlightsMap;
   userClips?: UserClipsMap;
+  videoTags?: VideoTagsState;
+  onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
 
-export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorites = [], onToggleFavorite, highlights = {}, userClips = {} }: Props) {
+export function VideoView({
+  videos,
+  statuses = {},
+  onError,
+  onConfirmed,
+  favorites = [],
+  onToggleFavorite,
+  highlights = {},
+  userClips = {},
+  videoTags = { tags: [], assignments: {} },
+  onVideoTagsChange,
+}: Props) {
   const [idx, setIdx] = useState(0);
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   // Whether a video has been decided, straight off the server. This used to be
@@ -231,6 +244,57 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
   const [selected, setSelected] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
+  const [tagBusy, setTagBusy] = useState(false);
+
+  const applyVideoTags = useCallback(
+    async (body: { tags?: string[]; assign?: Record<string, string | null> }) => {
+      setTagBusy(true);
+      try {
+        const res = await fetch("/api/video-tags", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          throw new Error(detail?.detail ?? `Tag update failed: ${res.status}`);
+        }
+        const data = await res.json();
+        onVideoTagsChange?.({ tags: data.tags ?? [], assignments: data.assignments ?? {} });
+      } catch (e) {
+        onError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setTagBusy(false);
+      }
+    },
+    [onError, onVideoTagsChange],
+  );
+
+  const assignTag = useCallback(
+    (path: string, tag: string | null) => {
+      applyVideoTags({ assign: { [path]: tag } });
+    },
+    [applyVideoTags],
+  );
+
+  const addTag = useCallback(async () => {
+    const name = window.prompt("Tag name (export subfolder):");
+    if (!name?.trim()) return;
+    const next = [...videoTags.tags];
+    if (!next.includes(name.trim())) next.push(name.trim());
+    await applyVideoTags({ tags: next });
+  }, [applyVideoTags, videoTags.tags]);
+
+  const nextTag = useCallback(
+    (cur: string | null): string | null => {
+      const { tags } = videoTags;
+      if (tags.length === 0) return null;
+      if (!cur) return tags[0];
+      const i = tags.indexOf(cur);
+      return i < 0 || i >= tags.length - 1 ? null : tags[i + 1];
+    },
+    [videoTags],
+  );
 
   const current: string | undefined = videos[Math.min(idx, videos.length - 1)];
   const suggested = (current && highlights[current]?.clips) || [];
@@ -517,6 +581,14 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
       setIdx((i) => Math.min(videos.length - 1, i + 1));
       return;
     }
+    // 1–9: apply tag by slot (same convention as cluster rank keys).
+    if (/^[1-9]$/.test(e.key)) {
+      e.preventDefault();
+      if (!current || !favorites.includes(current) || tagBusy) return;
+      const tag = videoTags.tags[parseInt(e.key, 10) - 1];
+      if (tag) assignTag(current, tag);
+      return;
+    }
     switch (e.key) {
       case "j":
       case "ArrowDown":
@@ -541,6 +613,12 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
       case "s": {
         e.preventDefault();
         if (onToggleFavorite && current) onToggleFavorite(current).catch((err) => onError(String(err)));
+        break;
+      }
+      case "t": {
+        e.preventDefault();
+        if (!current || !favorites.includes(current) || tagBusy) break;
+        assignTag(current, nextTag(videoTags.assignments[current] ?? null));
         break;
       }
       case "l": {
@@ -679,8 +757,47 @@ export function VideoView({ videos, statuses = {}, onError, onConfirmed, favorit
           className={`text-base leading-none shrink-0 transition-colors ${isFavorited ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400"}`}
           title="Toggle favorite (s)"
         >★</button>
+        {isFavorited && (
+          <div className="flex items-center gap-1 shrink-0 max-w-md overflow-x-auto">
+            <button
+              type="button"
+              disabled={tagBusy}
+              onClick={() => assignTag(current, null)}
+              className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                !videoTags.assignments[current]
+                  ? "bg-violet-100 border-violet-300 text-violet-800"
+                  : "border-gray-200 text-gray-500 hover:bg-gray-50"
+              }`}
+              title="No export tag"
+            >—</button>
+            {videoTags.tags.map((tag, i) => (
+              <button
+                key={tag}
+                type="button"
+                disabled={tagBusy}
+                onClick={() => assignTag(current, tag)}
+                className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${
+                  videoTags.assignments[current] === tag
+                    ? "bg-violet-100 border-violet-300 text-violet-800"
+                    : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+                title={i < 9 ? `Tag ${i + 1} (${i + 1}) → …/${tag}/` : `Export to …/${tag}/`}
+              >
+                {i < 9 && <span className="font-bold mr-0.5">{i + 1}</span>}
+                {tag}
+              </button>
+            ))}
+            <button
+              type="button"
+              disabled={tagBusy}
+              onClick={() => addTag()}
+              className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
+              title="Add tag"
+            >+</button>
+          </div>
+        )}
         <span className="text-xs text-gray-300 truncate">
-          j/k · ←/→ ±10s · space toggle · l pause · s star · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
+          j/k · ←/→ ±10s · space toggle · l pause · s star · 1–9 tag · t cycle tag · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
         </span>
         <div className="ml-auto flex items-center gap-2 shrink-0">
           {exportNote && <span className="text-xs text-emerald-600">{exportNote}</span>}

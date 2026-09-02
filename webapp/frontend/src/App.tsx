@@ -9,7 +9,7 @@ import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
 import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
-import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses } from "./types";
+import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -23,6 +23,7 @@ export default function App() {
   const [videoShotTimes, setVideoShotTimes] = useState<Record<string, string | null>>({});
   const [videoHighlights, setVideoHighlights] = useState<VideoHighlightsMap>({});
   const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
+  const [videoTags, setVideoTags] = useState<VideoTagsState>({ tags: [], assignments: {} });
   const [videosLoaded, setVideosLoaded] = useState(false);
 
   const reload = useCallback(async () => {
@@ -50,6 +51,7 @@ export default function App() {
       setVideoShotTimes(d.shot_times ?? {});
       setVideoHighlights(d.highlights ?? {});
       setVideoUserClips(d.user_clips ?? {});
+      setVideoTags(d.video_tags ?? { tags: [], assignments: {} });
     } catch {
       /* video list is non-critical */
     } finally {
@@ -325,6 +327,8 @@ export default function App() {
             statuses={videoStatuses}
             highlights={videoHighlights}
             userClips={videoUserClips}
+            videoTags={videoTags}
+            onVideoTagsChange={setVideoTags}
             onError={setError}
             favorites={favorites}
             onToggleFavorite={toggleFavorite}

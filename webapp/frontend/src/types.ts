@@ -99,6 +99,11 @@ export interface UserClip {
 
 export type UserClipsMap = Record<string, { clips: UserClip[] }>;
 
+export interface VideoTagsState {
+  tags: string[];
+  assignments: Record<string, string>;
+}
+
 export interface JobStatus {
   running: boolean;
   done: boolean;
