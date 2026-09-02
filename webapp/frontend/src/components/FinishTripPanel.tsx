@@ -5,6 +5,7 @@ interface Preview {
   pending_deletes: number;
   favorites: number;
   export: {
+    mode: "link" | "copy";
     shots: number;
     files: number;
     bytes: number;
@@ -55,9 +56,9 @@ export function FinishTripPanel({
       const data: Preview = await res.json();
       setPreview(data);
       if (data.pending_deletes === 0) setStep1Done(true);
-      // Nothing left to copy means the export already happened — otherwise a
+      // Nothing left to deliver means the export already happened — otherwise a
       // reload would re-arm step 2 and keep step 3 locked behind a no-op click.
-      if (data.favorites === 0 || data.export.pending === 0) setStep2Done(true);
+      if (data.export.files === 0 || data.export.pending === 0) setStep2Done(true);
       if (data.done_at) {
         setStep1Done(true);
         setStep2Done(true);
@@ -81,7 +82,7 @@ export function FinishTripPanel({
     try {
       const plan = preview.export;
       if (plan.files === 0) {
-        setNotes((n) => ({ ...n, 2: "No favourites to export." }));
+        setNotes((n) => ({ ...n, 2: "Nothing to export." }));
         setStep2Done(true);
         return;
       }
@@ -93,17 +94,22 @@ export function FinishTripPanel({
         setStep2Done(true);
         return;
       }
+      const linking = plan.mode === "link";
       const free = plan.free_bytes == null ? "" : ` (${formatBytes(plan.free_bytes)} free)`;
       const already =
         plan.delivered > 0 ? ` ${plan.delivered} file(s) are already there and will be skipped.` : "";
+      const cost = linking
+        ? `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} of originals — hardlinked, so no extra space is used`
+        : `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} to copy`;
       const ok = window.confirm(
-        `Copy ${plan.shots} favourite shot(s) — ${plan.pending} files, ${formatBytes(plan.pending_bytes)} — ` +
+        `Export this trip — ${cost} — ` +
           `to\n\n${plan.dest}${free}\n\n` +
-          `Raw files and .xmp sidecars come along. Nothing already there is overwritten.${already}`
+          `Every photo that survived curation, as a JPEG (no raws or sidecars), plus starred ` +
+          `videos in their tag folders. Nothing already there is overwritten.${already}`
       );
       if (!ok) return;
 
-      const res = await fetch("/api/exports/favorites", { method: "POST" });
+      const res = await fetch("/api/exports/trip", { method: "POST" });
       if (!res.ok) {
         const detail = await res.json().catch(() => null);
         throw new Error(detail?.detail ?? `Export failed: ${res.status}`);
@@ -111,7 +117,9 @@ export function FinishTripPanel({
       const data = await res.json();
       setNotes((n) => ({
         ...n,
-        2: `Exported ${data.copied} file(s) (${formatBytes(data.copied_bytes)}) to ${data.dest}.`,
+        2: data.linked > 0 && data.copied === 0
+          ? `Exported ${data.linked} file(s) to ${data.dest} — hardlinked, no extra space used.`
+          : `Exported ${data.delivered} file(s) (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied) to ${data.dest}.`,
       }));
       setStep2Done(true);
     } catch (e) {
@@ -209,14 +217,14 @@ export function FinishTripPanel({
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-sm font-medium text-gray-800">
-              {step2Done ? "✓" : "2."} Export favourites
+              {step2Done ? "✓" : "2."} Export the trip
             </p>
             <p className="text-xs text-gray-500 mt-0.5">
-              {favoriteCount === 0
-                ? "No favourites — skip when ready."
-                : preview && preview.export.files > 0 && preview.export.pending === 0
-                  ? `${favoriteCount} starred — all ${preview.export.files} file(s) already in ${preview.export.dest}.`
-                  : `${favoriteCount} starred — copies to ${preview?.export.dest ?? "exports folder"} with raws and sidecars.`}
+              {preview && preview.export.files === 0
+                ? "Nothing to export — skip when ready."
+                : preview && preview.export.pending === 0
+                  ? `All ${preview.export.files} file(s) already in ${preview.export.dest}.`
+                  : `${preview?.export.files ?? 0} file(s) — every surviving photo as a JPEG, plus starred videos by tag — into ${preview?.export.dest ?? "exports folder"}${preview?.export.mode === "link" ? ", hardlinked" : ""}.`}
             </p>
           </div>
           <button
@@ -225,7 +233,7 @@ export function FinishTripPanel({
             data-testid="finish-export"
             className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
           >
-            {exporting ? "Exporting…" : step2Done ? "Exported" : "Export favourites"}
+            {exporting ? "Exporting…" : step2Done ? "Exported" : "Export trip"}
           </button>
         </div>
         {notes[2] && <p className="text-xs text-gray-500">{notes[2]}</p>}

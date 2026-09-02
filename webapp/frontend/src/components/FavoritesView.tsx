@@ -46,9 +46,10 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
     focusedRef.current?.scrollIntoView({ block: "nearest" });
   }, [focus]);
 
-  // Export is two round trips on purpose: the preview prices the copy before
-  // the user agrees to it, since the exports root can sit on the same drive
-  // applying deletes just freed.
+  // Export is two round trips on purpose: the preview prices the run before the
+  // user agrees to it, since the exports root can sit on the same drive
+  // applying deletes just freed. It delivers the whole trip, not only what is
+  // shown here — this button is just the nearest place to reach it.
   const handleExport = async () => {
     setExporting(true);
     try {
@@ -56,25 +57,32 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
       if (!pres.ok) throw new Error(`Preview failed: ${pres.status}`);
       const plan = await pres.json();
       if (plan.files === 0) {
-        setExportResult("Nothing to export — no favourite is still on disk.");
+        setExportResult("Nothing to export — no photo or starred video is on disk.");
         return;
       }
       const free = plan.free_bytes == null ? "" : ` (${formatBytes(plan.free_bytes)} free)`;
+      const cost =
+        plan.mode === "link"
+          ? `${plan.files} file(s), ${formatBytes(plan.bytes)} — hardlinked, so no extra space is used`
+          : `${plan.files} file(s), ${formatBytes(plan.bytes)} to copy`;
       const ok = window.confirm(
-        `Copy ${plan.shots} favourite shot(s) — ${plan.files} files, ${formatBytes(plan.bytes)} — ` +
+        `Export this trip — ${cost} — ` +
           `to\n\n${plan.dest}${free}\n\n` +
-          `Raw files and .xmp sidecars come along; derived caches never do. ` +
+          `Every photo that survived curation, as a JPEG — no raws or sidecars, and never a ` +
+          `derived cache — plus starred videos in their tag folders. ` +
           `Nothing already there is overwritten.`
       );
       if (!ok) return;
 
-      const res = await fetch("/api/exports/favorites", { method: "POST" });
+      const res = await fetch("/api/exports/trip", { method: "POST" });
       if (!res.ok) {
         const detail = await res.json().catch(() => null);
         throw new Error(detail?.detail ?? `Export failed: ${res.status}`);
       }
       const data = await res.json();
-      const parts = [`Exported ${data.copied} file(s) (${formatBytes(data.copied_bytes)}) to ${data.dest}`];
+      const written =
+        data.copied > 0 ? ` (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied)` : " (hardlinked)";
+      const parts = [`Exported ${data.delivered} file(s)${written} to ${data.dest}`];
       if (data.skipped) parts.push(`${data.skipped} already there`);
       if (data.failed?.length) parts.push(`${data.failed.length} failed`);
       setExportResult(`${parts.join(" · ")}.`);
@@ -183,10 +191,10 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         <button
           onClick={handleExport}
           disabled={exporting}
-          data-testid="export-favorites"
+          data-testid="export-trip"
           className="ml-auto px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
         >
-          {exporting ? "Exporting…" : "📤 Export favourites"}
+          {exporting ? "Exporting…" : "📤 Export trip"}
         </button>
       </div>
       {exportResult && (

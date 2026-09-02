@@ -62,7 +62,7 @@ from video import (
 )
 from exports import (
     EXPORTS_ROOT,
-    export_favorites,
+    export_trip,
     plan_export,
 )
 from clips import (
@@ -702,19 +702,20 @@ def _scan_videos(ctx: ProjectContext) -> list[str]:
 
 
 @app.get("/api/exports/preview")
-def preview_favorites_export():
-    """What exporting this trip's favourites would copy, and whether it fits.
+def preview_trip_export():
+    """What exporting this trip would deliver, and whether it fits.
 
     The exports root can sit on the same drive applying deletes just freed, so
-    the caller gets the size and the free space before agreeing to anything.
+    the caller gets the size, the free space, and whether the run hardlinks
+    (costing nothing) before agreeing to anything.
     """
     ctx = _require_active()
     return plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
 
 
-@app.post("/api/exports/favorites")
-def run_favorites_export():
-    """Copy every favourited shot into <EXPORTS_ROOT>/<trip name>/."""
+@app.post("/api/exports/trip")
+def run_trip_export():
+    """Deliver every surviving photo and starred video into <EXPORTS_ROOT>/<trip>/."""
     ctx = _require_active()
     # Same reasoning as the mirror guard on apply-deletes: an exports root that
     # is not there means an unmounted drive, and creating the tree would write
@@ -727,7 +728,9 @@ def run_favorites_export():
         )
     plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
     free = plan["free_bytes"]
-    if free is not None and plan["bytes"] > free:
+    # Hardlinks write no data, so free space is only a question when the exports
+    # root is on another filesystem and the run has to copy.
+    if plan["mode"] == "copy" and free is not None and plan["bytes"] > free:
         raise HTTPException(
             409,
             f"Not enough space: {plan['bytes'] / 1024 ** 3:.2f} GB to copy, "
@@ -735,7 +738,7 @@ def run_favorites_export():
         )
     # No curation lock: this only reads decisions and writes into the exports
     # tree, so it cannot race with a confirm the way apply-deletes can.
-    report = export_favorites(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    report = export_trip(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
     return {"ok": True, **report.as_dict()}
 
 
