@@ -73,6 +73,7 @@ from clips import (
     save_user_clips,
     user_clips_for,
 )
+from video_tags import load_video_tags, update_video_tags, sanitize_tag
 
 log = logging.getLogger(__name__)
 
@@ -747,6 +748,7 @@ def list_videos():
     shot_times = _get_shot_times(ctx, paths)
     highlights = _load_highlights_for(ctx.output_dir, paths)
     user_clips = user_clips_for(ctx.output_dir, paths)
+    vt = load_video_tags(ctx.output_dir)
     # Kick off background faststart transcoding for any uncached videos
     for p_str in paths:
         p = Path(p_str)
@@ -760,7 +762,53 @@ def list_videos():
         "shot_times": shot_times,
         "highlights": highlights,
         "user_clips": user_clips,
+        "video_tags": {"tags": vt["tags"], "assignments": vt["videos"]},
     }
+
+
+# ---------------------------------------------------------------------------
+# Video tags
+# ---------------------------------------------------------------------------
+
+class VideoTagsUpdate(BaseModel):
+    tags: list[str] | None = None
+    assign: dict[str, str | None] | None = None
+
+
+@app.get("/api/video-tags")
+def get_video_tags():
+    ctx = _require_active()
+    data = load_video_tags(ctx.output_dir)
+    return {"tags": data["tags"], "assignments": data["videos"]}
+
+
+@app.put("/api/video-tags")
+def put_video_tags(req: VideoTagsUpdate):
+    ctx = _require_active()
+    if req.assign:
+        for path, tag in req.assign.items():
+            abs_path = _resolve_project_path(ctx, path)
+            if not _is_under(abs_path, ctx.folder.resolve()):
+                raise HTTPException(400, f"Path outside project: {path}")
+            if abs_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise HTTPException(400, f"Not a video file: {path}")
+            if tag is not None and tag != "":
+                try:
+                    sanitize_tag(tag)
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+    if req.tags is not None:
+        for tag in req.tags:
+            try:
+                sanitize_tag(tag)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+    data = update_video_tags(
+        ctx.output_dir,
+        tags=req.tags,
+        assign=req.assign,
+    )
+    return {"ok": True, "tags": data["tags"], "assignments": data["videos"]}
 
 
 # ---------------------------------------------------------------------------

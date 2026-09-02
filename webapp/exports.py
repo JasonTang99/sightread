@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from utils import FAVORITE, load_decisions, paths_with_status, sidecars_of
+from video_tags import is_video, load_video_tags, sanitize_tag
 
 # The exports root is a delivery location, not project state, so it lives
 # outside the output dir and is configurable for anyone whose drives differ.
@@ -60,9 +61,21 @@ class ExportReport:
         }
 
 
-def export_dir_for(folder: Path, root: Path | None = None) -> Path:
-    """Where `folder`'s favourites go: <root>/<folder basename>."""
-    return (root or EXPORTS_ROOT) / folder.name
+def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = None) -> Path:
+    """Where favourites land: <root>/<trip>, or <root>/<trip>/<tag> for tagged videos."""
+    base = (root or EXPORTS_ROOT) / folder.name
+    if tag:
+        return base / sanitize_tag(tag)
+    return base
+
+
+def _dest_for_shot(
+    folder: Path, root: Path | None, shot: Path, tag: str | None
+) -> Path:
+    """Export directory for one favourite — photos ignore tags."""
+    if is_video(shot) and tag:
+        return export_dir_for(folder, root, tag)
+    return export_dir_for(folder, root)
 
 
 def favorite_shots(output_dir: Path) -> list[Path]:
@@ -90,38 +103,69 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
     describe what this run would actually copy, with `delivered` counting what
     an earlier run already put there. The finish panel needs that split to tell
     "not exported yet" from "exported, then the page was reloaded".
+
+    `destinations` breaks the same counts down by export folder — untagged
+    favourites and each video tag get their own row.
     """
+    tags_data = load_video_tags(output_dir)
+    assignments = tags_data["videos"]
     dest = export_dir_for(folder, root)
     shots = favorite_shots(output_dir)
-    files: list[Path] = []
+    files: list[tuple[Path, Path]] = []
     missing: list[str] = []
     for shot in shots:
         if not shot.is_file():
             missing.append(str(shot))
             continue
-        files.extend(files_for(shot))
+        tag = assignments.get(str(shot)) if is_video(shot) else None
+        shot_dest = _dest_for_shot(folder, root, shot, tag)
+        for f in files_for(shot):
+            files.append((f, shot_dest))
     total = 0
     delivered = 0
     pending = 0
     pending_bytes = 0
-    for f in files:
+    dest_stats: dict[str, dict] = {}
+
+    def _dest_row(d: Path, tag_label: str | None) -> dict:
+        key = str(d)
+        if key not in dest_stats:
+            dest_stats[key] = {
+                "dest": key,
+                "tag": tag_label,
+                "files": 0,
+                "bytes": 0,
+                "delivered": 0,
+                "pending": 0,
+                "pending_bytes": 0,
+            }
+        return dest_stats[key]
+
+    for f, shot_dest in files:
+        tag_label = None
+        if shot_dest != dest:
+            tag_label = shot_dest.name
+        row = _dest_row(shot_dest, tag_label)
         try:
             size = f.stat().st_size
         except OSError:
             size = 0
         total += size
-        # Same check the copy itself makes, so the plan and the run agree on
-        # what is left to do. A destination we cannot inspect counts as pending
-        # rather than delivered: over-reporting work is the safe direction.
+        row["files"] += 1
+        row["bytes"] += size
         try:
-            already = dest.is_dir() and _destination_for(f, dest) is None
+            already = shot_dest.is_dir() and _destination_for(f, shot_dest) is None
         except OSError:
             already = False
         if already:
             delivered += 1
+            row["delivered"] += 1
         else:
             pending += 1
             pending_bytes += size
+            row["pending"] += 1
+            row["pending_bytes"] += size
+    destinations = sorted(dest_stats.values(), key=lambda r: (r["tag"] is not None, r["dest"]))
     return {
         "dest": str(dest),
         "shots": len(shots) - len(missing),
@@ -132,6 +176,7 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
         "pending_bytes": pending_bytes,
         "missing": missing,
         "free_bytes": _free_bytes(dest),
+        "destinations": destinations,
     }
 
 
@@ -179,21 +224,25 @@ def export_favorites(
 ) -> ExportReport:
     """Copy every favourited shot into the trip's export directory.
 
-    One bad file does not sink the run: failures are collected per file and
-    reported, because a permission error on a single raw should not cost the
-    other fifteen shots.
+    Tagged videos land in <trip>/<tag>/; photos and untagged videos stay in
+    <trip>/. One bad file does not sink the run: failures are collected per
+    file and reported.
     """
+    tags_data = load_video_tags(output_dir)
+    assignments = tags_data["videos"]
     dest = export_dir_for(folder, root)
     report = ExportReport(dest=dest)
-    dest.mkdir(parents=True, exist_ok=True)
 
     for shot in favorite_shots(output_dir):
         if not shot.is_file():
             report.failed.append({"path": str(shot), "error": "file not found"})
             continue
+        tag = assignments.get(str(shot)) if is_video(shot) else None
+        shot_dest = _dest_for_shot(folder, root, shot, tag)
+        shot_dest.mkdir(parents=True, exist_ok=True)
         for src in files_for(shot):
             try:
-                target = _destination_for(src, dest)
+                target = _destination_for(src, shot_dest)
                 if target is None:
                     report.skipped.append(src.name)
                     continue

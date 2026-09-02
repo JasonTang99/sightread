@@ -140,7 +140,7 @@ class TestApiVideosEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"paths", "statuses", "shot_times", "highlights", "user_clips"}
+        assert set(body.keys()) == {"paths", "statuses", "shot_times", "highlights", "user_clips", "video_tags"}
         assert body["paths"] == [video]
         assert body["statuses"] == {video: "undecided"}
         assert video in body["shot_times"]
