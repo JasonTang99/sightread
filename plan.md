@@ -1,6 +1,6 @@
 # Sightread — Improvement Plan
 
-Updated: 2026-09-01
+Updated: 2026-09-02
 
 ---
 
@@ -227,9 +227,25 @@ What it delivers, settled 2026-09-01:
   so `plan_export`'s `missing` and the report's `failed` are what surface a favourite the
   decision record still names.
 
+**Preview against Japan, 2026-09-02:** 99 files, 1.76 GiB, `mode: "link"`, nothing
+missing, one destination row (the trip root). That is 448 JPEGs on disk minus the 349
+queued for deletion; no video is starred yet, so no `untagged/` row appears. Under
+hardlinking the 1.76 GiB is described, not spent.
+
 Still open:
 
-- **Run it.** Non-destructive; only ever writes into the exports tree.
+- **Run it.** Non-destructive; only ever writes into the exports tree, and under
+  hardlinking it costs no space. First action: Finish tab → step 2, or the 📤 button on
+  the Favourites tab.
+- **A hardlinked export is the same file, under two names.** Nothing edits it today — the
+  export is a delivery, and editors open the raw — but a tool that rewrites a JPEG *in
+  place* would change the import copy too. Most write-new-then-rename, which breaks the
+  link harmlessly. Worth knowing before pointing anything at the exports tree that writes;
+  if that ever happens, the fix is `--copy` on the export, not a symlink.
+- **The 📤 button lives on the Favourites tab but exports the whole trip.** It was the
+  favourites-export button and its placement outlived that meaning. Move it to the Finish
+  tab, or leave it and rename the tab; either way the current pairing invites the wrong
+  expectation. `webapp/frontend/src/components/FavoritesView.tsx`.
 - ~~**Re-arming on reload.**~~ **Done 2026-08-31.** `plan_export` splits the set into
   `delivered` / `pending` using the same size check the delivery makes, so a reload after
   a successful export leaves step 2 ticked instead of demanding a no-op click before step
@@ -283,9 +299,10 @@ Named tags on favourited videos, routed into export subfolders at copy time. Bui
 Still open:
 
 - **Use while reviewing Japan's 62 undecided videos** — tag before export so delivery
-  folders match the edit. First action: open Videos tab on Japan, star + `1` vibes /
-  `2` people / `3` action as you go; anything left untagged still exports, into
-  `untagged/`.
+  folders match the edit. Nothing is starred yet, so the export currently has no video
+  rows at all; every clip that gets starred and left untagged lands in `untagged/`.
+  First action: open Videos tab on Japan, star + `1` vibes / `2` people / `3` action as
+  you go.
 - **Merge `mirror-aware-deletes` → `main`** after Japan finish flow validates end-to-end.
 
 ### Related, still open
