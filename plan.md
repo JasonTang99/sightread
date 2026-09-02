@@ -188,41 +188,54 @@ Still open:
 - ~~**Placement.** `TrashPanel` still renders inside the clusters, singles and timeline tabs~~
   **Done 2026-08-31.** Finish tab + `FinishTripPanel` — apply-deletes is step 1 there.
 
-### Step 2 — Export favourites. **Built 2026-08-23 (`66ad867`). Not yet run.**
+### Step 2 — Export the trip. **Built 2026-08-23 (`66ad867`), reshaped 2026-09-01.**
 
-`webapp/exports.py` + `GET /api/exports/preview` + `POST /api/exports/favorites`, with a
-button in `FavoritesView`. Copies to `<SIGHTREAD_EXPORTS_ROOT>/<trip folder name>/`,
-defaulting to `/mnt/h0/Editing/exports`. **Tagged videos** (see below) land in
-`<trip>/<tag>/`; photos and untagged favourited videos stay in `<trip>/`.
+`webapp/exports.py` + `GET /api/exports/preview` + `POST /api/exports/trip`, with a button
+in `FavoritesView` and step 2 of the finish panel. Delivers to
+`<SIGHTREAD_EXPORTS_ROOT>/<trip folder name>/`, defaulting to `/mnt/h0/Editing/exports`.
+**Videos** land in `<trip>/<tag>/` or `<trip>/untagged/`; photos stay in the trip root.
 
-The open questions from the spec, as settled:
+What it delivers, settled 2026-09-01:
 
+- **Every surviving photo, as a JPEG.** Not only the favourites — stars pick what to cut
+  with, not what to keep, so anything not marked for deletion ships. The raw and both
+  `.xmp` sidecars stay in the import folder; the export is a JPEG per photo. This settles
+  the shot-vs-JPEG question that had been open since 2026-08-23.
+- **Videos only when starred**, because a trip holds far more footage than an edit uses
+  and starring is the only pass that has looked at it. The whole original, never the
+  `video_cache` transcode, and no clips alongside.
+- **Hardlinks, not copies**, whenever the sources and the exports root are the same
+  filesystem — which is the normal case, `/mnt/h0/Editing/imports` and
+  `/mnt/h0/Editing/exports` both being `/dev/sda1`. Zero bytes, no wait, and unlike a
+  symlink it cannot dangle: the data lives until the last name for it goes, so the export
+  survives whatever happens to the import folder. `os.link` is tried and its failure is
+  the trigger for the copy fallback, so a cross-device root, a filesystem without
+  hardlinks, and a source at its link limit all resolve the same way. `plan_export`
+  reports `mode: "link" | "copy"`, and the free-space guard on the endpoint only applies
+  when copying.
 - **Exports root**: `/mnt/h0/Editing/exports`, configurable by env var. The h0-vs-h1
   concern was overstated in the spec — the 145GB of cache bloat is on the **nvme**
   (`~/.local/share/sightread/`), not on h0, so exporting does not meaningfully undo step 1.
-  The confirm dialog prices the copy and shows free space regardless.
-- **Favourited videos**: the whole original, never the `video_cache` transcode. No clips
-  alongside — a starred video exports as one file.
-- **Collisions**: a destination name holding a file of the same size counts as delivered and
-  is skipped, which makes re-running idempotent; a name holding a *different* file gets a
-  numeric suffix. Nothing is overwritten. Copies land on `.sightread-part` and are renamed
-  into place so an interrupted run cannot leave a truncated file that the next run's size
-  check would mistake for a finished one.
-
-**Preview against Japan, 2026-08-23:** 16 shots, 64 files, 2.20 GiB, 452 GiB free, none missing.
+  Under hardlinking it costs nothing at all.
+- **Collisions**: a destination name holding a file of the same size counts as delivered
+  and is skipped, which makes re-running idempotent and recognises an earlier run whether
+  it linked or copied; a name holding a *different* file gets a numeric suffix. Nothing is
+  overwritten. Copies land on `.sightread-part` and are renamed into place so an
+  interrupted run cannot leave a truncated file that the next run's size check would
+  mistake for a finished one. A hardlink needs no such dance.
+- **Missing starred files** are reported rather than raised on: the export walks the disk,
+  so `plan_export`'s `missing` and the report's `failed` are what surface a favourite the
+  decision record still names.
 
 Still open:
 
 - **Run it.** Non-destructive; only ever writes into the exports tree.
-- ~~**Re-arming on reload.**~~ **Done 2026-08-31.** `plan_export` now splits the favourite
-  set into `delivered` / `pending` using the same size check the copy makes, so a reload
-  after a successful export leaves step 2 ticked instead of demanding a no-op click before
-  step 3 unlocks. The confirm dialog prices only the pending files.
-- **Decide whether a favourite should export as a shot or as a JPEG.** Currently it exports
-  the whole shot — JPEG + raw + both `.xmp` — on the reasoning that the raw is the file that
-  actually gets edited, which is why 16 favourites are 64 files. Flagged to the user
-  2026-08-23, unanswered. A JPEG-only deliverable is a one-line change to
-  `exports.files_for()`.
+- ~~**Re-arming on reload.**~~ **Done 2026-08-31.** `plan_export` splits the set into
+  `delivered` / `pending` using the same size check the delivery makes, so a reload after
+  a successful export leaves step 2 ticked instead of demanding a no-op click before step
+  3 unlocks.
+- ~~**Decide whether a favourite should export as a shot or as a JPEG.**~~ Settled
+  2026-09-01: JPEG only, and every photo rather than only the favourites.
 
 ### Step 3 — Clear the pipeline and caches. **Built 2026-08-31.**
 
@@ -264,7 +277,7 @@ Named tags on favourited videos, routed into export subfolders at copy time. Bui
 - **API:** `GET/PUT /api/video-tags`; `/api/videos` includes `video_tags`.
 - **UI:** Videos tab — star a clip, then pick/create tags on the toolbar. `1`–`9` apply
   tags by slot (same convention as cluster rank keys); `t` cycles tag or clears.
-- **Tests:** `tests/test_video_tags.py` (persistence, API, export routing); 42 export/tag
+- **Tests:** `tests/test_video_tags.py` (persistence, API, export routing); 41 export/tag
   tests pass; frontend rebuilt.
 
 Still open:
@@ -273,11 +286,6 @@ Still open:
   folders match the edit. First action: open Videos tab on Japan, star + `1` vibes /
   `2` people / `3` action as you go; anything left untagged still exports, into
   `untagged/`.
-- **Copies vs. links.** Raised 2026-09-01: the export could hardlink instead of copying.
-  `/mnt/h0/Editing/imports` and `/mnt/h0/Editing/exports` are the same ext4 filesystem
-  (`/dev/sda1`), so hardlinks are available and cost no bytes; a cross-filesystem
-  `SIGHTREAD_EXPORTS_ROOT` would have to fall back to copying. Open alongside the
-  shot-vs-JPEG question below — both change what a delivery folder contains.
 - **Merge `mirror-aware-deletes` → `main`** after Japan finish flow validates end-to-end.
 
 ### Related, still open

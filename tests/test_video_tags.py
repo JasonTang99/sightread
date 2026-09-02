@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 import exports
 import server
-from exports import export_favorites, plan_export
+from exports import export_trip, plan_export
 from projects import ProjectContext
 from utils import FAVORITE, save_decisions
 from video_tags import DEFAULT_TAGS, load_video_tags, sanitize_tag, update_video_tags
@@ -93,7 +93,7 @@ def test_tagged_video_exports_to_tag_subfolder(project):
     save_decisions(output_dir, {str(mov): FAVORITE, str(other): FAVORITE})
     update_video_tags(output_dir, tags=["b-roll"], assign={str(mov): "b-roll"})
 
-    export_favorites(output_dir, folder, root)
+    export_trip(output_dir, folder, root)
 
     assert (root / "2026_01_Japan" / "untagged" / "other.MOV").is_file()
     assert (root / "2026_01_Japan" / "b-roll" / "clip.MOV").is_file()
@@ -190,7 +190,7 @@ def test_untagged_video_exports_to_its_own_folder(project):
     jpg.write_bytes(b"j")
     save_decisions(output_dir, {str(mov): FAVORITE, str(jpg): FAVORITE})
 
-    export_favorites(output_dir, folder, root)
+    export_trip(output_dir, folder, root)
 
     assert (root / "2026_01_Japan" / "untagged" / "clip.MOV").is_file()
     assert (root / "2026_01_Japan" / "photo.JPG").is_file()
