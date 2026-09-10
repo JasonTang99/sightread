@@ -219,3 +219,35 @@ class TestComputeVideoHighlights:
 
         assert _load_json(out)["videos"] == {}
         assert len(fake_clipfarm) == 0
+
+
+# -- the step is opt-in ------------------------------------------------------
+
+def test_clip_generation_is_off_unless_asked_for():
+    """Disabled by default since 2026-09-10. The webapp runs `pipeline.py` with
+    only --image-dir and --output-dir (webapp/jobs.py), so the default is the
+    only thing standing between a folder of video and a DINOv3 pass over every
+    frame of it."""
+    import inspect
+
+    sig = inspect.signature(pipeline.run_pipeline)
+    assert sig.parameters["video_highlights"].default is False
+
+
+@pytest.mark.parametrize("argv, expected", [
+    ([], False),                                         # the default
+    (["--video-highlights"], True),                      # opt in
+    (["--no-video-highlights"], False),                  # still valid, still means off
+    (["--video-highlights", "--no-video-highlights"], False),  # explicit off wins
+    (["--force-video-highlights"], True),                # implies the step runs
+])
+def test_the_flags_resolve_the_way_the_help_text_claims(monkeypatch, argv, expected):
+    """`--no-video-highlights` is kept for invocations that already pass it, so
+    the two flags have to compose without either one silently winning."""
+    seen = {}
+    monkeypatch.setattr(pipeline, "run_pipeline",
+                        lambda *a, **kw: seen.update(kw) or {})
+    monkeypatch.setattr(sys, "argv",
+                        ["pipeline.py", "--image-dir", ".", "--output-dir", "."] + argv)
+    pipeline.main()
+    assert seen["video_highlights"] is expected
