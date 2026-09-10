@@ -307,13 +307,35 @@ Still open:
 
 ### Related, still open
 
-- **~145GB of derived cache on the nvme**, 140GB of it Hawaii's `video_cache`: 89 files at
-  4K/194Mbps, output from an older converter whose cache keys the current code no longer
-  computes, so nothing will ever read them. Note this is the **system disk**, not h0 — freeing
-  the photo drive and freeing the cache drive are two different operations. `POST
-  /api/projects/done` reclaims them per project, but orphans in a project still being curated
-  need a keyed sweep: delete any `video_cache` / `thumb_cache` / `poster_cache` entry whose key
-  no source file currently maps to.
+- ~~**~145GB of derived cache on the nvme**, 140GB of it Hawaii's `video_cache`.~~
+  **Swept 2026-09-10, and the premise was wrong.** `scripts/sweep_orphan_caches.py` builds the
+  set of keys the current code can actually compute and deletes what falls outside it; it is
+  dry-run by default, refuses a project whose source folder is absent (an unmounted drive makes
+  every key look dead, which would hand back the whole cache as garbage), and covers
+  `video_cache` by default with the width-keyed `thumb_cache` / `poster_cache` behind
+  `--include-widthkeyed`.
+
+  **Genuine orphans were 92.8MB, not 145GB** — 952 files, removed. Almost all of them from one
+  cause: `THUMB_W` was 600 until `09609f4` raised it to 800, and the width is *inside* the cache
+  key, so every 600px thumbnail and poster written before that commit became unreachable the
+  moment the constant moved. Japan 451 thumbs + 64 posters, Hawaii 345 + 90. Worth knowing that
+  a one-line constant change strands a cache generation.
+
+  **Hawaii's 140GB is reachable, and that is the worse finding.** All 89 entries hash correctly
+  against current files — nothing is orphaned. They are 3840×2160 at 194Mbps, and against their
+  sources they run **149.7GB of "cache" for 151.8GB of originals, a ratio of 0.99**. The old
+  converter stream-copied the video and only re-encoded the LPCM audio, so this is not a preview
+  cache at all: it is a second copy of the footage sitting on the system disk, at the exact
+  resolution `webapp/video.py` was written to avoid serving. Current policy (1440p long edge,
+  CRF 21, ~7Mbps) would put the same 89 files at roughly 5–6GB.
+
+  `--stale-policy` finds them (>2560 long edge or >25Mbps) and evicts them so they re-encode at
+  the current settings, lazily on next view or in bulk via `scripts/convert_videos.py`.
+  **Not run — it needs a decision**, because 89 files of 4K source at preset medium is hours of
+  CPU, and until they are rebuilt those videos scrub from the original.
+
+  Note this is the **system disk**, not h0 — freeing the photo drive and freeing the cache drive
+  are two different operations.
 - **Japan reads 326/388 reviewed, and that number is correct.** 79 clusters + 245 singletons
   are fully decided; of 64 videos, 2 are `keep` and **62 are undecided**. Verified against the
   live server 2026-08-23 — the counter was never the bug (the localStorage "✓ reviewed" *badge*
