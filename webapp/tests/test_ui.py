@@ -501,3 +501,82 @@ class TestTimelineVideos:
         settle(page_loaded)
         tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
         expect(tile).to_have_class(re.compile(r"border-green-400"))
+
+
+# ---------------------------------------------------------------------------
+# Video tag feedback
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestVideoTagFeedback:
+    """Pressing a tag has to say so on screen.
+
+    The pills scroll horizontally once a project has a few tags, so "which pill
+    is lit" is not a reliable answer to "what is this clip tagged" — the lit one
+    can be off-screen. A badge in the toolbar states it outright, and confirms
+    the write only after the server has acknowledged it.
+    """
+
+    @pytest.fixture()
+    def video_project(self, tmp_path, webapp_server):
+        folder = tmp_path / "clips"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "results.json").write_text(json.dumps({"clusters": []}))
+        video = folder / "a.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(video)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, str(video.resolve())
+
+    def _open_videos(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.get_by_role("button", name="Videos").click()
+        settle(page)
+
+    def test_the_tag_bar_only_exists_once_the_clip_is_starred(
+        self, page_loaded: Page, video_project
+    ):
+        """Tags route favourites into export subfolders, so an unstarred clip has
+        nothing to route and the bar is hidden. Worth pinning: the hidden state is
+        what made tagging look broken."""
+        self._open_videos(page_loaded)
+        expect(page_loaded.locator("text=🏷")).to_have_count(0)
+
+        page_loaded.get_by_title("Toggle favorite (s)").click()
+        settle(page_loaded)
+        expect(page_loaded.locator("text=🏷 untagged")).to_have_count(1)
+
+    def test_clicking_a_tag_shows_it_in_the_toolbar(self, page_loaded: Page, video_project):
+        self._open_videos(page_loaded)
+        page_loaded.get_by_title("Toggle favorite (s)").click()
+        settle(page_loaded)
+
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+
+        # The flash says saved; once it clears, the badge still states the tag.
+        badge = page_loaded.locator("span[title='Exports to …/vibes/']")
+        expect(badge).to_have_count(1)
+
+    def test_the_tag_survives_stepping_away_and_back(self, page_loaded: Page, video_project):
+        """A badge driven by local click state rather than by server state would
+        pass the test above and still lose the tag on reload."""
+        out, video = video_project
+        self._open_videos(page_loaded)
+        page_loaded.get_by_title("Toggle favorite (s)").click()
+        settle(page_loaded)
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+
+        assert json.loads((out / "video_tags.json").read_text())["videos"][video] == "vibes"
+
+        self._open_videos(page_loaded)
+        expect(page_loaded.locator("span[title='Exports to …/vibes/']")).to_have_count(1)

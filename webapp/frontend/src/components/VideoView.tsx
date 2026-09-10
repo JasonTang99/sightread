@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
+
+// Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
+// still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
+// reading as "not exported".
+const UNTAGGED_LABEL = "untagged";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 const MIN_CLIP_LEN = 0.5;
@@ -245,6 +250,9 @@ export function VideoView({
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
   const [tagBusy, setTagBusy] = useState(false);
+  // Set only once the server has confirmed the write, so the flash means "saved",
+  // not "clicked". Cleared on a timer and whenever the clip changes.
+  const [tagFlash, setTagFlash] = useState<string | null>(null);
 
   const applyVideoTags = useCallback(
     async (body: { tags?: string[]; assign?: Record<string, string | null> }) => {
@@ -261,8 +269,10 @@ export function VideoView({
         }
         const data = await res.json();
         onVideoTagsChange?.({ tags: data.tags ?? [], assignments: data.assignments ?? {} });
+        return true;
       } catch (e) {
         onError(e instanceof Error ? e.message : String(e));
+        return false;
       } finally {
         setTagBusy(false);
       }
@@ -271,11 +281,23 @@ export function VideoView({
   );
 
   const assignTag = useCallback(
-    (path: string, tag: string | null) => {
-      applyVideoTags({ assign: { [path]: tag } });
+    async (path: string, tag: string | null) => {
+      const ok = await applyVideoTags({ assign: { [path]: tag } });
+      if (ok) setTagFlash(tag ?? UNTAGGED_LABEL);
     },
     [applyVideoTags],
   );
+
+  // A flash left over from the previous clip would read as this one's tag.
+  useEffect(() => {
+    setTagFlash(null);
+  }, [idx]);
+
+  useEffect(() => {
+    if (tagFlash === null) return;
+    const t = setTimeout(() => setTagFlash(null), 1600);
+    return () => clearTimeout(t);
+  }, [tagFlash]);
 
   const addTag = useCallback(async () => {
     const name = window.prompt("Tag name (export subfolder):");
@@ -735,6 +757,7 @@ export function VideoView({
 
   const isKept = keeps[current] ?? true;
   const isFavorited = favorites.includes(current);
+  const currentTag = videoTags.assignments[current] ?? null;
   const name = current.split("/").pop() ?? current;
   const nDelete = videos.filter((v) => !keeps[v]).length;
 
@@ -757,6 +780,23 @@ export function VideoView({
           className={`text-base leading-none shrink-0 transition-colors ${isFavorited ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400"}`}
           title="Toggle favorite (s)"
         >★</button>
+        {/* What this clip is tagged, stated rather than implied by which pill is
+            lit. The pills scroll horizontally once there are a few tags, so the
+            selected one can be off-screen; this badge never is. */}
+        {isFavorited && (
+          <span
+            className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 transition-colors ${
+              tagFlash !== null
+                ? "bg-violet-600 text-white"
+                : currentTag
+                  ? "bg-violet-100 text-violet-800"
+                  : "bg-gray-100 text-gray-500"
+            }`}
+            title={`Exports to …/${currentTag ?? UNTAGGED_LABEL}/`}
+          >
+            {tagFlash !== null ? `✓ ${tagFlash}` : `🏷 ${currentTag ?? UNTAGGED_LABEL}`}
+          </span>
+        )}
         {isFavorited && (
           <div className="flex items-center gap-1 shrink-0 max-w-md overflow-x-auto">
             <button
@@ -764,12 +804,12 @@ export function VideoView({
               disabled={tagBusy}
               onClick={() => assignTag(current, null)}
               className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                !videoTags.assignments[current]
-                  ? "bg-violet-100 border-violet-300 text-violet-800"
+                !currentTag
+                  ? "bg-violet-600 border-violet-600 text-white font-semibold"
                   : "border-gray-200 text-gray-500 hover:bg-gray-50"
               }`}
               title="No tag → …/untagged/"
-            >—</button>
+            >{!currentTag && <span className="mr-0.5">✓</span>}—</button>
             {videoTags.tags.map((tag, i) => (
               <button
                 key={tag}
@@ -777,13 +817,15 @@ export function VideoView({
                 disabled={tagBusy}
                 onClick={() => assignTag(current, tag)}
                 className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${
-                  videoTags.assignments[current] === tag
-                    ? "bg-violet-100 border-violet-300 text-violet-800"
+                  currentTag === tag
+                    ? "bg-violet-600 border-violet-600 text-white font-semibold"
                     : "border-gray-200 text-gray-600 hover:bg-gray-50"
                 }`}
                 title={i < 9 ? `Tag ${i + 1} (${i + 1}) → …/${tag}/` : `Export to …/${tag}/`}
               >
-                {i < 9 && <span className="font-bold mr-0.5">{i + 1}</span>}
+                {currentTag === tag
+                  ? <span className="mr-0.5">✓</span>
+                  : i < 9 && <span className="font-bold mr-0.5">{i + 1}</span>}
                 {tag}
               </button>
             ))}
