@@ -264,6 +264,7 @@ class TestSingles:
 
     def test_enter_confirms_current_item(self, page_loaded: Page, output_dir):
         self._open_singles(page_loaded)
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/4 reviewed")
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         deleted = queued(output_dir)
@@ -271,6 +272,7 @@ class TestSingles:
         assert "DSCF4283" in deleted[0]
         decisions = statuses(output_dir)
         assert decisions["demo_photos/DSCF4283.JPG"] == "to_delete"
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/4 reviewed")
 
     def test_confirm_all_writes_delete_list(self, page_loaded: Page, output_dir):
         # No auto-keep threshold anymore: all unmarked singles default to Delete
@@ -479,17 +481,21 @@ class TestTimelineVideos:
         out, video = video_project
         page_loaded.goto(BASE_URL)
         page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/1 reviewed")
         page_loaded.keyboard.press(" ")
         settle(page_loaded)
         assert queued(out) == [video]
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
 
     def test_enter_records_a_keep_immediately(self, page_loaded: Page, video_project):
         out, video = video_project
         page_loaded.goto(BASE_URL)
         page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/1 reviewed")
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         assert statuses(out).get(video) == "kept"
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
 
     def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
         out, video = video_project
@@ -541,38 +547,48 @@ class TestVideoTagFeedback:
         page.get_by_role("button", name="Videos").click()
         settle(page)
 
-    def test_the_tag_bar_only_exists_once_the_clip_is_starred(
+    def test_the_tags_are_on_screen_before_anything_is_starred(
         self, page_loaded: Page, video_project
     ):
-        """Tags route favourites into export subfolders, so an unstarred clip has
-        nothing to route and the bar is hidden. Worth pinning: the hidden state is
-        what made tagging look broken."""
+        """The row used to be hidden until a clip was favourited, which hid the
+        whole feature: nothing to discover, and 1-9 silently did nothing."""
         self._open_videos(page_loaded)
+        expect(page_loaded.get_by_role("button", name=re.compile(r"vibes"))).to_have_count(1)
+        # Nothing is tagged yet, so nothing in the row is selected and the
+        # export badge -- which only means something for a favourite -- is absent.
         expect(page_loaded.locator("text=🏷")).to_have_count(0)
 
-        page_loaded.get_by_title("Toggle favorite (s)").click()
-        settle(page_loaded)
-        expect(page_loaded.locator("text=🏷 untagged")).to_have_count(1)
-
-    def test_clicking_a_tag_shows_it_in_the_toolbar(self, page_loaded: Page, video_project):
+    def test_clicking_a_tag_stars_the_clip_and_says_so(self, page_loaded: Page, video_project):
+        """Tagging means 'deliver this', and exports.py only delivers favourites,
+        so the tag is taken as the stronger statement and stars the clip too."""
+        out, video = video_project
         self._open_videos(page_loaded)
-        page_loaded.get_by_title("Toggle favorite (s)").click()
-        settle(page_loaded)
 
         page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
         settle(page_loaded)
 
-        # The flash says saved; once it clears, the badge still states the tag.
-        badge = page_loaded.locator("span[title='Exports to …/vibes/']")
-        expect(badge).to_have_count(1)
+        expect(page_loaded.locator("span[title='Exports to …/vibes/']")).to_have_count(1)
+        assert json.loads((out / "video_tags.json").read_text())["videos"][video] == "vibes"
+        # The star is the half that would silently not happen: the tag write
+        # succeeds either way, and only a favourite is ever exported.
+        assert video in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
+
+    def test_clearing_a_tag_does_not_star_anything(self, page_loaded: Page, video_project):
+        """'No tag' says nothing about wanting the clip, so it must not favourite
+        it -- only a real tag carries that meaning."""
+        self._open_videos(page_loaded)
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+        page_loaded.get_by_title("No tag → …/untagged/").click()
+        settle(page_loaded)
+        # Still favourited from the tag click, now with no tag.
+        expect(page_loaded.locator("span[title='Exports to …/untagged/']")).to_have_count(1)
 
     def test_the_tag_survives_stepping_away_and_back(self, page_loaded: Page, video_project):
         """A badge driven by local click state rather than by server state would
         pass the test above and still lose the tag on reload."""
         out, video = video_project
         self._open_videos(page_loaded)
-        page_loaded.get_by_title("Toggle favorite (s)").click()
-        settle(page_loaded)
         page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
         settle(page_loaded)
 

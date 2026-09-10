@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
 // still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
 // reading as "not exported".
 const UNTAGGED_LABEL = "untagged";
-import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 const MIN_CLIP_LEN = 0.5;
 const NEW_CLIP_LEN = 4;
@@ -195,6 +195,7 @@ interface Props {
   statuses?: VideoStatuses;
   onError: (msg: string) => void;
   onConfirmed: () => Promise<void>;
+  // Header session-progress reads App videoStatuses, which persist() does not
   favorites?: string[];
   onToggleFavorite?: (path: string) => Promise<void>;
   highlights?: VideoHighlightsMap;
@@ -280,12 +281,26 @@ export function VideoView({
     [onError, onVideoTagsChange],
   );
 
+  // Tagging a clip means "deliver this into .../<tag>/", and exports.py only
+  // delivers favourites — so a tag on an unstarred clip would route nothing.
+  // Rather than refuse it (which is what made tagging look broken: the keys
+  // silently did nothing), take the tag as the stronger statement and star the
+  // clip too. Clearing a tag never stars, since that says nothing about wanting
+  // the clip at all.
   const assignTag = useCallback(
     async (path: string, tag: string | null) => {
+      if (tag !== null && !favorites.includes(path) && onToggleFavorite) {
+        try {
+          await onToggleFavorite(path);
+        } catch (e) {
+          onError(e instanceof Error ? e.message : String(e));
+          return;
+        }
+      }
       const ok = await applyVideoTags({ assign: { [path]: tag } });
       if (ok) setTagFlash(tag ?? UNTAGGED_LABEL);
     },
-    [applyVideoTags],
+    [applyVideoTags, favorites, onToggleFavorite, onError],
   );
 
   // A flash left over from the previous clip would read as this one's tag.
@@ -606,7 +621,9 @@ export function VideoView({
     // 1–9: apply tag by slot (same convention as cluster rank keys).
     if (/^[1-9]$/.test(e.key)) {
       e.preventDefault();
-      if (!current || !favorites.includes(current) || tagBusy) return;
+      // No favourite check: assignTag stars the clip itself. Requiring the star
+      // first made these keys a silent no-op, which reads as a broken feature.
+      if (!current || tagBusy) return;
       const tag = videoTags.tags[parseInt(e.key, 10) - 1];
       if (tag) assignTag(current, tag);
       return;
@@ -639,7 +656,7 @@ export function VideoView({
       }
       case "t": {
         e.preventDefault();
-        if (!current || !favorites.includes(current) || tagBusy) break;
+        if (!current || tagBusy) break;
         assignTag(current, nextTag(videoTags.assignments[current] ?? null));
         break;
       }
@@ -797,8 +814,14 @@ export function VideoView({
             {tagFlash !== null ? `✓ ${tagFlash}` : `🏷 ${currentTag ?? UNTAGGED_LABEL}`}
           </span>
         )}
-        {isFavorited && (
-          <div className="flex items-center gap-1 shrink-0 max-w-md overflow-x-auto">
+        {/* Always on screen, starred or not. Hiding the row until a clip was
+            favourited hid the whole feature: there was nothing to discover and
+            the 1-9 keys did nothing. Clicking a tag stars the clip (assignTag),
+            so the row is an entry point rather than a reward for finding the
+            star first. Only the "no tag" button is favourites-only -- there is
+            nothing to clear on a clip that was never tagged. */}
+        <div className="flex items-center gap-1 shrink-0 max-w-md overflow-x-auto">
+          {isFavorited && (
             <button
               type="button"
               disabled={tagBusy}
@@ -810,34 +833,41 @@ export function VideoView({
               }`}
               title="No tag → …/untagged/"
             >{!currentTag && <span className="mr-0.5">✓</span>}—</button>
-            {videoTags.tags.map((tag, i) => (
+          )}
+          {videoTags.tags.map((tag, i) => {
+            // An unstarred clip has no tag, so nothing in the row is selected.
+            const isCurrent = isFavorited && currentTag === tag;
+            const dest = i < 9 ? `Tag ${i + 1} (${i + 1}) → …/${tag}/` : `Export to …/${tag}/`;
+            return (
               <button
                 key={tag}
                 type="button"
                 disabled={tagBusy}
                 onClick={() => assignTag(current, tag)}
                 className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${
-                  currentTag === tag
+                  isCurrent
                     ? "bg-violet-600 border-violet-600 text-white font-semibold"
-                    : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                    : isFavorited
+                      ? "border-gray-200 text-gray-600 hover:bg-gray-50"
+                      : "border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600"
                 }`}
-                title={i < 9 ? `Tag ${i + 1} (${i + 1}) → …/${tag}/` : `Export to …/${tag}/`}
+                title={isFavorited ? dest : `${dest} — also stars the clip`}
               >
-                {currentTag === tag
+                {isCurrent
                   ? <span className="mr-0.5">✓</span>
                   : i < 9 && <span className="font-bold mr-0.5">{i + 1}</span>}
                 {tag}
               </button>
-            ))}
-            <button
-              type="button"
-              disabled={tagBusy}
-              onClick={() => addTag()}
-              className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
-              title="Add tag"
-            >+</button>
-          </div>
-        )}
+            );
+          })}
+          <button
+            type="button"
+            disabled={tagBusy}
+            onClick={() => addTag()}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
+            title="Add tag"
+          >+</button>
+        </div>
         <span className="text-xs text-gray-300 truncate">
           j/k · ←/→ ±10s · space toggle · l pause · s star · 1–9 tag · t cycle tag · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
         </span>
