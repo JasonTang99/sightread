@@ -1086,7 +1086,7 @@ def run_pipeline(
     max_gap_s: float = MAX_CLUSTER_GAP_S,
     orient_window_s: float = ORIENT_MERGE_WINDOW_S,
     orient_threshold: float = ORIENT_MERGE_THRESHOLD,
-    video_highlights: bool = True,
+    video_highlights: bool = False,
     force_video_highlights: bool = False,
 ) -> dict:
     out = Path(output_dir)
@@ -1147,10 +1147,20 @@ def main():
                              "re-shoot of the same subject (0 to disable)")
     parser.add_argument("--orient-threshold", type=float, default=ORIENT_MERGE_THRESHOLD,
                         help="Centroid cosine-dist ceiling for that merge")
+    # Off by default since 2026-09-10. The clipfarm 2D clip-suggestion step is
+    # the most expensive thing in the pipeline per unit of value: it decodes and
+    # DINOv3-embeds frames across every video in the folder, and its output has
+    # been accumulating a `video_highlights_cache` per project for suggestions
+    # nobody is acting on. `--no-video-highlights` is kept because scripts and
+    # muscle memory still pass it, and it still means what it says.
+    parser.add_argument("--video-highlights", action="store_true",
+                        help="Run the clipfarm video-highlights step (off by default)")
     parser.add_argument("--no-video-highlights", action="store_true",
-                        help="Skip the clipfarm video-highlights step")
+                        help="Skip the clipfarm video-highlights step (the default; "
+                             "kept so existing invocations stay valid)")
     parser.add_argument("--force-video-highlights", action="store_true",
-                        help="Recompute video highlights even for unchanged videos")
+                        help="Recompute video highlights even for unchanged videos "
+                             "(implies --video-highlights)")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -1174,7 +1184,8 @@ def main():
         max_gap_s=args.max_gap_s,
         orient_window_s=args.orient_window_s,
         orient_threshold=args.orient_threshold,
-        video_highlights=not args.no_video_highlights,
+        video_highlights=((args.video_highlights or args.force_video_highlights)
+                          and not args.no_video_highlights),
         force_video_highlights=args.force_video_highlights,
     )
     print("Pipeline complete")
