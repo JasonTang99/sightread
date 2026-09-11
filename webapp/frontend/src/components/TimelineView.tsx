@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { GalleryPhoto, GridStatus, VideoHighlightsMap, VideoStatuses } from "../types";
+import { LiveMotion } from "./LiveMotion";
 
 interface Props {
   onError: (msg: string) => void;
@@ -56,7 +57,7 @@ interface TileProps {
 
 // Memoised: a trip's timeline runs to hundreds of tiles, and without this every
 // tile re-renders on each toggle, filter change and day switch.
-const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle }: TileProps) {
+const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle, motion }: TileProps & { motion?: string }) {
   return (
     <div
       className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderFor(status)}`}
@@ -70,6 +71,7 @@ const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle }
         loading="lazy"
         decoding="async"
       />
+      {motion && <LiveMotion motion={motion} />}
     </div>
   );
 });
@@ -270,6 +272,7 @@ export function TimelineView({
             status={effectiveStatus(ph, overrides)}
             baseStatus={ph.status}
             onToggle={toggle}
+            motion={ph.motion}
           />
         ))}
       </div>

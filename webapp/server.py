@@ -22,6 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 import thumbs
+from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names
 from utils import (
     DELETED,
     FAVORITE,
@@ -304,15 +305,14 @@ def get_state():
     # The app lands in the cluster view, so a user who never opens the timeline
     # would otherwise never trigger a prewarm and would pay for every render as
     # they reached it. Review order, so the pool stays ahead of the cursor.
-    _start_thumb_prewarm(
-        ctx,
-        [
-            img["path"]
-            for c in clusters + singletons
-            for img in c["images"]
-            if decisions.get(img["path"]) != DELETED
-        ],
-    )
+    live = [
+        img
+        for c in clusters + singletons
+        for img in c["images"]
+        if decisions.get(img["path"]) != DELETED
+    ]
+    _start_thumb_prewarm(ctx, [img["path"] for img in live])
+    _start_motion_transcodes(ctx, [img["motion"] for img in live if img.get("motion")])
     return {
         "no_project": False,
         "needs_pipeline": False,
@@ -619,11 +619,6 @@ def toggle_fav(req: FavoriteRequest):
     return {"ok": True, "favorited": favorited}
 
 
-# No ".ts": MPEG-TS shares the extension with TypeScript sources, so any code
-# folder would show up full of bogus "videos". AVCHD cameras use .mts/.m2ts.
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
-
-
 MIN_CLIP_SCORE_DEFAULT = 0.1
 
 
@@ -682,6 +677,10 @@ def _is_exported_clip(abs_path: Path, folder: Path) -> bool:
 def _scan_videos(ctx: ProjectContext) -> list[str]:
     """Every video on disk under the project folder, exported cuts excluded.
 
+    Live Photo motion files are excluded too: they belong to their still, are
+    judged with it, and are deleted with it (see `sidecars_of`). Listed here
+    they were most of a phone folder's "videos" — 151 of 163 on Hoh River.
+
     Pending deletes are included: the timeline shows a video's decision the way
     it shows a photo's, so it needs the marked ones too. Callers that only
     review undecided footage filter on `statuses`.
@@ -694,8 +693,9 @@ def _scan_videos(ctx: ProjectContext) -> list[str]:
     folder = ctx.folder.resolve()
     found: list[str] = []
     for root, _dirs, files in os.walk(folder):
+        motion = motion_names(root, files)
         for name in files:
-            if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS:
+            if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS or name in motion:
                 continue
             rp = Path(root, name).resolve()
             if not _is_exported_clip(rp, folder):
@@ -732,11 +732,13 @@ def run_trip_export():
     plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
     free = plan["free_bytes"]
     # Hardlinks write no data, so free space is only a question when the exports
-    # root is on another filesystem and the run has to copy.
-    if plan["mode"] == "copy" and free is not None and plan["bytes"] > free:
+    # root is on another filesystem and the run has to copy — or when a HEIF
+    # has to be re-encoded, which writes a new JPEG either way.
+    needed = (plan["bytes"] if plan["mode"] == "copy" else 0) + plan["convert_bytes"]
+    if needed and free is not None and needed > free:
         raise HTTPException(
             409,
-            f"Not enough space: {plan['bytes'] / 1024 ** 3:.2f} GB to copy, "
+            f"Not enough space: {needed / 1024 ** 3:.2f} GB to write, "
             f"{free / 1024 ** 3:.2f} GB free on {anchor}.",
         )
     # No curation lock: this only reads decisions and writes into the exports
@@ -1029,7 +1031,10 @@ def get_gallery():
             if decisions.get(p) == DELETED:
                 continue
             status = _grid_status(decisions.get(p))
-            all_photos.append({"path": p, "cluster_id": cid, "cluster_size": csize, "status": status})
+            photo = {"path": p, "cluster_id": cid, "cluster_size": csize, "status": status}
+            if img.get("motion"):
+                photo["motion"] = img["motion"]
+            all_photos.append(photo)
 
     shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos], known=pipeline_times)
     for ph in all_photos:
@@ -1147,7 +1152,11 @@ def serve_image(request: Request, path: str = Query(...), w: Optional[int] = Non
     headers = {**_CACHE_HEADERS, "ETag": etag}
 
     if w is None:
-        return FileResponse(abs_path, headers=headers, stat_result=st)
+        if abs_path.suffix.lower() not in HEIF_EXTENSIONS:
+            return FileResponse(abs_path, headers=headers, stat_result=st)
+        # Browsers other than Safari cannot show HEIF, so "the original" of
+        # one is its largest render instead.
+        w = COMPARE_THUMB_WIDTH
 
     cache_file = _thumb_cache_file(ctx, abs_path, w, st=st)
     if cache_file.exists():
@@ -1259,6 +1268,30 @@ def _start_poster_prewarm(ctx: ProjectContext, raw_paths: list[str]) -> None:
         _poster_executor.submit(_prewarm_poster, ctx, p, TIMELINE_THUMB_WIDTH)
 
 
+def _start_motion_transcodes(ctx: ProjectContext, raw_paths: list[str]) -> None:
+    """Queue browser-playable transcodes of the Live Photo motion files.
+
+    The review views play one when the pointer rests on the LIVE badge, and
+    most phone motion files are HEVC, which Chrome on Linux will not decode —
+    so without this the badge plays nothing. They are three seconds each, and
+    they wait behind everything else on the low-priority transcode pool.
+    """
+    if is_done(ctx.output_dir) or not raw_paths:
+        return
+    key = f"motion:{ctx.output_dir}"
+    with _prewarm_lock:
+        if key in _prewarm_started:
+            return
+        _prewarm_started.add(key)
+    for raw in raw_paths:
+        src = Path(raw)
+        if not _in_allowed_dirs(src, ctx):
+            continue
+        cached = video_cache_path(ctx.output_dir, src)
+        if not cached.exists():
+            _transcode_executor.submit(_transcode_bg, src, cached)
+
+
 def _resolve_project_path(ctx: ProjectContext, path: str) -> Path:
     p = Path(path)
     if p.is_absolute():
@@ -1357,6 +1390,7 @@ def open_project(req: FolderRequest):
         # let the next gallery / video load top these up
         _prewarm_started.discard(str(out_dir))
         _prewarm_started.discard(f"posters:{out_dir}")
+        _prewarm_started.discard(f"motion:{out_dir}")
     upsert_recent(folder, out_dir)
     status = project_status(folder, out_dir)
     return {

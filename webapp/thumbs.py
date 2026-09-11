@@ -14,6 +14,12 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import media
+
+# Both writers of this cache decode through here, so registering the HEIF
+# opener at import covers the webapp and the pipeline alike.
+media.register_heif()
+
 # Grid tiles are ~380px on screen and there are hundreds of them, so they trade
 # a little quality for bytes; the 2400px renders behind the compare views are
 # where a soft JPEG would actually change which photo you pick.
@@ -51,6 +57,7 @@ def encode(img: Image.Image, w: int) -> bytes:
 
 def render(abs_path: Path, w: int) -> bytes:
     img = Image.open(abs_path)
+    # HEIF has no DCT scaling and ignores this; it decodes whole (~0.2s).
     # Decode straight to a DCT-scaled size (1/2, 1/4, 1/8) instead of unpacking
     # 40 megapixels and throwing most of them away: ~3x faster per thumbnail on
     # this footage, which is most of what a cold project's prewarm costs.

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+from media import IMAGE_EXTENSIONS  # noqa: F401 — re-exported; callers import it from here
 
 _xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 _xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))

@@ -17,20 +17,16 @@ import json
 import re
 from pathlib import Path
 
+from media import VIDEO_EXTENSIONS, is_video  # noqa: F401 — re-exported
+
 VIDEO_TAGS_FILENAME = "video_tags.json"
 SCHEMA_VERSION = 1
-
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".m2ts", ".mts", ".webm"}
 
 # A project that has never been tagged starts with these, so the 1/2/3 keys in
 # the Videos tab mean the same thing on every trip. They are a starting point,
 # not a fixed set: tags can be added, and a project whose video_tags.json exists
 # is taken exactly as written, including one whose list has been emptied.
 DEFAULT_TAGS = ["vibes", "people", "action"]
-
-
-def is_video(path: Path | str) -> bool:
-    return Path(path).suffix.lower() in VIDEO_EXTENSIONS
 
 
 def sanitize_tag(name: str) -> str:

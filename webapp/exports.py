@@ -20,6 +20,15 @@ folder. Videos are the exception: footage is delivered only when it was
 starred, because a trip holds far more of it than an edit ever uses, and
 starring is the only pass that has looked at it.
 
+A HEIC is delivered as a JPEG too, because Resolve on Linux cannot open HEIF.
+Many are JPEGs already under the wrong name — every one of the 183 `.HEIC`
+files in Hoh River's Google Photos export is — and those are linked under a
+`.jpg` name like any other photo. A real HEIF is re-encoded, the one case where
+the export writes new pixels rather than linking the original.
+
+A Live Photo's motion file follows its still's star: delivered beside the other
+starred footage when the still is starred, left behind otherwise.
+
 **Originals only.** Never the derived caches — `thumb_cache` holds resized
 JPEGs and `video_cache` holds a 1440p bitrate-capped transcode built for
 scrubbing, not for editing. This follows the rule clip export already states.
@@ -39,10 +48,14 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image
+
 from clips import EXPORT_DIR_NAME
-from projects import IMAGE_EXTENSIONS
+from media import HEIF_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, motion_names, register_heif
 from utils import DELETED, FAVORITE, TO_DELETE, load_decisions
-from video_tags import VIDEO_EXTENSIONS, is_video, load_video_tags, sanitize_tag
+from video_tags import is_video, load_video_tags, sanitize_tag
+
+register_heif()
 
 # The exports root is a delivery location, not project state, so it lives
 # outside the output dir. Unset, a trip delivers beside its camera folders:
@@ -71,6 +84,46 @@ UNTAGGED_DIR = "untagged"
 # deletion, the other is already gone from the primary drive.
 _EXCLUDED_PHOTO_STATUSES = frozenset({TO_DELETE, DELETED})
 
+# Re-encoded HEIFs are the only deliverables whose size is not the source's.
+# Measured 1.77x over eight iPhone HEICs at quality 95; the free-space check
+# budgets 2.5x so an estimate that runs short cannot fill the drive.
+HEIF_JPEG_QUALITY = 95
+HEIF_TO_JPEG_BUDGET = 2.5
+
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+@dataclass(frozen=True)
+class Deliverable:
+    """One file the export puts in place.
+
+    `name` is the filename it gets, which differs from the source's only for a
+    HEIC. `convert` is set for a real HEIF, which is re-encoded rather than
+    linked. `tag_of` is the path whose tag routes it: its own, except for a
+    Live Photo motion file, which goes where its still's tag sends it.
+    """
+
+    src: Path
+    name: str
+    convert: bool
+    tag_of: str
+
+
+def _is_jpeg(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(3) == _JPEG_MAGIC
+    except OSError:
+        return False
+
+
+def _deliverable(src: Path, tag_of: Path | None = None) -> Deliverable:
+    tag_key = str(tag_of or src)
+    if src.suffix.lower() not in HEIF_EXTENSIONS:
+        return Deliverable(src, src.name, False, tag_key)
+    ext = ".jpg" if src.suffix.islower() else ".JPG"
+    return Deliverable(src, src.stem + ext, not _is_jpeg(src), tag_key)
+
 
 @dataclass
 class ExportReport:
@@ -79,19 +132,23 @@ class ExportReport:
     dest: Path
     linked: list[str] = field(default_factory=list)
     copied: list[str] = field(default_factory=list)
+    converted: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     failed: list[dict] = field(default_factory=list)
     copied_bytes: int = 0
+    converted_bytes: int = 0
 
     def as_dict(self) -> dict:
         return {
             "dest": str(self.dest),
             "linked": len(self.linked),
             "copied": len(self.copied),
-            "delivered": len(self.linked) + len(self.copied),
+            "converted": len(self.converted),
+            "delivered": len(self.linked) + len(self.copied) + len(self.converted),
             "skipped": len(self.skipped),
             "failed": self.failed,
             "copied_bytes": self.copied_bytes,
+            "converted_bytes": self.converted_bytes,
         }
 
 
@@ -136,13 +193,14 @@ def _is_exported_clip(path: Path, folder: Path) -> bool:
     return rel.parts[:1] == (EXPORT_DIR_NAME,)
 
 
-def export_shots(output_dir: Path, folder: Path) -> list[Path]:
+def deliverables(output_dir: Path, folder: Path) -> list[Deliverable]:
     """Everything the trip delivers: every surviving photo, plus starred videos.
 
     Walks the folder rather than the decision record, because an undecided
     photo is still a photo the trip has — only an explicit delete takes one out
     of the deliverable set. Videos go the other way: they are in only when
-    starred, and the decision record is the whole story.
+    starred, and the decision record is the whole story. A Live Photo's motion
+    file is never judged on its own, so it rides on its still's star instead.
 
     Filters on the filename before touching the filesystem, the way the video
     scan does: a trip is thousands of files, and stat'ing all of them to find
@@ -150,23 +208,36 @@ def export_shots(output_dir: Path, folder: Path) -> list[Path]:
     """
     decisions = load_decisions(output_dir)
     folder = folder.resolve()
-    shots: list[Path] = []
+    out: list[Deliverable] = []
     for root, _dirs, files in os.walk(folder):
+        motion = motion_names(root, files)
+        motion_by_stem = {os.path.splitext(n)[0]: n for n in motion}
         for name in files:
             ext = os.path.splitext(name)[1].lower()
             is_photo = ext in IMAGE_EXTENSIONS
             if not is_photo and ext not in VIDEO_EXTENSIONS:
                 continue
+            if name in motion:
+                continue  # delivered with its still, below, or not at all
             path = Path(root, name).resolve()
             if _is_exported_clip(path, folder):
                 continue
             status = decisions.get(str(path))
             if is_photo:
-                if status not in _EXCLUDED_PHOTO_STATUSES:
-                    shots.append(path)
+                if status in _EXCLUDED_PHOTO_STATUSES:
+                    continue
+                out.append(_deliverable(path))
+                partner = motion_by_stem.get(os.path.splitext(name)[0])
+                if status == FAVORITE and partner is not None:
+                    out.append(_deliverable(Path(root, partner).resolve(), tag_of=path))
             elif status == FAVORITE:
-                shots.append(path)
-    return sorted(shots)
+                out.append(_deliverable(path))
+    return sorted(out, key=lambda d: d.src)
+
+
+def export_shots(output_dir: Path, folder: Path) -> list[Path]:
+    """The source files `deliverables` would export."""
+    return [d.src for d in deliverables(output_dir, folder)]
 
 
 def missing_favorites(output_dir: Path) -> list[str]:
@@ -217,11 +288,13 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
     """
     assignments = load_video_tags(output_dir)["videos"]
     dest = export_dir_for(folder, root)
-    shots = export_shots(output_dir, folder)
+    items = deliverables(output_dir, folder)
     total = 0
     delivered = 0
     pending = 0
     pending_bytes = 0
+    convert = 0
+    convert_bytes = 0
     dest_stats: dict[str, dict] = {}
 
     def _dest_row(d: Path, tag_label: str | None) -> dict:
@@ -238,19 +311,19 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
             }
         return dest_stats[key]
 
-    for shot in shots:
-        tag = assignments.get(str(shot))
-        shot_dest = _dest_for_shot(folder, root, shot, tag)
+    for item in items:
+        tag = assignments.get(item.tag_of)
+        shot_dest = _dest_for_shot(folder, root, item.src, tag)
         row = _dest_row(shot_dest, shot_dest.name if shot_dest != dest else None)
         try:
-            size = shot.stat().st_size
+            size = item.src.stat().st_size
         except OSError:
             size = 0
         total += size
         row["files"] += 1
         row["bytes"] += size
         try:
-            already = shot_dest.is_dir() and _destination_for(shot, shot_dest) is None
+            already = shot_dest.is_dir() and _destination_for(item, shot_dest) is None
         except OSError:
             already = False
         if already:
@@ -261,16 +334,23 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
             pending_bytes += size
             row["pending"] += 1
             row["pending_bytes"] += size
+            if item.convert:
+                convert += 1
+                convert_bytes += int(size * HEIF_TO_JPEG_BUDGET)
     destinations = sorted(dest_stats.values(), key=lambda r: (r["tag"] is not None, r["dest"]))
     return {
         "dest": str(dest),
         "mode": "link" if _link_capable(folder, dest) else "copy",
-        "shots": len(shots),
-        "files": len(shots),
+        "shots": len(items),
+        "files": len(items),
         "bytes": total,
         "delivered": delivered,
         "pending": pending,
         "pending_bytes": pending_bytes,
+        # Pending HEIFs that will be re-encoded, and the space budgeted for
+        # them. Written in either mode: a new JPEG is never a hardlink.
+        "convert": convert,
+        "convert_bytes": convert_bytes,
         "missing": missing_favorites(output_dir),
         "free_bytes": _free_bytes(dest),
         "destinations": destinations,
@@ -294,27 +374,65 @@ def _free_bytes(dest: Path) -> int | None:
         return None
 
 
-def _destination_for(src: Path, dest_dir: Path) -> Path | None:
-    """Where `src` should land, or None if an identical copy is already there.
+def _same_delivery(item: Deliverable, src_st: os.stat_result, candidate: Path) -> bool:
+    """Whether `candidate` is this deliverable, put there by an earlier run.
+
+    A link or copy has the source's size. A re-encoded HEIF cannot, so the
+    conversion stamps the source's mtime on its output and that is compared
+    instead — to the second, since a copy onto a coarser filesystem rounds it.
+    """
+    st = candidate.stat()
+    if item.convert:
+        return abs(st.st_mtime - src_st.st_mtime) < 1.0
+    return st.st_size == src_st.st_size
+
+
+def _destination_for(item: Deliverable | Path, dest_dir: Path) -> Path | None:
+    """Where a deliverable should land, or None if it is already there.
 
     Two trips can hold the same camera filename, so a name already in use by a
     *different* file gets a numeric suffix rather than being overwritten. A name
-    in use by a file of the same size is treated as already exported — this is
-    what makes re-running an export cheap and idempotent, and it recognises a
-    hardlink from an earlier run as readily as a copy.
+    in use by the same file is treated as already exported — this is what makes
+    re-running an export cheap and idempotent, and it recognises a hardlink
+    from an earlier run as readily as a copy.
     """
-    size = src.stat().st_size
-    stem, suffix = src.stem, src.suffix
+    if isinstance(item, Path):
+        item = _deliverable(item)
+    src_st = item.src.stat()
+    stem, suffix = os.path.splitext(item.name)
     for i in range(MAX_NAME_ATTEMPTS):
         candidate = dest_dir / (f"{stem}{suffix}" if i == 0 else f"{stem}_{i}{suffix}")
         if not candidate.exists():
             return candidate
         try:
-            if candidate.stat().st_size == size:
+            if _same_delivery(item, src_st, candidate):
                 return None
         except OSError:
             continue
-    raise OSError(f"No free filename for {src.name} after {MAX_NAME_ATTEMPTS} attempts")
+    raise OSError(f"No free filename for {item.name} after {MAX_NAME_ATTEMPTS} attempts")
+
+
+def _convert(src: Path, target: Path) -> None:
+    """Re-encode a HEIF as a JPEG at `target`, keeping its EXIF and colour profile.
+
+    pillow-heif applies the HEIF's rotation while decoding and resets the EXIF
+    orientation to 1, so the pixels are written upright and nothing downstream
+    rotates them twice. Written to a partial name first, like a copy, and
+    stamped with the source's mtime so a re-run recognises it.
+    """
+    partial = target.with_name(target.name + PARTIAL_SUFFIX)
+    try:
+        with Image.open(src) as img:
+            extra = {"exif": img.getexif().tobytes()}
+            if img.info.get("icc_profile"):
+                extra["icc_profile"] = img.info["icc_profile"]
+            img.convert("RGB").save(partial, format="JPEG", quality=HEIF_JPEG_QUALITY, **extra)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    st = src.stat()
+    os.utime(partial, ns=(st.st_atime_ns, st.st_mtime_ns))
+    partial.replace(target)
 
 
 def _place(src: Path, target: Path) -> bool:
@@ -348,21 +466,28 @@ def export_trip(
     dest = export_dir_for(folder, root)
     report = ExportReport(dest=dest)
 
-    for shot in export_shots(output_dir, folder):
-        tag = assignments.get(str(shot))
+    for item in deliverables(output_dir, folder):
+        shot = item.src
+        tag = assignments.get(item.tag_of)
         shot_dest = _dest_for_shot(folder, root, shot, tag)
         try:
             shot_dest.mkdir(parents=True, exist_ok=True)
-            target = _destination_for(shot, shot_dest)
+            target = _destination_for(item, shot_dest)
             if target is None:
-                report.skipped.append(shot.name)
+                report.skipped.append(item.name)
                 continue
-            if _place(shot, target):
+            if item.convert:
+                _convert(shot, target)
+                report.converted.append(target.name)
+                report.converted_bytes += target.stat().st_size
+            elif _place(shot, target):
                 report.linked.append(target.name)
             else:
                 report.copied.append(target.name)
                 report.copied_bytes += target.stat().st_size
-        except OSError as e:
+        except (OSError, ValueError, RuntimeError) as e:
+            # ValueError / RuntimeError: how Pillow and libheif report a HEIF
+            # they cannot decode; OSError covers everything on the disk side.
             report.failed.append({"path": str(shot), "error": str(e)})
 
     for path in missing_favorites(output_dir):

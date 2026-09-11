@@ -12,6 +12,9 @@ interface Preview {
     delivered: number;
     pending: number;
     pending_bytes: number;
+    // HEIFs this run would re-encode as JPEGs, and the space budgeted for them.
+    convert: number;
+    convert_bytes: number;
     dest: string;
     free_bytes: number | null;
   };
@@ -98,9 +101,14 @@ export function FinishTripPanel({
       const free = plan.free_bytes == null ? "" : ` (${formatBytes(plan.free_bytes)} free)`;
       const already =
         plan.delivered > 0 ? ` ${plan.delivered} file(s) are already there and will be skipped.` : "";
-      const cost = linking
-        ? `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} of originals — hardlinked, so no extra space is used`
-        : `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} to copy`;
+      const reencode =
+        plan.convert > 0
+          ? `; ${plan.convert} HEIC re-encoded as JPEG, up to ${formatBytes(plan.convert_bytes)}`
+          : "";
+      const cost = (linking
+        ? `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} of originals — hardlinked` +
+          (plan.convert > 0 ? "" : ", so no extra space is used")
+        : `${plan.pending} file(s), ${formatBytes(plan.pending_bytes)} to copy`) + reencode;
       const ok = window.confirm(
         `Export this trip — ${cost} — ` +
           `to\n\n${plan.dest}${free}\n\n` +
@@ -117,9 +125,11 @@ export function FinishTripPanel({
       const data = await res.json();
       setNotes((n) => ({
         ...n,
-        2: data.linked > 0 && data.copied === 0
+        2: data.linked > 0 && data.copied === 0 && !data.converted
           ? `Exported ${data.linked} file(s) to ${data.dest} — hardlinked, no extra space used.`
-          : `Exported ${data.delivered} file(s) (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied) to ${data.dest}.`,
+          : `Exported ${data.delivered} file(s) (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied` +
+            (data.converted ? `, ${data.converted} re-encoded from HEIC` : "") +
+            `) to ${data.dest}.`,
       }));
       setStep2Done(true);
     } catch (e) {

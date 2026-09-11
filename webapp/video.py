@@ -23,7 +23,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+from media import VIDEO_EXTENSIONS  # noqa: F401 — re-exported for convert_videos.py
 
 
 def _ffmpeg() -> str | None:

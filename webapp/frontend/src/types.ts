@@ -4,6 +4,8 @@ export interface ImageData {
   centrality: number;
   rank: number;
   exif_timestamp?: number;
+  // The Live Photo motion file, when the still has one.
+  motion?: string;
 }
 
 export interface Cluster {
@@ -49,6 +51,7 @@ export interface GalleryPhoto {
   cluster_id: number;
   cluster_size: number;
   status: GridStatus;
+  motion?: string;
 }
 
 export type VideoStatuses = Record<string, GridStatus>;
