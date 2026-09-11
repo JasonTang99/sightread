@@ -191,9 +191,17 @@ Still open:
 ### Step 2 — Export the trip. **Built 2026-08-23 (`66ad867`), reshaped 2026-09-01.**
 
 `webapp/exports.py` + `GET /api/exports/preview` + `POST /api/exports/trip`, with a button
-in `FavoritesView` and step 2 of the finish panel. Delivers to
-`<SIGHTREAD_EXPORTS_ROOT>/<trip folder name>/`, defaulting to `/mnt/h0/Editing/exports`.
-**Videos** land in `<trip>/<tag>/` or `<trip>/untagged/`; photos stay in the trip root.
+in `FavoritesView` and step 2 of the finish panel. **Videos** land in `<trip>/<tag>/` or
+`<trip>/untagged/`; photos stay in the trip root.
+
+**Destination, since 2026-09-11:** `Trips/<trip>/_exports/`. The drives were reorganised
+that day into `/mnt/h0/Trips/[<year>/]<trip>/<device>/` — `xt5`, `canon`, `iphone`,
+`google photos`, … — with a project opened on one device folder and its exports in the
+sibling `_exports/`. `/mnt/h0/Editing/` no longer exists. Clip cuts moved with it, from
+`<project>/clips/` to `<trip>/_exports/clips/`. `SIGHTREAD_EXPORTS_ROOT`, when set, still
+delivers to `<root>/<project folder name>/` as before. The six existing projects were
+migrated to the new paths (state rewritten, output dirs renamed to the new md5, cache
+entries re-keyed — all 91 of Hawaii's transcodes carried over).
 
 What it delivers, settled 2026-09-01:
 

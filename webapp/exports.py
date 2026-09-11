@@ -3,8 +3,12 @@
 Curation decides what is worth keeping; this puts it somewhere an editor will
 look, grouped per trip:
 
-    <EXPORTS_ROOT>/<project folder name>/DSCF4539.JPG
-    <EXPORTS_ROOT>/<project folder name>/<tag or "untagged">/DSCF4601.MOV
+    Trips/<trip>/xt5/                         <- the project folder
+    Trips/<trip>/_exports/DSCF4539.JPG
+    Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
+
+With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
+`<EXPORTS_ROOT>/<project folder name>` instead.
 
 Three rules shape the rest of it.
 
@@ -40,8 +44,13 @@ from utils import DELETED, FAVORITE, TO_DELETE, load_decisions
 from video_tags import VIDEO_EXTENSIONS, is_video, load_video_tags, sanitize_tag
 
 # The exports root is a delivery location, not project state, so it lives
-# outside the output dir and is configurable for anyone whose drives differ.
-EXPORTS_ROOT = Path(os.environ.get("SIGHTREAD_EXPORTS_ROOT", "/mnt/h0/Editing/exports"))
+# outside the output dir. Unset, a trip delivers beside its camera folders:
+# Trips/<trip>/xt5 is the project and Trips/<trip>/_exports gets the exports,
+# which is how the drives are laid out since 2026-09-11. Set it to deliver into
+# a separate tree instead, as <root>/<project folder name>/.
+_env_root = os.environ.get("SIGHTREAD_EXPORTS_ROOT")
+EXPORTS_ROOT: Path | None = Path(_env_root) if _env_root else None
+TRIP_EXPORTS_DIR = "_exports"
 
 # A partial copy that kept the final name would be indistinguishable from a
 # finished one on the next run, since the skip check compares sizes. Copies land
@@ -85,9 +94,20 @@ class ExportReport:
         }
 
 
+def exports_anchor(folder: Path, root: Path | None = None) -> Path:
+    """The directory that must already exist before anything is exported.
+
+    It is the exports root when one is set, else the trip folder that holds the
+    camera folder. Either one missing means an unmounted drive.
+    """
+    root = root or EXPORTS_ROOT
+    return root if root else folder.parent
+
+
 def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = None) -> Path:
-    """Where a deliverable lands: <root>/<trip>, or <root>/<trip>/<tag> for videos."""
-    base = (root or EXPORTS_ROOT) / folder.name
+    """Where a deliverable lands: <trip>/_exports (or <root>/<folder name>), plus /<tag>."""
+    root = root or EXPORTS_ROOT
+    base = root / folder.name if root else folder.parent / TRIP_EXPORTS_DIR
     if tag:
         return base / sanitize_tag(tag)
     return base

@@ -62,7 +62,9 @@ from video import (
 )
 from exports import (
     EXPORTS_ROOT,
+    export_dir_for,
     export_trip,
+    exports_anchor,
     plan_export,
 )
 from clips import (
@@ -715,15 +717,16 @@ def preview_trip_export():
 
 @app.post("/api/exports/trip")
 def run_trip_export():
-    """Deliver every surviving photo and starred video into <EXPORTS_ROOT>/<trip>/."""
+    """Deliver every surviving photo and starred video into <trip>/_exports/."""
     ctx = _require_active()
     # Same reasoning as the mirror guard on apply-deletes: an exports root that
     # is not there means an unmounted drive, and creating the tree would write
     # the trip into the empty mountpoint on the system disk instead.
-    if not EXPORTS_ROOT.is_dir():
+    anchor = exports_anchor(ctx.folder, EXPORTS_ROOT)
+    if not anchor.is_dir():
         raise HTTPException(
             409,
-            f"Exports root unavailable: {EXPORTS_ROOT}. Check SIGHTREAD_EXPORTS_ROOT "
+            f"Exports location unavailable: {anchor}. Check SIGHTREAD_EXPORTS_ROOT "
             f"and that the drive is mounted.",
         )
     plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
@@ -734,7 +737,7 @@ def run_trip_export():
         raise HTTPException(
             409,
             f"Not enough space: {plan['bytes'] / 1024 ** 3:.2f} GB to copy, "
-            f"{free / 1024 ** 3:.2f} GB free on {EXPORTS_ROOT}.",
+            f"{free / 1024 ** 3:.2f} GB free on {anchor}.",
         )
     # No curation lock: this only reads decisions and writes into the exports
     # tree, so it cannot race with a confirm the way apply-deletes can.
@@ -895,7 +898,9 @@ def export_clips_endpoint(req: ClipsExportRequest):
         clips = _load_highlights_for(ctx.output_dir, [key]).get(key, {}).get("clips", [])
     if not clips:
         raise HTTPException(400, "No clips to export for this video")
-    out_dir = ctx.folder / EXPORT_DIR_NAME
+    # Cuts are exports too, so they sit with the trip's other deliverables
+    # rather than among the camera originals.
+    out_dir = export_dir_for(ctx.folder, EXPORTS_ROOT) / EXPORT_DIR_NAME
     try:
         files = export_clips(abs_path, clips, out_dir, mode=req.mode)
     except ClipExportError as exc:

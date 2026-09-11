@@ -146,6 +146,25 @@ def test_export_dir_is_named_for_the_trip(project):
     assert export_dir_for(folder, root) == root / "2026_01_Japan"
 
 
+def test_without_a_root_a_trip_exports_beside_its_camera_folder(tmp_path, monkeypatch):
+    """Trips/<trip>/xt5 is the project; Trips/<trip>/_exports gets the delivery."""
+    monkeypatch.setattr(exports, "EXPORTS_ROOT", None)
+    trip = tmp_path / "Trips" / "2026_09_Hoh_River_Trail"
+    folder = trip / "xt5"
+    folder.mkdir(parents=True)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    _shot(folder, "DSCF1")
+
+    report = export_trip(output_dir, folder)
+
+    assert export_dir_for(folder) == trip / "_exports"
+    assert export_dir_for(folder, tag="vibes") == trip / "_exports" / "vibes"
+    assert report.dest == trip / "_exports"
+    assert _names(trip / "_exports") == ["DSCF1.JPG"]
+    assert exports.exports_anchor(folder) == trip
+
+
 def test_derived_caches_are_never_exported(project):
     """Only originals: a thumb_cache copy of the same name must not be picked up."""
     folder, output_dir, root = project
@@ -393,7 +412,7 @@ def test_endpoint_refuses_when_exports_root_is_missing(api, monkeypatch, tmp_pat
     res = client.post("/api/exports/trip")
 
     assert res.status_code == 409
-    assert "Exports root unavailable" in res.json()["detail"]
+    assert "Exports location unavailable" in res.json()["detail"]
     assert not (tmp_path / "not-mounted").exists()
 
 
