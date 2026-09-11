@@ -54,11 +54,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# webapp modules import each other by bare name (`from media import ...`).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "webapp"))
 
 from webapp import projects as P  # noqa: E402
-
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+from media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS  # noqa: E402
 
 # What the UI and the pipeline actually request: TrashPanel 200, FavoritesView
 # 400, TimelineView + pipeline prewarm 800, ClusterView/SingletonsView + pipeline

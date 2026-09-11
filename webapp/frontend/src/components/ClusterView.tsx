@@ -3,6 +3,7 @@ import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { isDecided, isDoomed, isWiped } from "../decisions";
 import { TagBar } from "./TagBar";
+import { LiveMotion } from "./LiveMotion";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 type ClusterFilter = "all" | "wiped";
@@ -477,6 +478,9 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
                   loading="lazy"
                   decoding="async"
                 />
+                {img.motion && (
+                  <LiveMotion motion={img.motion} fit="contain" corner="bottom-1.5 right-1.5" />
+                )}
               </div>
               <button
                 onClick={() => { setFocusedImg(i); toggle(img.path); }}

@@ -13,6 +13,7 @@ Without --output-dir, results go to the per-project data directory
 import argparse
 import gc
 import json
+import os
 import sys
 import warnings
 from datetime import datetime
@@ -23,10 +24,13 @@ import torch
 from PIL import Image, ExifTags
 from tqdm import tqdm
 
-# thumbs.py is the one webapp module scripts may import: it pulls in nothing
-# beyond PIL and the stdlib, and duplicating the thumbnail cache key instead is
-# how the pipeline's output silently stops being a cache hit.
+# thumbs.py and media.py are the webapp modules scripts may import: they pull
+# in nothing beyond PIL, pillow-heif and the stdlib. Duplicating the thumbnail
+# cache key instead is how the pipeline's output silently stops being a cache
+# hit, and duplicating the extension sets is how a format gets scanned here and
+# forgotten by the export. Importing thumbs also registers the HEIF opener.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+import media  # noqa: E402
 import thumbs  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -60,10 +64,8 @@ SCORE_WEIGHTS = {
 EXPOSURE_PENALTY_WEIGHT = 0.15
 FACE_BONUS_WEIGHT = 0.10
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-# Keep in sync with webapp/server.py VIDEO_EXTENSIONS (which scripts do not import).
-# No ".ts": MPEG-TS shares the extension with TypeScript sources.
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+IMAGE_EXTENSIONS = media.IMAGE_EXTENSIONS
+VIDEO_EXTENSIONS = media.VIDEO_EXTENSIONS
 # FAISS k-NN connectivity replaces O(n²) sklearn distance matrix above this size
 _FAISS_N_THRESHOLD = 5_000
 _FAISS_K_NEIGHBORS = 50     # neighbors per point for connectivity graph
@@ -854,6 +856,7 @@ def rank_and_save(
     output_dir: Path,
     timestamps: list[float | None] | None = None,
     components: dict | None = None,
+    motions: dict[str, str] | None = None,
 ) -> dict:
     results_clusters = []
     for cid in sorted(clusters.keys()):
@@ -878,6 +881,10 @@ def rank_and_save(
             }
             if timestamps is not None and timestamps[idx] is not None:
                 entry["exif_timestamp"] = timestamps[idx]
+            # The Live Photo motion file, so the review views can badge the
+            # still and play it. Absent for every photo without one.
+            if motions and paths[idx] in motions:
+                entry["motion"] = motions[paths[idx]]
             if components is not None:
                 entry["score_components"] = {
                     k: round(float(v[idx]), 4)
@@ -927,19 +934,25 @@ def _scan_video_paths(image_dir: str) -> list[str]:
         raise FileNotFoundError(f"Image directory not found: {root}")
     root_resolved = root.resolve()
     paths = []
-    for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTENSIONS:
-            continue
-        rp = p.resolve()
-        # Skip <root>/clips/ — user-exported cuts (webapp /api/clips/export),
-        # not source footage. Only the top-level clips dir; a nested sub/clips/
-        # is treated as real footage.
-        try:
-            if rp.relative_to(root_resolved).parts[:1] == ("clips",):
+    for dirpath, _dirs, names in os.walk(root):
+        # A Live Photo's motion file belongs to its still, not to video review.
+        motion = media.motion_names(dirpath, names)
+        for name in names:
+            if not media.is_video(name) or name in motion:
                 continue
-        except ValueError:
-            pass
-        paths.append(str(rp))
+            p = Path(dirpath, name)
+            if not p.is_file():
+                continue
+            rp = p.resolve()
+            # Skip <root>/clips/ — user-exported cuts (webapp /api/clips/export),
+            # not source footage. Only the top-level clips dir; a nested sub/clips/
+            # is treated as real footage.
+            try:
+                if rp.relative_to(root_resolved).parts[:1] == ("clips",):
+                    continue
+            except ValueError:
+                pass
+            paths.append(str(rp))
     return sorted(paths)
 
 
@@ -1115,7 +1128,13 @@ def run_pipeline(
     )
 
     scores, components = score_images(paths, cache_path=score_cache, thumb_dir=out)
-    results = rank_and_save(paths, clusters, scores, embeddings, out, timestamps=timestamps, components=components)
+    motions = media.motion_map(paths)
+    if motions:
+        print(f"Paired {len(motions)} Live Photo motion file(s) with their stills")
+    results = rank_and_save(
+        paths, clusters, scores, embeddings, out,
+        timestamps=timestamps, components=components, motions=motions,
+    )
 
     if video_highlights:
         compute_video_highlights(image_dir, out, force=force_video_highlights)

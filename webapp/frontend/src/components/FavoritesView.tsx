@@ -61,10 +61,15 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         return;
       }
       const free = plan.free_bytes == null ? "" : ` (${formatBytes(plan.free_bytes)} free)`;
+      const reencode =
+        plan.convert > 0
+          ? `; ${plan.convert} HEIC re-encoded as JPEG, up to ${formatBytes(plan.convert_bytes)}`
+          : "";
       const cost =
-        plan.mode === "link"
-          ? `${plan.files} file(s), ${formatBytes(plan.bytes)} — hardlinked, so no extra space is used`
-          : `${plan.files} file(s), ${formatBytes(plan.bytes)} to copy`;
+        (plan.mode === "link"
+          ? `${plan.files} file(s), ${formatBytes(plan.bytes)} — hardlinked` +
+            (plan.convert > 0 ? "" : ", so no extra space is used")
+          : `${plan.files} file(s), ${formatBytes(plan.bytes)} to copy`) + reencode;
       const ok = window.confirm(
         `Export this trip — ${cost} — ` +
           `to\n\n${plan.dest}${free}\n\n` +
@@ -80,8 +85,11 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         throw new Error(detail?.detail ?? `Export failed: ${res.status}`);
       }
       const data = await res.json();
+      const reencoded = data.converted ? `, ${data.converted} re-encoded from HEIC` : "";
       const written =
-        data.copied > 0 ? ` (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied)` : " (hardlinked)";
+        data.copied > 0 || data.converted
+          ? ` (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied${reencoded})`
+          : " (hardlinked)";
       const parts = [`Exported ${data.delivered} file(s)${written} to ${data.dest}`];
       if (data.skipped) parts.push(`${data.skipped} already there`);
       if (data.failed?.length) parts.push(`${data.failed.length} failed`);

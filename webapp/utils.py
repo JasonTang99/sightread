@@ -25,6 +25,8 @@ import shutil
 import threading
 from pathlib import Path
 
+from media import motion_of
+
 log = logging.getLogger(__name__)
 
 SINGLETON_DELETE_THRESHOLD = 0.4
@@ -290,13 +292,15 @@ def favorites(output_dir) -> list[str]:
 # One shot on disk is several files: the JPEG the pipeline ranked, the camera's
 # raw beside it, and an `.xmp` per file once anything has touched them in a raw
 # editor. Only the JPEG is ever in the decision queue, so deleting a shot means
-# finding the rest by name.
+# finding the rest by name. An iPhone shot has its own set: the Live Photo's
+# motion file, and an `.AAE` holding the edits the Photos app made to it.
 RAW_EXTENSIONS = {
     ".raf", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2",
     ".dng", ".orf", ".rw2", ".raw", ".pef", ".srw", ".3fr", ".erf",
     ".mef", ".mos", ".iiq", ".x3f",
 }
 SIDECAR_SUFFIX = ".xmp"
+APPLE_EDIT_SUFFIX = ".aae"
 
 
 def sidecars_of(src: Path) -> list[Path]:
@@ -306,6 +310,10 @@ def sidecars_of(src: Path) -> list[Path]:
     folder holds thousands of entries and this runs per queued shot. Both
     sidecar spellings are covered — `DSCF1234.JPG.xmp` (appended, what most
     editors write) and `DSCF1234.xmp` (replaced).
+
+    A still's Live Photo motion file is included — `media.motion_of` decides
+    that, and only claims a video short enough to be one. A video's companions
+    never include a still: deleting footage must not take a photo with it.
     """
     out: list[Path] = []
     seen = {src}
@@ -323,4 +331,9 @@ def sidecars_of(src: Path) -> list[Path]:
                 continue
             add(raw)
             add(raw.with_name(raw.name + SIDECAR_SUFFIX))
+    for aae in (src.with_suffix(APPLE_EDIT_SUFFIX.upper()), src.with_suffix(APPLE_EDIT_SUFFIX)):
+        add(aae)
+    motion = motion_of(src)
+    if motion is not None:
+        add(motion)
     return out

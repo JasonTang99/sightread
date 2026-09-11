@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
+import { LiveMotion } from "./LiveMotion";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 interface Props {
@@ -19,6 +20,7 @@ interface FlatImage {
   cluster_id: number;
   path: string;
   score: number;
+  motion?: string;
 }
 
 export function SingletonsView({
@@ -233,6 +235,9 @@ export function SingletonsView({
           alt=""
           className="max-w-full max-h-full object-contain"
         />
+        {current.motion && (
+          <LiveMotion key={current.path} motion={current.motion} fit="contain" corner="top-2 left-2" />
+        )}
       </div>
     </div>
   );

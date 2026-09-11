@@ -1,3 +1,4 @@
 fastapi
 uvicorn[standard]
 pillow
+pillow-heif==1.7.0
