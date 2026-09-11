@@ -1,16 +1,17 @@
-"""Named tags for favourited videos — persistence + export routing.
+"""Named tags for export routing — persistence for photos and videos.
 
 Persistence lives in <output_dir>/video_tags.json:
 
     {
       "schema_version": 1,
       "tags": ["b-roll", "timelapse"],
-      "videos": {"/abs/path.MOV": "b-roll"}
+      "videos": {"/abs/path.MOV": "b-roll", "/abs/path.JPG": "vibes"}
     }
 
-Tags are project-scoped. Only videos use them at export time: photos always land
-in the trip root; a video goes to <trip>/<tag>/, or <trip>/untagged/ when it has
-no tag.
+The `videos` key is historical: assignments are path-keyed and cover stills
+too. Tags are project-scoped. A tagged shot lands in <trip>/<tag>/. Untagged
+videos go to <trip>/untagged/; untagged photos stay in the trip root so the
+bulk of a stills export is not shuffled into a holding folder.
 """
 import json
 import re
