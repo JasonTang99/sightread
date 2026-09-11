@@ -130,12 +130,23 @@ def test_get_video_tags(api):
     assert data["assignments"][str(mov)] == "b-roll"
 
 
-def test_put_video_tags_validates_video_path(api):
+def test_put_video_tags_accepts_a_photo(api):
     client, folder, output_dir, _ = api
     jpg = folder / "photo.JPG"
     jpg.write_bytes(b"j")
 
     res = client.put("/api/video-tags", json={"assign": {str(jpg): "b-roll"}})
+
+    assert res.status_code == 200
+    assert res.json()["assignments"][str(jpg)] == "b-roll"
+
+
+def test_put_video_tags_rejects_non_media(api):
+    client, folder, output_dir, _ = api
+    txt = folder / "notes.txt"
+    txt.write_bytes(b"x")
+
+    res = client.put("/api/video-tags", json={"assign": {str(txt): "b-roll"}})
 
     assert res.status_code == 400
 
@@ -180,6 +191,23 @@ def test_an_emptied_tag_list_is_not_reseeded(project):
     _, output_dir, _ = project
     update_video_tags(output_dir, tags=[])
     assert load_video_tags(output_dir)["tags"] == []
+
+
+def test_tagged_photo_exports_to_tag_subfolder(project):
+    """A tag on a still is an export folder, same as on a clip."""
+    folder, output_dir, root = project
+    tagged = folder / "tagged.JPG"
+    tagged.write_bytes(b"j-tag")
+    plain = folder / "plain.JPG"
+    plain.write_bytes(b"j-plain")
+    save_decisions(output_dir, {str(tagged): FAVORITE})
+    update_video_tags(output_dir, tags=["vibes"], assign={str(tagged): "vibes"})
+
+    export_trip(output_dir, folder, root)
+
+    assert (root / "2026_01_Japan" / "vibes" / "tagged.JPG").is_file()
+    assert (root / "2026_01_Japan" / "plain.JPG").is_file()
+    assert not (root / "2026_01_Japan" / "tagged.JPG").exists()
 
 
 def test_untagged_video_exports_to_its_own_folder(project):

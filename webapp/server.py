@@ -794,10 +794,11 @@ def put_video_tags(req: VideoTagsUpdate):
     if req.assign:
         for path, tag in req.assign.items():
             abs_path = _resolve_project_path(ctx, path)
-            if not _is_under(abs_path, ctx.folder.resolve()):
+            if not _in_allowed_dirs(abs_path, ctx):
                 raise HTTPException(400, f"Path outside project: {path}")
-            if abs_path.suffix.lower() not in VIDEO_EXTENSIONS:
-                raise HTTPException(400, f"Not a video file: {path}")
+            ext = abs_path.suffix.lower()
+            if ext not in VIDEO_EXTENSIONS and ext not in IMAGE_EXTENSIONS:
+                raise HTTPException(400, f"Not a media file: {path}")
             if tag is not None and tag != "":
                 try:
                     sanitize_tag(tag)

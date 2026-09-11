@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useMediaTags } from "../hooks/useMediaTags";
+import { TagBar } from "./TagBar";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
@@ -196,6 +198,9 @@ interface Props {
   onError: (msg: string) => void;
   onConfirmed: () => Promise<void>;
   // Header session-progress reads App videoStatuses, which persist() does not
+  // refetch (a refetch would drop delete-marked clips from this tab). Tell
+  // App the path so the counter can bump without changing the working set.
+  onPersisted: (path: string) => void;
   favorites?: string[];
   onToggleFavorite?: (path: string) => Promise<void>;
   highlights?: VideoHighlightsMap;
@@ -209,6 +214,7 @@ export function VideoView({
   statuses = {},
   onError,
   onConfirmed,
+  onPersisted,
   favorites = [],
   onToggleFavorite,
   highlights = {},
@@ -250,88 +256,19 @@ export function VideoView({
   const [selected, setSelected] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
-  const [tagBusy, setTagBusy] = useState(false);
-  // Set only once the server has confirmed the write, so the flash means "saved",
-  // not "clicked". Cleared on a timer and whenever the clip changes.
-  const [tagFlash, setTagFlash] = useState<string | null>(null);
-
-  const applyVideoTags = useCallback(
-    async (body: { tags?: string[]; assign?: Record<string, string | null> }) => {
-      setTagBusy(true);
-      try {
-        const res = await fetch("/api/video-tags", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const detail = await res.json().catch(() => null);
-          throw new Error(detail?.detail ?? `Tag update failed: ${res.status}`);
-        }
-        const data = await res.json();
-        onVideoTagsChange?.({ tags: data.tags ?? [], assignments: data.assignments ?? {} });
-        return true;
-      } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
-        return false;
-      } finally {
-        setTagBusy(false);
-      }
-    },
-    [onError, onVideoTagsChange],
-  );
-
-  // Tagging a clip means "deliver this into .../<tag>/", and exports.py only
-  // delivers favourites — so a tag on an unstarred clip would route nothing.
-  // Rather than refuse it (which is what made tagging look broken: the keys
-  // silently did nothing), take the tag as the stronger statement and star the
-  // clip too. Clearing a tag never stars, since that says nothing about wanting
-  // the clip at all.
-  const assignTag = useCallback(
-    async (path: string, tag: string | null) => {
-      if (tag !== null && !favorites.includes(path) && onToggleFavorite) {
-        try {
-          await onToggleFavorite(path);
-        } catch (e) {
-          onError(e instanceof Error ? e.message : String(e));
-          return;
-        }
-      }
-      const ok = await applyVideoTags({ assign: { [path]: tag } });
-      if (ok) setTagFlash(tag ?? UNTAGGED_LABEL);
-    },
-    [applyVideoTags, favorites, onToggleFavorite, onError],
+  const { assignTag, addTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
+    videoTags,
+    onVideoTagsChange,
+    favorites,
+    onToggleFavorite,
+    onError,
+    UNTAGGED_LABEL,
   );
 
   // A flash left over from the previous clip would read as this one's tag.
   useEffect(() => {
-    setTagFlash(null);
-  }, [idx]);
-
-  useEffect(() => {
-    if (tagFlash === null) return;
-    const t = setTimeout(() => setTagFlash(null), 1600);
-    return () => clearTimeout(t);
-  }, [tagFlash]);
-
-  const addTag = useCallback(async () => {
-    const name = window.prompt("Tag name (export subfolder):");
-    if (!name?.trim()) return;
-    const next = [...videoTags.tags];
-    if (!next.includes(name.trim())) next.push(name.trim());
-    await applyVideoTags({ tags: next });
-  }, [applyVideoTags, videoTags.tags]);
-
-  const nextTag = useCallback(
-    (cur: string | null): string | null => {
-      const { tags } = videoTags;
-      if (tags.length === 0) return null;
-      if (!cur) return tags[0];
-      const i = tags.indexOf(cur);
-      return i < 0 || i >= tags.length - 1 ? null : tags[i + 1];
-    },
-    [videoTags],
-  );
+    clearFlash();
+  }, [idx]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const current: string | undefined = videos[Math.min(idx, videos.length - 1)];
   const suggested = (current && highlights[current]?.clips) || [];
@@ -614,7 +551,7 @@ export function VideoView({
     ) return;
     if (e.key === "Enter") {
       e.preventDefault();
-      if (current) persist(current, keeps[current] ?? true);
+      if (current) persist(current, favorites.includes(current) || (keeps[current] ?? true));
       setIdx((i) => Math.min(videos.length - 1, i + 1));
       return;
     }
@@ -625,7 +562,10 @@ export function VideoView({
       // first made these keys a silent no-op, which reads as a broken feature.
       if (!current || tagBusy) return;
       const tag = videoTags.tags[parseInt(e.key, 10) - 1];
-      if (tag) assignTag(current, tag);
+      if (tag) {
+        setKeeps((prev) => ({ ...prev, [current]: true }));
+        assignTag(current, tag);
+      }
       return;
     }
     switch (e.key) {
@@ -642,7 +582,7 @@ export function VideoView({
       case " ": {
         e.preventDefault();
         const v = videos[idx];
-        if (v) {
+        if (v && !favorites.includes(v)) {
           const next = !(keeps[v] ?? true);
           setKeeps((prev) => ({ ...prev, [v]: next }));
           persist(v, next);
@@ -651,12 +591,16 @@ export function VideoView({
       }
       case "s": {
         e.preventDefault();
-        if (onToggleFavorite && current) onToggleFavorite(current).catch((err) => onError(String(err)));
+        if (onToggleFavorite && current) {
+          if (!favorites.includes(current)) setKeeps((prev) => ({ ...prev, [current]: true }));
+          onToggleFavorite(current).catch((err) => onError(String(err)));
+        }
         break;
       }
       case "t": {
         e.preventDefault();
         if (!current || tagBusy) break;
+        setKeeps((prev) => ({ ...prev, [current]: true }));
         assignTag(current, nextTag(videoTags.assignments[current] ?? null));
         break;
       }
@@ -743,6 +687,7 @@ export function VideoView({
       .then((res) => {
         if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
         setJustDecided((prev) => new Set(prev).add(path));
+        onPersisted(path);
       })
       .catch((e) => onError(e instanceof Error ? e.message : String(e)));
   };
@@ -750,7 +695,7 @@ export function VideoView({
   const confirm = async () => {
     setSubmitting(true);
     try {
-      const deletePaths = videos.filter((v) => !keeps[v]);
+      const deletePaths = videos.filter((v) => !favorites.includes(v) && !(keeps[v] ?? true));
       const res = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -772,11 +717,11 @@ export function VideoView({
     return <p className="text-sm text-gray-500 p-4">No videos found in this folder.</p>;
   }
 
-  const isKept = keeps[current] ?? true;
   const isFavorited = favorites.includes(current);
+  const isKept = isFavorited || (keeps[current] ?? true);
   const currentTag = videoTags.assignments[current] ?? null;
   const name = current.split("/").pop() ?? current;
-  const nDelete = videos.filter((v) => !keeps[v]).length;
+  const nDelete = videos.filter((v) => !favorites.includes(v) && !(keeps[v] ?? true)).length;
 
   return (
     <div className="-mx-2 -mt-2 flex flex-col" style={{ height: "calc(100vh - 2.25rem)" }}>
@@ -793,81 +738,27 @@ export function VideoView({
           </span>
         )}
         <button
-          onClick={() => onToggleFavorite?.(current).catch((e) => onError(String(e)))}
+          onClick={() => {
+            if (!isFavorited) setKeeps((prev) => ({ ...prev, [current]: true }));
+            onToggleFavorite?.(current).catch((e) => onError(String(e)));
+          }}
           className={`text-base leading-none shrink-0 transition-colors ${isFavorited ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400"}`}
-          title="Toggle favorite (s)"
+          title="Toggle favorite (s) — stars keep"
         >★</button>
-        {/* What this clip is tagged, stated rather than implied by which pill is
-            lit. The pills scroll horizontally once there are a few tags, so the
-            selected one can be off-screen; this badge never is. */}
-        {isFavorited && (
-          <span
-            className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 transition-colors ${
-              tagFlash !== null
-                ? "bg-violet-600 text-white"
-                : currentTag
-                  ? "bg-violet-100 text-violet-800"
-                  : "bg-gray-100 text-gray-500"
-            }`}
-            title={`Exports to …/${currentTag ?? UNTAGGED_LABEL}/`}
-          >
-            {tagFlash !== null ? `✓ ${tagFlash}` : `🏷 ${currentTag ?? UNTAGGED_LABEL}`}
-          </span>
-        )}
-        {/* Always on screen, starred or not. Hiding the row until a clip was
-            favourited hid the whole feature: there was nothing to discover and
-            the 1-9 keys did nothing. Clicking a tag stars the clip (assignTag),
-            so the row is an entry point rather than a reward for finding the
-            star first. Only the "no tag" button is favourites-only -- there is
-            nothing to clear on a clip that was never tagged. */}
-        <div className="flex items-center gap-1 shrink-0 max-w-md overflow-x-auto">
-          {isFavorited && (
-            <button
-              type="button"
-              disabled={tagBusy}
-              onClick={() => assignTag(current, null)}
-              className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                !currentTag
-                  ? "bg-violet-600 border-violet-600 text-white font-semibold"
-                  : "border-gray-200 text-gray-500 hover:bg-gray-50"
-              }`}
-              title="No tag → …/untagged/"
-            >{!currentTag && <span className="mr-0.5">✓</span>}—</button>
-          )}
-          {videoTags.tags.map((tag, i) => {
-            // An unstarred clip has no tag, so nothing in the row is selected.
-            const isCurrent = isFavorited && currentTag === tag;
-            const dest = i < 9 ? `Tag ${i + 1} (${i + 1}) → …/${tag}/` : `Export to …/${tag}/`;
-            return (
-              <button
-                key={tag}
-                type="button"
-                disabled={tagBusy}
-                onClick={() => assignTag(current, tag)}
-                className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${
-                  isCurrent
-                    ? "bg-violet-600 border-violet-600 text-white font-semibold"
-                    : isFavorited
-                      ? "border-gray-200 text-gray-600 hover:bg-gray-50"
-                      : "border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600"
-                }`}
-                title={isFavorited ? dest : `${dest} — also stars the clip`}
-              >
-                {isCurrent
-                  ? <span className="mr-0.5">✓</span>
-                  : i < 9 && <span className="font-bold mr-0.5">{i + 1}</span>}
-                {tag}
-              </button>
-            );
-          })}
-          <button
-            type="button"
-            disabled={tagBusy}
-            onClick={() => addTag()}
-            className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
-            title="Add tag"
-          >+</button>
-        </div>
+        <TagBar
+          tags={videoTags.tags}
+          currentTag={currentTag}
+          isFavorited={isFavorited}
+          busy={tagBusy}
+          flash={tagFlash}
+          untaggedLabel={UNTAGGED_LABEL}
+          untaggedTitle="No tag → …/untagged/"
+          onAssign={(tag) => {
+            if (tag !== null) setKeeps((prev) => ({ ...prev, [current]: true }));
+            assignTag(current, tag);
+          }}
+          onAdd={addTag}
+        />
         <span className="text-xs text-gray-300 truncate">
           j/k · ←/→ ±10s · space toggle · l pause · s star · 1–9 tag · t cycle tag · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
         </span>

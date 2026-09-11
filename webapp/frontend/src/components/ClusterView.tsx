@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useMediaTags } from "../hooks/useMediaTags";
 import { isDecided, isDoomed, isWiped } from "../decisions";
-import type { Cluster, PhotoDecisions } from "../types";
+import { TagBar } from "./TagBar";
+import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 type ClusterFilter = "all" | "wiped";
 
@@ -13,13 +15,15 @@ interface Props {
   onError: (msg: string) => void;
   onUndo: () => Promise<void>;
   onToggleFavorite: (path: string) => Promise<void>;
+  videoTags?: VideoTagsState;
+  onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
 
 function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite }: Props) {
+export function ClusterView({ clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
     const first = allClusters.findIndex((c) => !isDecided(c, decisions));
@@ -87,7 +91,33 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
     if (idx >= clusters.length) setIdx(Math.max(0, clusters.length - 1));
   }, [clusters.length]);
 
-  const toggle = (path: string) => setKeeps((prev) => ({ ...prev, [path]: !prev[path] }));
+  const isKeptOf = (path: string, rank: number) =>
+    favSet.has(path) || (keeps[path] ?? rank === 1);
+
+  const toggle = (path: string) => {
+    if (favSet.has(path)) return;
+    setKeeps((prev) => ({ ...prev, [path]: !prev[path] }));
+  };
+
+  const star = (path: string) => {
+    if (!favSet.has(path)) setKeeps((prev) => ({ ...prev, [path]: true }));
+    onToggleFavorite(path).catch((err) =>
+      onError(err instanceof Error ? err.message : String(err))
+    );
+  };
+
+  const { assignTag, addTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
+    videoTags,
+    onVideoTagsChange,
+    favorites,
+    onToggleFavorite,
+    onError,
+    "no tag",
+  );
+
+  useEffect(() => {
+    clearFlash();
+  }, [cluster?.cluster_id, focusedImg]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const keepBest = () => {
     const next: Record<string, boolean> = {};
@@ -135,7 +165,7 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
     setSubmitting(true);
     try {
       const deletePaths = cluster.images
-        .filter((img) => !(keeps[img.path] ?? img.rank === 1))
+        .filter((img) => !isKeptOf(img.path, img.rank))
         .map((img) => img.path);
       const res = await fetch("/api/confirm", {
         method: "POST",
@@ -186,12 +216,16 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
         break;
       case "s":
         e.preventDefault();
-        if (cluster.images[focusedImg]) {
-          onToggleFavorite(cluster.images[focusedImg].path).catch((err) =>
-            onError(err instanceof Error ? err.message : String(err))
-          );
-        }
+        if (cluster.images[focusedImg]) star(cluster.images[focusedImg].path);
         break;
+      case "t": {
+        e.preventDefault();
+        const img = cluster.images[focusedImg];
+        if (!img || tagBusy) break;
+        setKeeps((prev) => ({ ...prev, [img.path]: true }));
+        assignTag(img.path, nextTag(videoTags.assignments[img.path] ?? null));
+        break;
+      }
       case "h":
         e.preventDefault();
         focusImage(Math.max(0, focusedImg - 1));
@@ -263,8 +297,10 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
   }
 
   const bestScore = Math.max(...cluster.images.map((img) => img.score));
-  const nKeep = cluster.images.filter((img) => keeps[img.path] ?? img.rank === 1).length;
+  const nKeep = cluster.images.filter((img) => isKeptOf(img.path, img.rank)).length;
   const nDelete = cluster.images.length - nKeep;
+  const focused = cluster.images[Math.min(focusedImg, cluster.images.length - 1)];
+  const focusedTag = focused ? videoTags.assignments[focused.path] ?? null : null;
 
   return (
     <div className="space-y-2">
@@ -309,7 +345,25 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
           {undecidedCount} of {allClusters.length} left
         </span>
 
-        <span className="text-xs text-gray-300">hjkl · space · 1–9 · K best · enter · ←/→ clusters · n next unreviewed · b skip · s star · u undo · ? help</span>
+        <span className="text-xs text-gray-300">hjkl · space · 1–9 rank · K best · enter · ←/→ clusters · n next unreviewed · b skip · s star · t tag · u undo · ? help</span>
+        {focused && (
+          <TagBar
+            tags={videoTags.tags}
+            currentTag={focusedTag}
+            isFavorited={favSet.has(focused.path)}
+            busy={tagBusy}
+            flash={tagFlash}
+            showSlotKeys={false}
+            untaggedLabel="no tag"
+            untaggedTitle="No tag → trip root"
+            emptyBadgeTitle="Exports to trip root"
+            onAssign={(tag) => {
+              if (tag !== null) setKeeps((prev) => ({ ...prev, [focused.path]: true }));
+              assignTag(focused.path, tag);
+            }}
+            onAdd={addTag}
+          />
+        )}
 
         <div className="ml-auto flex items-center gap-2">
           <div className="flex items-center gap-1">
@@ -387,7 +441,7 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
         style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
       >
         {cluster.images.map((img, i) => {
-          const isKept = keeps[img.path] ?? img.rank === 1;
+          const isKept = isKeptOf(img.path, img.rank);
           const delta = img.score - bestScore;
           const focused = i === focusedImg;
           const isFav = favSet.has(img.path);

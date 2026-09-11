@@ -25,6 +25,11 @@ export default function App() {
   const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
   const [videoTags, setVideoTags] = useState<VideoTagsState>({ tags: [], assignments: {} });
   const [videosLoaded, setVideosLoaded] = useState(false);
+  // persist() writes a video decision without refetching /api/videos, because
+  // a refetch would drop delete-marked clips from the Videos tab and break
+  // space-toggle. The header still has to count those, so this set covers the
+  // gap until the next successful refetch (timeline, undo, bulk confirm).
+  const [justDecidedVideos, setJustDecidedVideos] = useState<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     try {
@@ -52,6 +57,7 @@ export default function App() {
       setVideoHighlights(d.highlights ?? {});
       setVideoUserClips(d.user_clips ?? {});
       setVideoTags(d.video_tags ?? { tags: [], assignments: {} });
+      setJustDecidedVideos(new Set());
     } catch {
       /* video list is non-critical */
     } finally {
@@ -131,8 +137,16 @@ export default function App() {
       body: JSON.stringify({ path }),
     });
     if (!res.ok) throw new Error(`Favorite failed: ${res.status}`);
+    const data = await res.json();
     await reload();
-  }, [reload]);
+    // A star is a keep. Photos pick that up from reload(); videos need the
+    // status map patched because persist() is what usually writes it, and a
+    // refetch would drop delete-marked neighbours from the Videos tab.
+    if (data.favorited && videos.includes(path)) {
+      setJustDecidedVideos((prev) => new Set(prev).add(path));
+      setVideoStatuses((prev) => ({ ...prev, [path]: "keep" }));
+    }
+  }, [reload, videos]);
 
   const handleUndo = async () => {
     setUndoing(true);
@@ -151,6 +165,7 @@ export default function App() {
   const handleChangeProject = async () => {
     setState(null);
     setVideos([]);
+    setJustDecidedVideos(new Set());
     setLoading(false);
   };
 
@@ -187,7 +202,11 @@ export default function App() {
   const reviewedUnits =
     clusterList.filter((c) => isDecided(c, decisions)).length +
     singleList.filter((c) => isDecided(c, decisions)).length +
-    videos.filter((v) => videoStatuses[v] && videoStatuses[v] !== "undecided").length;
+    videos.filter(
+      (v) =>
+        justDecidedVideos.has(v) ||
+        (videoStatuses[v] && videoStatuses[v] !== "undecided"),
+    ).length;
 
   return (
     <div>
@@ -333,6 +352,9 @@ export default function App() {
             favorites={favorites}
             onToggleFavorite={toggleFavorite}
             onConfirmed={async () => { await reload(); await refetchVideos(); }}
+            onPersisted={(path) =>
+              setJustDecidedVideos((prev) => new Set(prev).add(path))
+            }
           />
         ) : !hasClusters && !hasUnconfirmedSingles ? (
           <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">
@@ -353,7 +375,7 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} />
+              <ClusterView clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
@@ -363,6 +385,8 @@ export default function App() {
                 onRefresh={reload}
                 onError={setError}
                 onToggleFavorite={toggleFavorite}
+                videoTags={videoTags}
+                onVideoTagsChange={setVideoTags}
               />
             )}
           </>

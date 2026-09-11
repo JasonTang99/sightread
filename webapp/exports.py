@@ -5,6 +5,7 @@ look, grouped per trip:
 
     Trips/<trip>/xt5/                         <- the project folder
     Trips/<trip>/_exports/DSCF4539.JPG
+    Trips/<trip>/_exports/<tag>/DSCF4540.JPG
     Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
 
 With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
@@ -116,10 +117,14 @@ def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = Non
 def _dest_for_shot(
     folder: Path, root: Path | None, shot: Path, tag: str | None
 ) -> Path:
-    """Export directory for one deliverable — photos ignore tags, videos never do."""
+    """Export directory for one deliverable.
+
+    Videos always get a subfolder (tag or untagged). Photos only do when
+    tagged, so the untagged stills stay in the trip root.
+    """
     if is_video(shot):
         return export_dir_for(folder, root, tag or UNTAGGED_DIR)
-    return export_dir_for(folder, root)
+    return export_dir_for(folder, root, tag)
 
 
 def _is_exported_clip(path: Path, folder: Path) -> bool:
@@ -234,7 +239,7 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
         return dest_stats[key]
 
     for shot in shots:
-        tag = assignments.get(str(shot)) if is_video(shot) else None
+        tag = assignments.get(str(shot))
         shot_dest = _dest_for_shot(folder, root, shot, tag)
         row = _dest_row(shot_dest, shot_dest.name if shot_dest != dest else None)
         try:
@@ -335,16 +340,16 @@ def export_trip(
 ) -> ExportReport:
     """Deliver every surviving photo and starred video into the trip's export dir.
 
-    Tagged videos land in <trip>/<tag>/ and untagged ones in <trip>/untagged/;
-    photos stay in <trip>/. One bad file does not sink the run: failures are
-    collected per file and reported.
+    Tagged shots land in <trip>/<tag>/; untagged videos in <trip>/untagged/;
+    untagged photos stay in <trip>/. One bad file does not sink the run:
+    failures are collected per file and reported.
     """
     assignments = load_video_tags(output_dir)["videos"]
     dest = export_dir_for(folder, root)
     report = ExportReport(dest=dest)
 
     for shot in export_shots(output_dir, folder):
-        tag = assignments.get(str(shot)) if is_video(shot) else None
+        tag = assignments.get(str(shot))
         shot_dest = _dest_for_shot(folder, root, shot, tag)
         try:
             shot_dest.mkdir(parents=True, exist_ok=True)

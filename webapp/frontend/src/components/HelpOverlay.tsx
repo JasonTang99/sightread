@@ -12,7 +12,8 @@ const CLUSTER_KEYS = [
   ["n", "jump to next unreviewed cluster"],
   ["Enter", "confirm cluster"],
   ["b", "skip cluster (no confirm)"],
-  ["s", "star / unstar focused image"],
+  ["s", "star / unstar focused image (star keeps)"],
+  ["t", "cycle tag on focused image"],
   ["u", "undo last confirm"],
   ["?", "toggle this help"],
 ];
@@ -20,8 +21,9 @@ const CLUSTER_KEYS = [
 const SINGLES_KEYS = [
   ["j / k", "move image focus up / down"],
   ["Space", "toggle focused image keep/delete"],
-  ["a", "keep all"],
-  ["d", "select all bad (reset to threshold)"],
+  ["s", "star / unstar (star keeps)"],
+  ["1–9", "tag current image"],
+  ["t", "cycle tag"],
   ["Enter", "confirm singles"],
   ["?", "toggle this help"],
 ];

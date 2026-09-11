@@ -262,6 +262,18 @@ class TestSingles:
         page_loaded.keyboard.press("k")
         expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
 
+    def test_clicking_a_tag_stars_and_keeps_the_single(self, page_loaded: Page, output_dir):
+        """Photos share the video tag vocabulary; a tag is a star and a keep."""
+        self._open_singles(page_loaded)
+        expect(page_loaded.get_by_text("Delete", exact=True)).to_be_visible()
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Keep", exact=True)).to_be_visible()
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        photo = "demo_photos/DSCF4283.JPG"
+        assert json.loads((output_dir / "video_tags.json").read_text())["videos"][photo] == "vibes"
+        assert photo in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
+
     def test_enter_confirms_current_item(self, page_loaded: Page, output_dir):
         self._open_singles(page_loaded)
         expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/4 reviewed")
@@ -364,6 +376,15 @@ class TestKeyboardNewBindings:
         # "s" no longer skips — it toggles favorite on the focused image,
         # which makes the ★ Favorites tab appear in the header.
         page_loaded.keyboard.press("s")
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+
+    def test_starring_a_delete_marked_photo_keeps_it(self, page_loaded: Page):
+        """A star is a keep: rank-2 starts delete, starring it must flip Keep."""
+        page_loaded.keyboard.press("l")
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
+        page_loaded.keyboard.press("s")
+        settle(page_loaded)
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
         expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
 
     def test_shift_k_keep_best(self, page_loaded: Page):
@@ -495,6 +516,19 @@ class TestTimelineVideos:
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         assert statuses(out).get(video) == "kept"
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
+
+    def test_starring_a_delete_marked_video_keeps_it(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press(" ")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Delete", exact=True)).to_be_visible()
+        page_loaded.keyboard.press("s")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Keep", exact=True)).to_be_visible()
+        assert video in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
         expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
 
     def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
