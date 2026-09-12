@@ -352,3 +352,111 @@ def clean_pipeline_cache(output_dir: Path) -> dict:
         shutil.rmtree(d, ignore_errors=True)
         removed.append(f"{name}/")
     return {"removed": removed, "freed_bytes": freed}
+
+
+# ---------------------------------------------------------------------------
+# Adopting reviews done on a device folder
+# ---------------------------------------------------------------------------
+# How deep under a trip folder a device folder can sit. One level covers
+# `xt5/`, two covers the dated subfolders older imports used (`canon/02-06/`).
+_ADOPT_DEPTH = 2
+# Folders that are output, not camera input.
+_ADOPT_SKIP = {"_exports", "clips", "trash"}
+
+
+def _device_folders(folder: Path, depth: int = _ADOPT_DEPTH):
+    """Subfolders of a trip that could have been reviewed as their own project."""
+    if depth <= 0:
+        return
+    try:
+        children = sorted(p for p in folder.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for child in children:
+        if child.name.startswith(".") or child.name.lower() in _ADOPT_SKIP:
+            continue
+        yield child
+        yield from _device_folders(child, depth - 1)
+
+
+def adopt_subfolder_reviews(folder: Path, out_dir: Path) -> dict[str, int]:
+    """Fold reviews of a trip's device folders into the trip project.
+
+    A project is identified by its folder path, so opening `<trip>` is a
+    different project from opening `<trip>/xt5` — and reviewing the trip after
+    reviewing one camera means meeting all of that camera's keepers again as
+    undecided. The decisions are right there on disk under the child's own
+    output dir; this brings them across.
+
+    The trip's own decisions always win, so this is safe to run on every open
+    and safe to run twice: it only ever fills in paths the trip has no opinion
+    about. Deletes that were already applied come across too — they name files
+    that are gone, which is exactly what stops them being re-proposed.
+    """
+    from utils import load_decisions, save_decisions  # local: utils imports media, not projects
+
+    adopted = {"photos": 0, "video_tags": 0, "clips": 0, "folders": 0}
+    folder = Path(folder).resolve()
+    out_dir = Path(out_dir)
+    own = load_decisions(out_dir)
+    new_decisions: dict[str, str] = {}
+    for child in _device_folders(folder):
+        child_out = project_output_dir(child)
+        if child_out == out_dir or not child_out.is_dir():
+            continue
+        adopted["folders"] += 1
+        for path, status in load_decisions(child_out).items():
+            # A path the child decided about but that does not belong to this
+            # trip would be someone else's business; in practice they match.
+            if path in own or path in new_decisions or not path.startswith(str(folder)):
+                continue
+            new_decisions[path] = status
+        # Tags and clips are adopted whether or not that folder holds photo
+        # decisions: a camera folder can be all video.
+        adopted["video_tags"] += _adopt_video_tags(child_out, out_dir, folder)
+        adopted["clips"] += _adopt_user_clips(child_out, out_dir, folder)
+    if new_decisions:
+        save_decisions(out_dir, new_decisions)
+        adopted["photos"] = len(new_decisions)
+    return adopted
+
+
+def _adopt_video_tags(child_out: Path, out_dir: Path, folder: Path) -> int:
+    from video_tags import load_video_tags, save_video_tags
+
+    theirs = load_video_tags(child_out)
+    if not theirs["videos"]:
+        return 0
+    ours = load_video_tags(out_dir)
+    # A tag the child used has to exist here before an assignment to it will
+    # load — load_video_tags drops assignments naming an unknown tag.
+    tags = list(ours["tags"]) + [t for t in theirs["tags"] if t not in ours["tags"]]
+    added = {
+        p: t for p, t in theirs["videos"].items()
+        if p not in ours["videos"] and p.startswith(str(folder))
+    }
+    if not added:
+        return 0
+    save_video_tags(out_dir, {
+        "schema_version": ours["schema_version"],
+        "tags": tags,
+        "videos": {**ours["videos"], **added},
+    })
+    return len(added)
+
+
+def _adopt_user_clips(child_out: Path, out_dir: Path, folder: Path) -> int:
+    from clips import load_user_clips, save_user_clips
+
+    theirs = load_user_clips(child_out)
+    if not theirs:
+        return 0
+    ours = load_user_clips(out_dir)
+    added = 0
+    for path, entry in theirs.items():
+        if path in ours or not path.startswith(str(folder)):
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("clips"), list):
+            save_user_clips(out_dir, path, entry["clips"])
+            added += 1
+    return added
