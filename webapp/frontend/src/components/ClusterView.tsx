@@ -52,6 +52,10 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
+  // After confirm the current row may leave the list (hide-reviewed). Index
+  // +1 then walks past the cluster that slid into its place. Remember who
+  // was next and land on that id once the list updates.
+  const landOnRef = useRef<number | "stay" | undefined>(undefined);
 
   const wipedCount = useMemo(
     () => allClusters.filter((c) => isWiped(c, decisions)).length,
@@ -105,6 +109,15 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
   useEffect(() => {
     if (idx >= clusters.length) setIdx(Math.max(0, clusters.length - 1));
   }, [clusters.length]);
+
+  useEffect(() => {
+    const target = landOnRef.current;
+    if (target === undefined) return;
+    landOnRef.current = undefined;
+    if (target === "stay") return;
+    const next = clusters.findIndex((c) => c.cluster_id === target);
+    if (next !== -1) setIdx(next);
+  }, [clusters]);
 
   const isKeptOf = (path: string, rank: number) =>
     favSet.has(path) || (keeps[path] ?? rank === 1);
@@ -191,9 +204,11 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
         }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
-      setIdx((i) => i + 1);
+      const next = clusters[clusterIdx + 1];
+      landOnRef.current = next ? next.cluster_id : "stay";
       await onRefresh();
     } catch (e) {
+      landOnRef.current = undefined;
       onError(e instanceof Error ? e.message : String(e));
     } finally {
       setSubmitting(false);
