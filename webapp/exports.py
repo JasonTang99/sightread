@@ -3,7 +3,8 @@
 Curation decides what is worth keeping; this puts it somewhere an editor will
 look, grouped per trip:
 
-    Trips/<trip>/xt5/                         <- the project folder
+    Trips/<trip>/xt5/                         <- the project folder, or the
+    Trips/<trip>/                             <- whole trip, devices and all
     Trips/<trip>/_exports/DSCF4539.JPG
     Trips/<trip>/_exports/<tag>/DSCF4540.JPG
     Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
@@ -51,7 +52,15 @@ from pathlib import Path
 from PIL import Image
 
 from clips import EXPORT_DIR_NAME
-from media import HEIF_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, motion_names, register_heif
+from media import (
+    HEIF_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    TRIP_EXPORTS_DIR,
+    VIDEO_EXTENSIONS,
+    motion_names,
+    register_heif,
+    walk_media,
+)
 from utils import DELETED, FAVORITE, TO_DELETE, load_decisions
 from video_tags import is_video, load_video_tags, sanitize_tag
 
@@ -64,7 +73,6 @@ register_heif()
 # a separate tree instead, as <root>/<project folder name>/.
 _env_root = os.environ.get("SIGHTREAD_EXPORTS_ROOT")
 EXPORTS_ROOT: Path | None = Path(_env_root) if _env_root else None
-TRIP_EXPORTS_DIR = "_exports"
 
 # A partial copy that kept the final name would be indistinguishable from a
 # finished one on the next run, since the skip check compares sizes. Copies land
@@ -152,20 +160,53 @@ class ExportReport:
         }
 
 
+def _holds_media(directory: Path) -> bool:
+    """Whether any photo or video lives under `directory`. Stops at the first."""
+    for dirpath, names in walk_media(directory):
+        for name in names:
+            ext = os.path.splitext(name)[1].lower()
+            if ext in IMAGE_EXTENSIONS or ext in VIDEO_EXTENSIONS:
+                return True
+    return False
+
+
+def trip_root(folder: Path) -> Path:
+    """The trip folder whose `_exports` this project delivers into.
+
+    A project is opened either on one camera folder — `Trips/<trip>/xt5`,
+    whose deliverables belong to the trip beside it — or on the whole trip at
+    once, which is how a trip's devices get reviewed together. The two are
+    told apart by what is under the folder: a trip holds camera folders with
+    media in them, a camera folder holds the media itself. An `_exports`
+    already in place settles it without looking further.
+    """
+    if (folder / TRIP_EXPORTS_DIR).is_dir():
+        return folder
+    try:
+        subdirs = [
+            Path(e.path)
+            for e in os.scandir(folder)
+            if e.is_dir() and e.name != TRIP_EXPORTS_DIR and not e.name.startswith(".")
+        ]
+    except OSError:
+        return folder.parent
+    return folder if any(_holds_media(d) for d in subdirs) else folder.parent
+
+
 def exports_anchor(folder: Path, root: Path | None = None) -> Path:
     """The directory that must already exist before anything is exported.
 
-    It is the exports root when one is set, else the trip folder that holds the
-    camera folder. Either one missing means an unmounted drive.
+    It is the exports root when one is set, else the trip the project belongs
+    to. Either one missing means an unmounted drive.
     """
     root = root or EXPORTS_ROOT
-    return root if root else folder.parent
+    return root if root else trip_root(folder)
 
 
 def export_dir_for(folder: Path, root: Path | None = None, tag: str | None = None) -> Path:
     """Where a deliverable lands: <trip>/_exports (or <root>/<folder name>), plus /<tag>."""
     root = root or EXPORTS_ROOT
-    base = root / folder.name if root else folder.parent / TRIP_EXPORTS_DIR
+    base = root / folder.name if root else trip_root(folder) / TRIP_EXPORTS_DIR
     if tag:
         return base / sanitize_tag(tag)
     return base
@@ -209,7 +250,7 @@ def deliverables(output_dir: Path, folder: Path) -> list[Deliverable]:
     decisions = load_decisions(output_dir)
     folder = folder.resolve()
     out: list[Deliverable] = []
-    for root, _dirs, files in os.walk(folder):
+    for root, files in walk_media(folder):
         motion = motion_names(root, files)
         motion_by_stem = {os.path.splitext(n)[0]: n for n in motion}
         for name in files:

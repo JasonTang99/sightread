@@ -3,9 +3,13 @@ import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
+import { DeviceBadge } from "./DeviceBadge";
+import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 interface Props {
+  // The project folder, so a tile can name the camera folder it came from.
+  folder?: string;
   singletons: Cluster[];
   decisions: PhotoDecisions;
   favorites: string[];
@@ -21,9 +25,11 @@ interface FlatImage {
   path: string;
   score: number;
   motion?: string;
+  model?: string;
 }
 
 export function SingletonsView({
+  folder,
   singletons,
   decisions,
   favorites,
@@ -234,6 +240,11 @@ export function SingletonsView({
           src={`/api/image?path=${encodeURIComponent(current.path)}&w=2400`}
           alt=""
           className="max-w-full max-h-full object-contain"
+        />
+        <DeviceBadge
+          device={deviceOf(current.path, folder)}
+          model={current.model}
+          corner="bottom-2 left-2"
         />
         {current.motion && (
           <LiveMotion key={current.path} motion={current.motion} fit="contain" corner="top-2 left-2" />

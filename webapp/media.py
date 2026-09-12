@@ -30,6 +30,13 @@ import threading
 from pathlib import Path
 from typing import Iterable
 
+# What a trip's deliverables folder is called. Scans skip it at any depth: its
+# contents are this app's own output, and since an export hardlinks rather than
+# copies, scanning it would show every exported photo a second time under a
+# second name. A project opened on a whole trip contains one; a project opened
+# on a single camera folder has one beside it.
+TRIP_EXPORTS_DIR = "_exports"
+
 HEIF_EXTENSIONS = {".heic", ".heif"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"} | HEIF_EXTENSIONS
 # No ".ts": MPEG-TS shares the extension with TypeScript sources, so any code
@@ -39,6 +46,34 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".w
 # Apple records 1.5s either side of the shutter. Measured 2.48–3.03s across
 # 161 motion files; the margin covers trimmed and re-encoded exports.
 LIVE_PHOTO_MAX_S = 4.0
+
+
+def walk_media(root: Path | str):
+    """os.walk over a project, minus the directories that are not source media.
+
+    Skips `_exports` and dot-directories in place, so a trip folder can be
+    opened as one project — camera folders and all — without the export tree
+    reading back as hundreds of extra photos.
+    """
+    for dirpath, dirs, names in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d != TRIP_EXPORTS_DIR and not d.startswith("."))
+        yield dirpath, names
+
+
+def device_of(path: Path | str, root: Path | str) -> str:
+    """Which camera folder under `root` a file came from.
+
+    The drives group a trip by where the files came from —
+    `Trips/<trip>/{xt5,canon,iphone,google photos}` — so for a project opened
+    on the trip, the first path segment is the device. Empty for a file
+    sitting directly in the project folder, and for a project opened on one
+    camera folder, where every file would answer the same thing anyway.
+    """
+    try:
+        rel = Path(path).relative_to(root).parts
+    except ValueError:
+        return ""
+    return rel[0] if len(rel) > 1 else ""
 
 
 def is_image(path: Path | str) -> bool:

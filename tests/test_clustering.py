@@ -35,7 +35,7 @@ class TestReadExifMeta:
     def test_landscape_from_pixel_dimensions(self, tmp_path):
         p = tmp_path / "wide.jpg"
         _write_jpeg(p, (200, 100))
-        ts, orientation = pipeline._read_exif_meta(str(p))
+        ts, orientation, _model = pipeline._read_exif_meta(str(p))
         assert orientation == "landscape"
         assert ts is not None
 
@@ -58,7 +58,7 @@ class TestReadExifMeta:
     def test_unreadable_file_is_unknown(self, tmp_path):
         p = tmp_path / "broken.jpg"
         p.write_bytes(b"not an image")
-        assert pipeline._read_exif_meta(str(p)) == (None, "unknown")
+        assert pipeline._read_exif_meta(str(p)) == (None, "unknown", None)
 
 
 # ---------------------------------------------------------------------------

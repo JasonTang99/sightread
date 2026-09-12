@@ -22,7 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 import thumbs
-from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names
+from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names, walk_media
 from utils import (
     DELETED,
     FAVORITE,
@@ -42,6 +42,7 @@ from utils import (
 from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
+    count_images,
     image_files_in,
     clean_pipeline_cache,
     clear_done,
@@ -295,7 +296,7 @@ def get_state():
     ctx = _active
     results_path = ctx.output_dir / "results.json"
     if not results_path.exists():
-        return {"no_project": False, "needs_pipeline": True}
+        return {"no_project": False, "needs_pipeline": True, "folder": str(ctx.folder)}
     data = load_results(results_path)
     decisions = load_decisions(ctx.output_dir)
     clusters = sort_clusters_chronologically(
@@ -316,6 +317,10 @@ def get_state():
     return {
         "no_project": False,
         "needs_pipeline": False,
+        # The review views derive a photo's camera folder from its path
+        # relative to this, so a trip opened as one project can say where
+        # each shot came from.
+        "folder": str(ctx.folder),
         "clusters": clusters,
         "singletons": singletons,
         "singleton_delete_threshold": SINGLETON_DELETE_THRESHOLD,
@@ -501,6 +506,7 @@ def apply_deletes():
     skipped = 0
     companions = 0
     freed_bytes = 0
+    still_linked = 0
     # Held across the whole run: a confirm landing mid-sweep would otherwise be
     # erased by the status rewrite below, or get its file unlinked before the
     # user ever saw it in the pending list.
@@ -529,9 +535,16 @@ def apply_deletes():
                 unmirrored.append(entry)
                 continue
             for path in group:
-                size = path.stat().st_size
+                st = path.stat()
                 path.unlink()
-                freed_bytes += size
+                # An export hardlinks rather than copies, so a photo that has
+                # already been exported still has a name holding its data and
+                # unlinking it here frees nothing. Counting it would report
+                # space that the drive never got back.
+                if st.st_nlink > 1:
+                    still_linked += 1
+                else:
+                    freed_bytes += st.st_size
                 removed_names.append(path.name)
             companions += len(group) - 1
             deleted.append(src.name)
@@ -550,6 +563,8 @@ def apply_deletes():
         "skipped": skipped,
         "unmirrored": unmirrored,
         "freed_bytes": freed_bytes,
+        # Files whose data another name — an export hardlink — still holds.
+        "still_linked": still_linked,
         "manifest": str(manifest) if manifest else None,
     }
 
@@ -692,7 +707,7 @@ def _scan_videos(ctx: ProjectContext) -> list[str]:
     """
     folder = ctx.folder.resolve()
     found: list[str] = []
-    for root, _dirs, files in os.walk(folder):
+    for root, files in walk_media(folder):
         motion = motion_names(root, files)
         for name in files:
             if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS or name in motion:
@@ -766,6 +781,7 @@ def list_videos():
     _start_poster_prewarm(ctx, paths)
     return {
         "paths": paths,
+        "folder": str(ctx.folder),
         "statuses": statuses,
         "shot_times": shot_times,
         "highlights": highlights,
@@ -1034,6 +1050,8 @@ def get_gallery():
             photo = {"path": p, "cluster_id": cid, "cluster_size": csize, "status": status}
             if img.get("motion"):
                 photo["motion"] = img["motion"]
+            if img.get("model"):
+                photo["model"] = img["model"]
             all_photos.append(photo)
 
     shot_times = _get_shot_times(ctx, [ph["path"] for ph in all_photos], known=pipeline_times)
@@ -1042,7 +1060,7 @@ def get_gallery():
 
     all_photos.sort(key=lambda p: (p["shot_at"] is None, p["shot_at"] or ""))
     _start_thumb_prewarm(ctx, [ph["path"] for ph in all_photos])
-    return {"photos": all_photos}
+    return {"photos": all_photos, "folder": str(ctx.folder)}
 
 
 @app.get("/api/video")
@@ -1540,10 +1558,7 @@ def fs_list(path: str = Query(default=str(PRIMARY_ROOT / "Editing" / "imports"))
             if child.name.startswith(".") or not child.is_dir():
                 continue
             try:
-                img_count = sum(
-                    1 for f in child.iterdir()
-                    if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
-                )
+                img_count = count_images(child)
             except PermissionError:
                 img_count = 0
             entries.append({
