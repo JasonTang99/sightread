@@ -16,6 +16,7 @@ from conftest import (  # noqa: F401
     _cluster_count,
     _singleton_count,
     output_dir,
+    project_folder,
     queued,
     seed_queue,
     settle,
@@ -30,6 +31,19 @@ class TestPageLoad:
     def test_header_title(self, page_loaded: Page):
         # Header title is plain text (a span), not a button anymore
         expect(page_loaded.locator("header").get_by_text("Sightread", exact=True)).to_be_visible()
+
+    def test_header_names_the_open_project(self, page_loaded: Page, project_folder):
+        """Which trip is on screen. Every other project control is a verb, so
+        with several trips half reviewed nothing said where you were."""
+        name = page_loaded.get_by_test_id("project-name")
+        expect(name).to_have_text(project_folder.name)
+        # Trips on different drives share names, so the path is the tooltip.
+        expect(name).to_have_attribute("title", str(project_folder))
+
+    def test_the_project_name_survives_a_tab_change(self, page_loaded: Page, project_folder):
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("project-name")).to_have_text(project_folder.name)
 
     def test_cluster_tab_visible(self, page_loaded: Page):
         expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()

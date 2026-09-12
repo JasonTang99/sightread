@@ -220,6 +220,20 @@ export default function App() {
         >
           ← Projects
         </button>
+        {/* Which project this is. Every other project affordance is a verb —
+            the picker button, the finish panel — so with several trips half
+            reviewed there was nothing on screen that simply said where you
+            are. The folder name is what the picker lists; the full path is in
+            the tooltip, since trips from different drives can share a name. */}
+        {state.folder && (
+          <span
+            className="text-sm text-gray-700 font-medium truncate max-w-[16rem]"
+            title={state.folder}
+            data-testid="project-name"
+          >
+            {state.folder.split("/").filter(Boolean).pop()}
+          </span>
+        )}
 
         {hasClusters && (
           <button
