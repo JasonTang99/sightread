@@ -7,11 +7,14 @@ disk still gets through.
 """
 
 import json
+import os
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ExifTags
 
+import pipeline
 import server
 import utils
 from projects import ProjectContext
@@ -42,6 +45,23 @@ def _clear_caches():
 def _jpeg(folder, name="a.jpg", size=(64, 48)):
     path = folder / name
     Image.new("RGB", size, (120, 30, 30)).save(path, "JPEG")
+    return path
+
+
+def _jpeg_with_exif_dates(folder, name, *, original=None, modified=None):
+    """A JPEG whose DateTimeOriginal and DateTime deliberately disagree.
+
+    No file in the real archive has them differ — every camera and phone here
+    writes the same value to both — which is exactly why reading the wrong one
+    went unnoticed. The fixture has to be synthesised.
+    """
+    path = folder / name
+    exif = Image.Exif()
+    if modified is not None:
+        exif[306] = modified
+    if original is not None:
+        exif.get_ifd(ExifTags.IFD.Exif)[36867] = original
+    Image.new("RGB", (16, 12), (10, 90, 40)).save(path, "JPEG", exif=exif)
     return path
 
 
@@ -217,3 +237,47 @@ class TestShotTimeCache:
         ctx = server._active
 
         assert server._get_shot_times(ctx, [str(img)]) == {str(img): "2021-01-01T00:00:00"}
+
+
+class TestShotTimeExif:
+    """DateTimeOriginal lives in the EXIF sub-IFD, DateTime (306) in IFD0.
+
+    Reading only IFD0 silently returns the file's last-modified time as if it
+    were the capture time, so a re-exported photo sorts wrong with no error.
+    """
+
+    def test_datetime_original_wins_over_datetime(self, tmp_path):
+        img = _jpeg_with_exif_dates(
+            tmp_path,
+            "reexported.jpg",
+            original="2026:09:06 13:48:52",
+            modified="2026:09:11 22:03:10",
+        )
+
+        assert server._read_shot_time(str(img)) == "2026-09-06T13:48:52"
+
+    def test_datetime_is_used_when_original_is_absent(self, tmp_path):
+        img = _jpeg_with_exif_dates(tmp_path, "old.jpg", modified="2019:04:02 08:15:00")
+
+        assert server._read_shot_time(str(img)) == "2019-04-02T08:15:00"
+
+    def test_falls_back_to_mtime_without_exif_dates(self, tmp_path):
+        img = _jpeg_with_exif_dates(tmp_path, "bare.jpg")
+        os.utime(img, (1_600_000_000, 1_600_000_000))
+
+        expected = datetime.fromtimestamp(1_600_000_000).isoformat()
+        assert server._read_shot_time(str(img)) == expected
+
+    def test_agrees_with_the_pipeline_on_the_same_file(self, tmp_path):
+        """Both code paths read the same photo; they must not disagree."""
+        img = _jpeg_with_exif_dates(
+            tmp_path,
+            "shared.jpg",
+            original="2026:01:15 09:30:00",
+            modified="2026:03:01 12:00:00",
+        )
+        with Image.open(img) as opened:
+            from_pipeline = pipeline._parse_exif_timestamp(opened.getexif())
+
+        assert from_pipeline is not None
+        assert server._read_shot_time(str(img)) == datetime.fromtimestamp(from_pipeline).isoformat()
