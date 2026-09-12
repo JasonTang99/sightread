@@ -334,9 +334,12 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
           onChange={(e) => setIdx(Number(e.target.value))}
           className="px-2 py-1 border border-gray-200 rounded text-sm bg-white text-gray-700"
         >
+          {/* Position only: the badge beside it already says how big the
+              selected cluster is, and saying it twice just made the bar
+              longer. */}
           {clusters.map((c, i) => (
             <option key={c.cluster_id} value={i}>
-              {i + 1}/{clusters.length} — {c.images.length} photo{c.images.length === 1 ? "" : "s"}
+              {i + 1}/{clusters.length}
             </option>
           ))}
         </select>
