@@ -375,10 +375,11 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView folder={state.folder} clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
+                folder={state.folder}
                 singletons={state.singletons}
                 decisions={decisions}
                 favorites={favorites}

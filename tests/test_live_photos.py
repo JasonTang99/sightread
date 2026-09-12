@@ -380,7 +380,7 @@ def test_pipeline_reads_heif_exif_time_and_framing(tmp_path):
     exif[0x0132] = "2026:09:05 11:59:33"
     img.save(still, format="HEIF", exif=exif.tobytes())
 
-    ts, framing = pipeline._read_exif_meta(str(still))
+    ts, framing, _model = pipeline._read_exif_meta(str(still))
 
     assert ts is not None and framing == "portrait"
 

@@ -18,6 +18,7 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -74,6 +75,7 @@ SCORE_BATCH_SIZE = 16
 SCORE_RESIZE = 512           # resize to this before neural metrics
 _EXIF_DATETIME_TAG = next(k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal")
 _EXIF_ORIENTATION_TAG = 0x0112
+_EXIF_MODEL_TAG = 0x0110
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +86,10 @@ def _scan_image_paths(image_dir: str) -> list[str]:
     if not root.is_dir():
         raise FileNotFoundError(f"Image directory not found: {root}")
     return sorted(
-        str(p) for p in root.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS
+        str(Path(dirpath, name))
+        for dirpath, names in media.walk_media(root)
+        for name in names
+        if media.is_image(name)
     )
 
 
@@ -109,35 +114,52 @@ def _parse_exif_timestamp(exif) -> float | None:
         return None
 
 
-def _read_exif_meta(path: str) -> tuple[float | None, str]:
-    """Return (unix timestamp or None, orientation in {portrait,landscape,square}).
+class ShotMeta(NamedTuple):
+    timestamp: float | None
+    # The *displayed* framing: EXIF Orientation 5-8 rotates by 90°, which
+    # swaps the stored width and height.
+    framing: str  # portrait | landscape | square | unknown
+    # EXIF Model, e.g. "X-T5" or "iPhone 16 Pro". A trip opened as one project
+    # mixes cameras, and the folder a photo sits in only names who handed the
+    # files over: "google photos" alone holds six models on the Hoh trip.
+    model: str | None
 
-    Orientation is the *displayed* one: EXIF Orientation values 5-8 rotate by
-    90°, which swaps the stored width and height.
-    """
+
+def _read_exif_meta(path: str) -> ShotMeta:
     try:
         with Image.open(path) as img:
             width, height = img.size
             exif = img.getexif()
             ts = _parse_exif_timestamp(exif) if exif else None
+            model = exif.get(_EXIF_MODEL_TAG) if exif else None
             if exif and exif.get(_EXIF_ORIENTATION_TAG) in (5, 6, 7, 8):
                 width, height = height, width
     except Exception:
-        return None, "unknown"
+        return ShotMeta(None, "unknown", None)
+    if isinstance(model, str):
+        model = model.strip() or None
+    else:
+        model = None
     if width == height:
-        return ts, "square"
-    return ts, "portrait" if height > width else "landscape"
+        return ShotMeta(ts, "square", model)
+    return ShotMeta(ts, "portrait" if height > width else "landscape", model)
 
 
-def load_paths_and_meta(image_dir: str) -> tuple[list[str], list[float | None], list[str]]:
+def load_paths_and_meta(
+    image_dir: str,
+) -> tuple[list[str], list[float | None], list[str], list[str | None]]:
     paths = _scan_image_paths(image_dir)
     if not paths:
         raise RuntimeError(f"No images found in {image_dir}")
     meta = [_read_exif_meta(p) for p in tqdm(paths, desc="Reading EXIF")]
-    timestamps = [t for t, _ in meta]
-    orientations = [o for _, o in meta]
+    timestamps = [m.timestamp for m in meta]
+    orientations = [m.framing for m in meta]
+    models = [m.model for m in meta]
     print(f"Found {len(paths)} images ({sum(t is not None for t in timestamps)} with EXIF timestamps)")
-    return paths, timestamps, orientations
+    seen = sorted({m for m in models if m})
+    if len(seen) > 1:
+        print(f"Cameras: {', '.join(seen)}")
+    return paths, timestamps, orientations, models
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +879,7 @@ def rank_and_save(
     timestamps: list[float | None] | None = None,
     components: dict | None = None,
     motions: dict[str, str] | None = None,
+    models: list[str | None] | None = None,
 ) -> dict:
     results_clusters = []
     for cid in sorted(clusters.keys()):
@@ -885,6 +908,8 @@ def rank_and_save(
             # still and play it. Absent for every photo without one.
             if motions and paths[idx] in motions:
                 entry["motion"] = motions[paths[idx]]
+            if models and models[idx]:
+                entry["model"] = models[idx]
             if components is not None:
                 entry["score_components"] = {
                     k: round(float(v[idx]), 4)
@@ -934,7 +959,7 @@ def _scan_video_paths(image_dir: str) -> list[str]:
         raise FileNotFoundError(f"Image directory not found: {root}")
     root_resolved = root.resolve()
     paths = []
-    for dirpath, _dirs, names in os.walk(root):
+    for dirpath, names in media.walk_media(root):
         # A Live Photo's motion file belongs to its still, not to video review.
         motion = media.motion_names(dirpath, names)
         for name in names:
@@ -1106,7 +1131,7 @@ def run_pipeline(
     emb_cache = out / "embeddings_dinov3_mpcls_tta.npy"
     score_cache = out / "scores_ensemble.npz"
 
-    paths, timestamps, orientations = load_paths_and_meta(image_dir)
+    paths, timestamps, orientations, models = load_paths_and_meta(image_dir)
 
     embeddings = compute_embeddings(
         paths,
@@ -1133,7 +1158,7 @@ def run_pipeline(
         print(f"Paired {len(motions)} Live Photo motion file(s) with their stills")
     results = rank_and_save(
         paths, clusters, scores, embeddings, out,
-        timestamps=timestamps, components=components, motions=motions,
+        timestamps=timestamps, components=components, motions=motions, models=models,
     )
 
     if video_highlights:

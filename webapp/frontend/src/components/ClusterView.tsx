@@ -4,11 +4,14 @@ import { useMediaTags } from "../hooks/useMediaTags";
 import { isDecided, isDoomed, isWiped } from "../decisions";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
+import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 type ClusterFilter = "all" | "wiped";
 
 interface Props {
+  // The project folder, so a tile can name the camera folder it came from.
+  folder?: string;
   clusters: Cluster[];
   decisions: PhotoDecisions;
   favorites: string[];
@@ -24,7 +27,7 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
+export function ClusterView({ folder, clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
     const first = allClusters.findIndex((c) => !isDecided(c, decisions));
@@ -467,8 +470,11 @@ export function ClusterView({ clusters: allClusters, decisions, favorites, onRef
                 )}
                 <span
                   className="absolute bottom-1.5 left-1.5 z-10 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded-full max-w-[70%] truncate"
-                  title={img.path}
+                  title={img.model ? `${img.path} — ${img.model}` : img.path}
                 >
+                  {deviceOf(img.path, folder) && (
+                    <span className="text-gray-300">{deviceOf(img.path, folder)} · </span>
+                  )}
                   {img.path.split("/").pop()}
                 </span>
                 <img

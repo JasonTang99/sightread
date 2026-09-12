@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { GalleryPhoto, GridStatus, VideoHighlightsMap, VideoStatuses } from "../types";
 import { LiveMotion } from "./LiveMotion";
+import { DeviceBadge } from "./DeviceBadge";
+import { deviceOf, devicesIn } from "../device";
 
 interface Props {
   onError: (msg: string) => void;
@@ -57,7 +59,10 @@ interface TileProps {
 
 // Memoised: a trip's timeline runs to hundreds of tiles, and without this every
 // tile re-renders on each toggle, filter change and day switch.
-const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle, motion }: TileProps & { motion?: string }) {
+const PhotoTile = memo(function PhotoTile(
+  { path, status, baseStatus, onToggle, motion, device, model }:
+    TileProps & { motion?: string; device: string; model?: string },
+) {
   return (
     <div
       className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderFor(status)}`}
@@ -72,11 +77,15 @@ const PhotoTile = memo(function PhotoTile({ path, status, baseStatus, onToggle, 
         decoding="async"
       />
       {motion && <LiveMotion motion={motion} />}
+      <DeviceBadge device={device} model={model} />
     </div>
   );
 });
 
-const VideoTile = memo(function VideoTile({ path, status, baseStatus, clipCount, onToggle }: TileProps & { clipCount: number }) {
+const VideoTile = memo(function VideoTile(
+  { path, status, baseStatus, clipCount, onToggle, device }:
+    TileProps & { clipCount: number; device: string },
+) {
   return (
     <div
       className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors bg-gray-900 ${borderFor(status)}`}
@@ -94,6 +103,7 @@ const VideoTile = memo(function VideoTile({ path, status, baseStatus, clipCount,
         loading="lazy"
         decoding="async"
       />
+      <DeviceBadge device={device} corner="top-1 left-1" />
       {clipCount > 0 && (
         <span className="absolute top-1 right-1 bg-black/60 text-amber-300 text-xs rounded px-1">
           ✨ {clipCount}
@@ -122,6 +132,10 @@ export function TimelineView({
   onVideosChanged,
 }: Props) {
   const [photos, setPhotos] = useState<GalleryPhoto[]>([]);
+  // The project folder, so a trip opened as one project can say which camera
+  // folder each shot came from.
+  const [folder, setFolder] = useState<string | null>(null);
+  const [device, setDevice] = useState<string>("all");
   const [overrides, setOverrides] = useState<Record<string, GridStatus>>({});
   const [selectedDate, setSelectedDate] = useState<string>("all");
   const [filter, setFilter] = useState<StatusFilter>("all");
@@ -134,6 +148,7 @@ export function TimelineView({
       if (!res.ok) throw new Error(`Gallery fetch failed: ${res.status}`);
       const data = await res.json();
       setPhotos(data.photos ?? []);
+      setFolder(data.folder ?? null);
       setOverrides({});
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -147,9 +162,7 @@ export function TimelineView({
   // Preload next few photos when the visible slice changes
   useEffect(() => {
     const visible = photos.filter(
-      (p) =>
-        (selectedDate === "all" || dateOf(p.shot_at) === selectedDate) &&
-        matchesFilter(effectiveStatus(p, overrides), filter),
+      (p) => (selectedDate === "all" || dateOf(p.shot_at) === selectedDate) && shown(p),
     );
     for (const ph of visible.slice(0, 6)) {
       const el = new Image();
@@ -166,6 +179,20 @@ export function TimelineView({
       status: videoStatuses[p] ?? "undecided",
     })),
     [videos, videoShotTimes, videoStatuses],
+  );
+
+  const devices = useMemo(
+    () => devicesIn([...photos.map((p) => p.path), ...videoItems.map((v) => v.path)], folder),
+    [photos, videoItems, folder],
+  );
+
+  // One predicate for every count and grid: a tile shows when its decision
+  // passes the keep/delete filter and it came from the chosen device.
+  const shown = useCallback(
+    (item: { path: string; status: GridStatus }) =>
+      matchesFilter(effectiveStatus(item, overrides), filter) &&
+      (device === "all" || deviceOf(item.path, folder) === device),
+    [overrides, filter, device, folder],
   );
 
   const dates = useMemo(() => {
@@ -203,23 +230,26 @@ export function TimelineView({
   const countByDate = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [d, ps] of Object.entries(photosByDate)) {
-      map[d] = ps.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
+      map[d] = ps.filter(shown).length;
     }
     for (const [d, vs] of Object.entries(videosByDate)) {
-      map[d] = (map[d] ?? 0) + vs.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter)).length;
+      map[d] = (map[d] ?? 0) + vs.filter(shown).length;
     }
     return map;
-  }, [photosByDate, videosByDate, overrides, filter]);
+  }, [photosByDate, videosByDate, shown]);
 
   const totalPhotoCount = useMemo(
-    () => photos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length,
-    [photos, overrides, filter],
+    () => photos.filter(shown).length,
+    [photos, shown],
   );
 
   // Under a narrow filter most days can be empty; don't list them.
   const visibleDates = useMemo(
-    () => (filter === "all" ? dates : dates.filter((d) => (countByDate[d] ?? 0) > 0)),
-    [dates, countByDate, filter],
+    () =>
+      filter === "all" && device === "all"
+        ? dates
+        : dates.filter((d) => (countByDate[d] ?? 0) > 0),
+    [dates, countByDate, filter, device],
   );
 
   // Stable identity, or the memoised tiles re-render on every parent render.
@@ -261,7 +291,7 @@ export function TimelineView({
   };
 
   const renderPhotoGrid = (gridPhotos: GalleryPhoto[]) => {
-    const visible = gridPhotos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter));
+    const visible = gridPhotos.filter(shown);
     if (visible.length === 0) return <p className="text-sm text-gray-400 py-4">No photos.</p>;
     return (
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
@@ -273,6 +303,8 @@ export function TimelineView({
             baseStatus={ph.status}
             onToggle={toggle}
             motion={ph.motion}
+            device={deviceOf(ph.path, folder)}
+            model={ph.model}
           />
         ))}
       </div>
@@ -280,7 +312,7 @@ export function TimelineView({
   };
 
   const renderVideoGrid = (dayVideos: VideoItem[]) => {
-    const visible = dayVideos.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter));
+    const visible = dayVideos.filter(shown);
     if (visible.length === 0) return null;
     return (
       <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
@@ -292,6 +324,7 @@ export function TimelineView({
             baseStatus={v.status}
             clipCount={highlights[v.path]?.clips.length ?? 0}
             onToggle={toggle}
+            device={deviceOf(v.path, folder)}
           />
         ))}
       </div>
@@ -302,8 +335,8 @@ export function TimelineView({
     const dayPhotos = photosByDate[date] ?? [];
     const dayVideos = videosByDate[date] ?? [];
     const isConfirming = confirming === date;
-    const photoCount = dayPhotos.filter((p) => matchesFilter(effectiveStatus(p, overrides), filter)).length;
-    const videoCount = dayVideos.filter((v) => matchesFilter(effectiveStatus(v, overrides), filter)).length;
+    const photoCount = dayPhotos.filter(shown).length;
+    const videoCount = dayVideos.filter(shown).length;
     return (
       // content-visibility lets the browser skip layout, paint and image decode
       // for days scrolled out of view — a trip is hundreds of tiles, and
@@ -361,6 +394,27 @@ export function TimelineView({
             </button>
           </div>
         </div>
+
+        {devices.length > 1 && (
+          <div className="px-2 pt-2 pb-1 border-b border-gray-100">
+            <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Device</div>
+            <div className="flex flex-wrap gap-1">
+              {["all", ...devices].map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDevice(d)}
+                  className={`px-1.5 py-0.5 text-[11px] rounded border transition-colors ${
+                    device === d
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "text-gray-500 border-gray-200 hover:bg-gray-50"
+                  }`}
+                >
+                  {d === "all" ? "All" : d}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <button
           onClick={() => setSelectedDate("all")}

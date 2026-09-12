@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from media import IMAGE_EXTENSIONS  # noqa: F401 — re-exported; callers import it from here
+from media import IMAGE_EXTENSIONS, is_image, walk_media  # noqa: F401 — IMAGE_EXTENSIONS re-exported
 
 _xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 _xdg_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
@@ -31,11 +31,30 @@ def project_output_dir(folder: Path) -> Path:
 
 
 def image_files_in(folder: Path) -> set[str]:
+    """Every photo the pipeline would scan — the export tree excluded."""
     return {
-        str(p.resolve())
-        for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+        str(Path(dirpath, name).resolve())
+        for dirpath, names in walk_media(folder)
+        for name in names
+        if is_image(name)
     }
+
+
+def count_images(folder: Path, cap: int = 20_000) -> int:
+    """How many photos a folder holds, its camera folders included.
+
+    The picker offers trip folders as well as camera folders, and a trip holds
+    its photos one level down — counted only at the top level it would read as
+    empty. Capped because this runs for every entry in a listing.
+    """
+    n = 0
+    for _dirpath, names in walk_media(folder):
+        for name in names:
+            if is_image(name):
+                n += 1
+                if n >= cap:
+                    return n
+    return n
 
 
 def project_status(folder: Path, output_dir: Path) -> ProjectStatus:

@@ -6,6 +6,7 @@ export interface ImageData {
   exif_timestamp?: number;
   // The Live Photo motion file, when the still has one.
   motion?: string;
+  model?: string;
 }
 
 export interface Cluster {
@@ -29,6 +30,9 @@ export type PhotoDecisions = Record<string, PhotoDecision>;
 export interface AppState {
   no_project: boolean;
   needs_pipeline: boolean;
+  // The project folder. A photo's camera folder is its path relative to this,
+  // which is what the device badges show.
+  folder?: string;
   clusters: Cluster[];
   singletons: Cluster[];
   singleton_delete_threshold: number;
@@ -52,6 +56,8 @@ export interface GalleryPhoto {
   cluster_size: number;
   status: GridStatus;
   motion?: string;
+  // EXIF camera model, when the pipeline read one.
+  model?: string;
 }
 
 export type VideoStatuses = Record<string, GridStatus>;
