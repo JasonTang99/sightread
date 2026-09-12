@@ -76,11 +76,11 @@ class TestOrientationMerge:
         labels = np.array([0, 0, 1, 1], dtype=np.int64)
         return embeddings, timestamps, orientations, labels
 
-    def _merge(self, *args, window_s=120.0, threshold=0.38, max_gap_s=3600.0):
+    def _merge(self, *args, window_s=120.0, threshold=0.38, max_span_s=3600.0):
         embeddings, timestamps, orientations, labels = args
         return pipeline._merge_orientation_pairs(
             embeddings, timestamps, orientations, labels,
-            window_s=window_s, threshold=threshold, max_gap_s=max_gap_s,
+            window_s=window_s, threshold=threshold, max_span_s=max_span_s,
         )
 
     def test_merges_reshoot_across_orientation(self):
@@ -120,9 +120,9 @@ class TestOrientationMerge:
         out = self._merge(embeddings, [None] * 4, orientations, labels)
         assert len(set(out.tolist())) == 2
 
-    def test_chained_merges_respect_max_gap(self):
+    def test_chained_merges_respect_the_span_cap(self):
         # Three same-subject clusters, each 100s from the next. Merging all
-        # three spans 200s, which exceeds a 150s max_gap_s.
+        # three spans 200s, which exceeds a 150s cap.
         near = [1.0, 0.0, 0.0]
         embeddings = _embeddings([near] * 3)
         timestamps = [0.0, 100.0, 200.0]
@@ -130,9 +130,32 @@ class TestOrientationMerge:
         labels = np.array([0, 1, 2], dtype=np.int64)
         out = self._merge(
             embeddings, timestamps, orientations, labels,
-            window_s=120.0, max_gap_s=150.0,
+            window_s=120.0, max_span_s=150.0,
         )
         assert len(set(out.tolist())) == 2
+
+    def test_the_default_chain_cap_is_the_window_not_the_cluster_gap(self):
+        """Re-shoots chain, and each link only has to be `window_s` from the
+        last, so a cap of an hour let one walk right across it: on the Hoh
+        trip that grew a 44-photo cluster of a single viewpoint into 74 over
+        33 minutes."""
+        # Three clusters, consecutive centroids 0.3 apart — too far for the
+        # 0.22 same-scene threshold, near enough for the 0.38 re-shoot one.
+        # The first and last are 1.02 apart, so they never pair directly.
+        theta = np.arccos(0.7)
+        a = [1.0, 0.0, 0.0]
+        b = [float(np.cos(theta)), float(np.sin(theta)), 0.0]
+        c = [float(np.cos(2 * theta)), float(np.sin(2 * theta)), 0.0]
+        embeddings = _embeddings([a, b, c])
+        timestamps = [0.0, 100.0, 200.0]
+        orientations = ["landscape", "portrait", "landscape"]
+
+        clusters = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+        )
+
+        # Two of the three join; taking the third would span 200s.
+        assert len(clusters) == 2
 
     def test_cluster_embeddings_skips_stage_when_orientations_absent(self):
         near = [1.0, 0.0, 0.0]

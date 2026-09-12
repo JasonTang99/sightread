@@ -403,7 +403,7 @@ def _merge_orientation_pairs(
     labels: np.ndarray,
     window_s: float,
     threshold: float,
-    max_gap_s: float,
+    max_span_s: float,
 ) -> np.ndarray:
     """Merge clusters that hold the same subject shot portrait *and* landscape.
 
@@ -411,6 +411,15 @@ def _merge_orientation_pairs(
     same-scene threshold allows, so the two framings split apart. A pair is
     rejoined only when it is close in time, differs in framing, and the cluster
     centroids are still within `threshold`.
+
+    `threshold` is the loosest distance anywhere in the pipeline, so what a
+    merged group is allowed to span matters as much as the pairing rule. Merges
+    chain — A joins B, B joins C — and each link only has to be `window_s` from
+    the last, so capping the span at the max cluster gap let a chain walk across
+    a whole hour: on the Hoh trip that grew a 44-photo cluster of one viewpoint
+    into 74 photos spanning 33 minutes. The span is capped at `window_s`
+    instead, which is what "a re-shoot of the same subject" meant in the first
+    place.
     """
     groups: dict[int, list[int]] = {}
     for i, lab in enumerate(labels):
@@ -466,8 +475,8 @@ def _merge_orientation_pairs(
             continue
         lo = min(span[ra][0], span[rb][0])
         hi = max(span[ra][1], span[rb][1])
-        # Chained merges must still respect the stage-3 span limit.
-        if max_gap_s and max_gap_s > 0 and hi - lo > max_gap_s:
+        # A chain of re-shoots is still one re-shoot's worth of time.
+        if max_span_s and max_span_s > 0 and hi - lo > max_span_s:
             continue
         parent[rb] = ra
         span[ra] = (lo, hi)
@@ -574,7 +583,11 @@ def cluster_embeddings(
             final_labels,
             window_s=orient_window_s,
             threshold=orient_threshold,
-            max_gap_s=max_gap_s,
+            # Never wider than the gap stage 3 just enforced: a merge that
+            # re-joined two clusters it had split would undo that split.
+            max_span_s=(
+                min(orient_window_s, max_gap_s) if max_gap_s and max_gap_s > 0 else orient_window_s
+            ),
         )
 
     clusters: dict[int, list[int]] = {}
