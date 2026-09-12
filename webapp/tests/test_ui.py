@@ -28,9 +28,11 @@ from conftest import (  # noqa: F401
 # Page load
 # ---------------------------------------------------------------------------
 class TestPageLoad:
-    def test_header_title(self, page_loaded: Page):
-        # Header title is plain text (a span), not a button anymore
-        expect(page_loaded.locator("header").get_by_text("Sightread", exact=True)).to_be_visible()
+    def test_header_leads_with_the_project_not_the_product(self, page_loaded: Page):
+        """The wordmark said nothing a user needed twice; the project does."""
+        expect(page_loaded.locator("header").get_by_text("Sightread", exact=True)).to_have_count(0)
+        first = page_loaded.locator("header > *").first
+        expect(first).to_have_text("← Projects")
 
     def test_header_names_the_open_project(self, page_loaded: Page, project_folder):
         """Which trip is on screen. Every other project control is a verb, so
