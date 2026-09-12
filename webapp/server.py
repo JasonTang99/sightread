@@ -42,6 +42,7 @@ from utils import (
 from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
+    adopt_subfolder_reviews,
     count_images,
     image_files_in,
     clean_pipeline_cache,
@@ -1414,6 +1415,17 @@ def open_project(req: FolderRequest):
     # place legacy curation state has to be folded into decisions.json.
     with _curation_lock:
         migrate_project_state(out_dir)
+        # A trip whose xt5/ folder was reviewed on its own starts here with no
+        # opinion about any of those photos, and would walk the user back
+        # through every keeper. The child project's decisions are on disk.
+        adopted = adopt_subfolder_reviews(folder, out_dir)
+    if adopted["photos"] or adopted["video_tags"] or adopted["clips"]:
+        log.info(
+            "Adopted %d decision(s), %d video tag(s), %d clip(s) from %d device "
+            "folder project(s) into %s",
+            adopted["photos"], adopted["video_tags"], adopted["clips"],
+            adopted["folders"], folder,
+        )
     _active = ProjectContext(folder=folder, output_dir=out_dir)
     # Undo survives a restart now, so reopening a project picks its stack back
     # up rather than starting blank.
