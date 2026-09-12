@@ -212,7 +212,6 @@ export default function App() {
     <div>
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
       <header className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-3">
-        <span className="text-sm font-semibold text-gray-900">Sightread</span>
         <button
           onClick={handleChangeProject}
           className="text-xs text-gray-400 hover:text-blue-600 transition-colors border border-gray-200 rounded px-2 py-0.5 hover:border-blue-400"
@@ -227,7 +226,7 @@ export default function App() {
             the tooltip, since trips from different drives can share a name. */}
         {state.folder && (
           <span
-            className="text-sm text-gray-700 font-medium truncate max-w-[16rem]"
+            className="text-sm text-gray-900 font-semibold truncate max-w-[16rem]"
             title={state.folder}
             data-testid="project-name"
           >
