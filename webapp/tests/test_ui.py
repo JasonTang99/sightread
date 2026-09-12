@@ -630,3 +630,104 @@ class TestVideoTagFeedback:
 
         self._open_videos(page_loaded)
         expect(page_loaded.locator("span[title='Exports to …/vibes/']")).to_have_count(1)
+
+
+# ---------------------------------------------------------------------------
+# Live Photos
+# ---------------------------------------------------------------------------
+class TestLivePhotoHover:
+    """A Live Photo plays when the pointer rests on its LIVE badge.
+
+    Playback hangs off the badge, not the tile, so crossing a grid on the way
+    to the keep button does not start dozens of clips, and the <video> is only
+    mounted while hovered — one media element per tile loads eagerly and, at
+    six connections per origin, starves the lazy thumbnails around it.
+    """
+
+    @pytest.fixture()
+    def live_project(self, tmp_path, webapp_server):
+        """A cluster of two stills where only the first has a motion file."""
+        folder = tmp_path / "live"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        stills = []
+        for name in ("IMG_0001.JPG", "IMG_0002.JPG"):
+            dst = folder / name
+            shutil.copy(Path(__file__).parent.parent.parent / "demo_photos" / "DSCF4380.JPG", dst)
+            stills.append(str(dst.resolve()))
+        motion = folder / "IMG_0001.MOV"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(motion)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        (out / "results.json").write_text(json.dumps({"clusters": [{
+            "cluster_id": 1,
+            "best_image": stills[0],
+            "images": [
+                {"path": stills[0], "score": 0.71, "centrality": 0.98, "rank": 1,
+                 "motion": str(motion.resolve())},
+                {"path": stills[1], "score": 0.52, "centrality": 0.95, "rank": 2},
+            ],
+        }]}))
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, stills, str(motion.resolve())
+
+    def _open_clusters(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.wait_for_selector("select", timeout=10_000)
+        settle(page)
+
+    def test_only_the_still_with_a_motion_file_is_badged(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(1)
+
+    def test_nothing_plays_until_the_badge_is_hovered(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_hovering_the_badge_plays_the_motion_file(self, page_loaded: Page, live_project):
+        out, _stills, motion = live_project
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_test_id("live-badge").hover()
+        video = page_loaded.locator("video")
+        expect(video).to_have_count(1)
+        assert motion in requests.utils.unquote(video.get_attribute("src"))
+
+    def test_leaving_the_badge_unmounts_the_video(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_test_id("live-badge").hover()
+        expect(page_loaded.locator("video")).to_have_count(1)
+        page_loaded.mouse.move(0, 0)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_hovering_one_badge_does_not_start_the_neighbours(self, page_loaded: Page, live_project):
+        """Both stills are Live Photos here, so a tile-level hover would play two."""
+        out, stills, motion = live_project
+        results = json.loads((out / "results.json").read_text())
+        results["clusters"][0]["images"][1]["motion"] = motion
+        (out / "results.json").write_text(json.dumps(results))
+        self._open_clusters(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(2)
+        page_loaded.get_by_test_id("live-badge").first.hover()
+        expect(page_loaded.locator("video")).to_have_count(1)
+
+    def test_the_badge_is_not_a_keep_or_delete_vote(self, page_loaded: Page, live_project):
+        """The tile toggles on click; the badge sits on top of it."""
+        self._open_clusters(page_loaded)
+        before = page_loaded.get_by_role("button", name=re.compile(r"Keep|Delete")).first.inner_text()
+        page_loaded.get_by_test_id("live-badge").click()
+        settle(page_loaded)
+        after = page_loaded.get_by_role("button", name=re.compile(r"Keep|Delete")).first.inner_text()
+        assert before == after
+
+    def test_the_timeline_badges_it_too(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(1)
