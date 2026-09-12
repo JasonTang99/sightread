@@ -23,6 +23,17 @@ interface Props {
   onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
 
+// A cluster's size, as colour. The thresholds come from the archive: most
+// clusters are a pair or a trio, anything past about eight is a burst — the
+// Hoh trip's 44-photo viewpoint and Hawaii's 47-frame pineapple sequence are
+// the shape this is warning about.
+function sizeClass(n: number): string {
+  if (n >= 20) return "bg-red-100 text-red-800 ring-1 ring-red-300";
+  if (n >= 8) return "bg-orange-100 text-orange-800";
+  if (n >= 4) return "bg-amber-100 text-amber-800";
+  return "bg-blue-50 text-blue-700";
+}
+
 function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
@@ -325,10 +336,22 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
         >
           {clusters.map((c, i) => (
             <option key={c.cluster_id} value={i}>
-              {i + 1}/{clusters.length} — {c.images.length} imgs
+              {i + 1}/{clusters.length} — {c.images.length} photo{c.images.length === 1 ? "" : "s"}
             </option>
           ))}
         </select>
+        {/* How many photos you are deciding between. It was only legible
+            inside the dropdown's own label, which is the one place you cannot
+            read it while looking at the photos. Colour carries the size,
+            because a 44-photo burst is a different job from a pair and you
+            want to know which one you just landed on before you start. */}
+        <span
+          className={`px-2 py-1 rounded text-sm font-semibold whitespace-nowrap ${sizeClass(cluster.images.length)}`}
+          title={`${cluster.images.length} photos in this cluster`}
+          data-testid="cluster-size"
+        >
+          {cluster.images.length} photo{cluster.images.length === 1 ? "" : "s"}
+        </span>
         <button
           onClick={() => setIdx(Math.min(clusters.length - 1, clusterIdx + 1))}
           disabled={clusterIdx >= clusters.length - 1}
