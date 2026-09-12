@@ -54,6 +54,19 @@ MAX_CLUSTER_GAP_S = 3600.0  # max EXIF gap within a cluster (1 hr)
 ORIENT_MERGE_WINDOW_S = 120.0  # max EXIF gap between the two framings
 ORIENT_MERGE_THRESHOLD = 0.38  # cosine dist between cluster centroids
 
+# The same shot taken on two cameras is the other re-shoot: different sensor,
+# lens and processing move the embedding the way rotating the camera does, and
+# the two never land in one cluster on their own. It takes longer to raise the
+# second camera than to turn the first, so it gets its own wider window —
+# measured on 2026_01_Japan, where the phone/camera pairs of one subject sit
+# 126-331s apart. The distance ceiling is the *same-scene* threshold, not the
+# looser rotation one: two framings of one subject genuinely sit further apart
+# than two devices pointed at it, and at 0.38 same-framing merges started
+# swallowing neighbouring compositions (a 12-photo riverbed group on the Hoh
+# trip that held three different subjects).
+CROSS_DEVICE_WINDOW_S = 300.0
+CROSS_DEVICE_THRESHOLD = LOOSE_THRESHOLD
+
 # Score weights (ensemble)
 SCORE_WEIGHTS = {
     "musiq": 0.35,
@@ -396,7 +409,7 @@ def calibrate_threshold(embeddings: np.ndarray, fallback: float) -> float:
     return chosen
 
 
-def _merge_orientation_pairs(
+def _merge_reshoot_pairs(
     embeddings: np.ndarray,
     timestamps: list[float | None],
     orientations: list[str],
@@ -404,13 +417,24 @@ def _merge_orientation_pairs(
     window_s: float,
     threshold: float,
     max_span_s: float,
+    models: list[str | None] | None = None,
+    cross_window_s: float = 0.0,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
 ) -> np.ndarray:
-    """Merge clusters that hold the same subject shot portrait *and* landscape.
+    """Merge clusters holding one subject shot twice — rotated, or on a second camera.
 
     Rotating the camera moves a photo further in embedding space than the
     same-scene threshold allows, so the two framings split apart. A pair is
     rejoined only when it is close in time, differs in framing, and the cluster
     centroids are still within `threshold`.
+
+    Reaching for the other camera splits a subject the same way, and there the
+    framing usually does *not* change — a phone held portrait and a camera held
+    portrait — so framing alone can't be what licenses the merge. When `models`
+    names two different cameras, a same-framing pair is allowed to join inside
+    `cross_window_s` if its centroids are within the tighter `cross_threshold`.
+    Passing no `models` (or leaving `cross_window_s` at 0) keeps the old
+    framing-only behaviour.
 
     `threshold` is the loosest distance anywhere in the pipeline, so what a
     merged group is allowed to span matters as much as the pairing rule. Merges
@@ -425,6 +449,7 @@ def _merge_orientation_pairs(
     for i, lab in enumerate(labels):
         groups.setdefault(int(lab), []).append(i)
 
+    cross_window_s = cross_window_s if models is not None else 0.0
     info: dict[int, dict] = {}
     for lab, idxs in groups.items():
         ts = [timestamps[i] for i in idxs if timestamps[i] is not None]
@@ -440,24 +465,35 @@ def _merge_orientation_pairs(
             "t_min": min(ts),
             "t_max": max(ts),
             "kinds": kinds,
+            "models": {models[i] for i in idxs if models[i]} if models else set(),
             "centroid": centroid,
         }
 
     ordered = sorted(info, key=lambda lab: info[lab]["t_min"])
-    candidates: list[tuple[float, int, int]] = []
+    widest = max(window_s, cross_window_s)
+    candidates: list[tuple[float, int, int, bool]] = []
     for pos, a in enumerate(ordered):
         left = info[a]
         for b in ordered[pos + 1:]:
             right = info[b]
             # `ordered` is sorted by t_min, so once one candidate is out of
             # range every later one is too.
-            if right["t_min"] - left["t_max"] > window_s:
+            gap = right["t_min"] - left["t_max"]
+            if gap > widest:
                 break
-            if left["kinds"] == right["kinds"]:
+            # Two clusters count as different cameras only when both name one
+            # and the names don't overlap: an unknown model could be either.
+            cross = bool(
+                left["models"] and right["models"] and not (left["models"] & right["models"])
+            )
+            if gap > (cross_window_s if cross else window_s):
+                continue
+            same_framing = left["kinds"] == right["kinds"]
+            if same_framing and not cross:
                 continue
             dist = 1.0 - float(left["centroid"] @ right["centroid"])
-            if dist <= threshold:
-                candidates.append((dist, a, b))
+            if dist <= (cross_threshold if same_framing else threshold):
+                candidates.append((dist, a, b, same_framing))
 
     parent = {lab: lab for lab in info}
 
@@ -469,7 +505,8 @@ def _merge_orientation_pairs(
 
     span = {lab: (info[lab]["t_min"], info[lab]["t_max"]) for lab in info}
     merged = 0
-    for _dist, a, b in sorted(candidates):
+    n_cross = 0
+    for _dist, a, b, same_framing in sorted(candidates):
         ra, rb = find(a), find(b)
         if ra == rb:
             continue
@@ -481,6 +518,7 @@ def _merge_orientation_pairs(
         parent[rb] = ra
         span[ra] = (lo, hi)
         merged += 1
+        n_cross += same_framing
 
     if merged:
         for lab in info:
@@ -488,7 +526,8 @@ def _merge_orientation_pairs(
             if root != lab:
                 for i in info[lab]["idxs"]:
                     labels[i] = root
-        print(f"Merged {merged} portrait/landscape cluster pair(s) shot within {window_s}s")
+        detail = f" ({n_cross} of them same framing on a second camera)" if n_cross else ""
+        print(f"Merged {merged} re-shoot cluster pair(s) shot within {widest}s{detail}")
     return labels
 
 
@@ -503,6 +542,9 @@ def cluster_embeddings(
     orient_window_s: float = ORIENT_MERGE_WINDOW_S,
     orient_threshold: float = ORIENT_MERGE_THRESHOLD,
     auto_loose: bool = False,
+    models: list[str | None] | None = None,
+    cross_window_s: float = CROSS_DEVICE_WINDOW_S,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
 ) -> dict[int, list[int]]:
     """Two-stage clustering: burst pre-group, tight dedup inside parent groups."""
     n = len(embeddings)
@@ -574,9 +616,10 @@ def cluster_embeddings(
                     final_labels[i] = next_id
                 next_id += 1
 
-    # Stage 4: rejoin the same subject shot in both portrait and landscape
+    # Stage 4: rejoin the same subject shot twice — rotated, or on the other camera
     if orientations is not None and orient_window_s > 0:
-        final_labels = _merge_orientation_pairs(
+        widest = max(orient_window_s, cross_window_s if models else 0.0)
+        final_labels = _merge_reshoot_pairs(
             embeddings,
             timestamps,
             orientations,
@@ -585,9 +628,10 @@ def cluster_embeddings(
             threshold=orient_threshold,
             # Never wider than the gap stage 3 just enforced: a merge that
             # re-joined two clusters it had split would undo that split.
-            max_span_s=(
-                min(orient_window_s, max_gap_s) if max_gap_s and max_gap_s > 0 else orient_window_s
-            ),
+            max_span_s=(min(widest, max_gap_s) if max_gap_s and max_gap_s > 0 else widest),
+            models=models,
+            cross_window_s=cross_window_s,
+            cross_threshold=cross_threshold,
         )
 
     clusters: dict[int, list[int]] = {}
@@ -1137,6 +1181,8 @@ def run_pipeline(
     max_gap_s: float = MAX_CLUSTER_GAP_S,
     orient_window_s: float = ORIENT_MERGE_WINDOW_S,
     orient_threshold: float = ORIENT_MERGE_THRESHOLD,
+    cross_window_s: float = CROSS_DEVICE_WINDOW_S,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
     video_highlights: bool = False,
     force_video_highlights: bool = False,
 ) -> dict:
@@ -1163,6 +1209,9 @@ def run_pipeline(
         orient_window_s=orient_window_s,
         orient_threshold=orient_threshold,
         auto_loose=auto_loose,
+        models=models,
+        cross_window_s=cross_window_s,
+        cross_threshold=cross_threshold,
     )
 
     scores, components = score_images(paths, cache_path=score_cache, thumb_dir=out)
@@ -1204,6 +1253,12 @@ def main():
                              "re-shoot of the same subject (0 to disable)")
     parser.add_argument("--orient-threshold", type=float, default=ORIENT_MERGE_THRESHOLD,
                         help="Centroid cosine-dist ceiling for that merge")
+    parser.add_argument("--cross-window-s", type=float, default=CROSS_DEVICE_WINDOW_S,
+                        help="Max EXIF seconds apart to merge the same subject shot on "
+                             "two different cameras (0 to disable)")
+    parser.add_argument("--cross-threshold", type=float, default=CROSS_DEVICE_THRESHOLD,
+                        help="Centroid cosine-dist ceiling for a same-framing "
+                             "cross-camera merge")
     # Off by default since 2026-09-10. The clipfarm 2D clip-suggestion step is
     # the most expensive thing in the pipeline per unit of value: it decodes and
     # DINOv3-embeds frames across every video in the folder, and its output has
@@ -1241,6 +1296,8 @@ def main():
         max_gap_s=args.max_gap_s,
         orient_window_s=args.orient_window_s,
         orient_threshold=args.orient_threshold,
+        cross_window_s=args.cross_window_s,
+        cross_threshold=args.cross_threshold,
         video_highlights=((args.video_highlights or args.force_video_highlights)
                           and not args.no_video_highlights),
         force_video_highlights=args.force_video_highlights,

@@ -1,4 +1,4 @@
-"""Unit tests for chronological cluster ordering and portrait/landscape merging."""
+"""Unit tests for chronological cluster ordering and the re-shoot merges."""
 
 import json
 
@@ -76,11 +76,14 @@ class TestOrientationMerge:
         labels = np.array([0, 0, 1, 1], dtype=np.int64)
         return embeddings, timestamps, orientations, labels
 
-    def _merge(self, *args, window_s=120.0, threshold=0.38, max_span_s=3600.0):
+    def _merge(self, *args, window_s=120.0, threshold=0.38, max_span_s=3600.0,
+               models=None, cross_window_s=0.0, cross_threshold=0.22):
         embeddings, timestamps, orientations, labels = args
-        return pipeline._merge_orientation_pairs(
+        return pipeline._merge_reshoot_pairs(
             embeddings, timestamps, orientations, labels,
             window_s=window_s, threshold=threshold, max_span_s=max_span_s,
+            models=models, cross_window_s=cross_window_s,
+            cross_threshold=cross_threshold,
         )
 
     def test_merges_reshoot_across_orientation(self):
@@ -89,6 +92,15 @@ class TestOrientationMerge:
 
     def test_leaves_same_orientation_alone(self):
         out = self._merge(*self._fixture(kinds=("landscape", "landscape")))
+        assert len(set(out.tolist())) == 2
+
+    def test_one_camera_shooting_twice_is_not_a_reshoot(self):
+        """Same framing, same model: the tight/burst stages already had their
+        say about these two, and nothing here should second-guess them."""
+        out = self._merge(
+            *self._fixture(kinds=("landscape", "landscape")),
+            models=["X-T5"] * 4, cross_window_s=300.0,
+        )
         assert len(set(out.tolist())) == 2
 
     def test_leaves_dissimilar_subjects_alone(self):
@@ -164,6 +176,100 @@ class TestOrientationMerge:
             embeddings, [0.0, 5.0], None, tight=0.01, loose=0.05,
         )
         assert len(clusters) == 2
+
+
+# ---------------------------------------------------------------------------
+# Cross-camera re-shoot merge
+# ---------------------------------------------------------------------------
+class TestCrossCameraMerge:
+    """The same subject shot on a phone and on a camera.
+
+    Framing usually does not change between the two — both held portrait — so
+    the portrait/landscape rule never fires, and the sensor difference puts the
+    pair past the tight threshold. On 2026_01_Japan that left the phone and the
+    X-T5 versions of one subject in separate clusters every time.
+    """
+
+    def _pair(self, gap_s=200.0, kinds=("portrait", "portrait"),
+              models=("iPhone 14", "X-T5"), dist=0.1):
+        a = [1.0, 0.0, 0.0]
+        theta = np.arccos(1.0 - dist)
+        b = [float(np.cos(theta)), float(np.sin(theta)), 0.0]
+        embeddings = _embeddings([a, a, b, b])
+        timestamps = [0.0, 1.0, gap_s, gap_s + 1.0]
+        orientations = [kinds[0], kinds[0], kinds[1], kinds[1]]
+        labels = np.array([0, 0, 1, 1], dtype=np.int64)
+        model_list = [models[0], models[0], models[1], models[1]]
+        return embeddings, timestamps, orientations, labels, model_list
+
+    def _merge(self, fixture, **kw):
+        embeddings, timestamps, orientations, labels, models = fixture
+        opts = dict(window_s=120.0, threshold=0.38, max_span_s=3600.0,
+                    models=models, cross_window_s=300.0, cross_threshold=0.22)
+        opts.update(kw)
+        return pipeline._merge_reshoot_pairs(
+            embeddings, timestamps, orientations, labels, **opts)
+
+    def test_merges_the_same_subject_off_two_cameras(self):
+        out = self._merge(self._pair())
+        assert len(set(out.tolist())) == 1
+
+    def test_needs_the_wider_cross_camera_window(self):
+        """200s apart is past the framing window and inside the camera one."""
+        out = self._merge(self._pair(), cross_window_s=120.0)
+        assert len(set(out.tolist())) == 2
+
+    def test_stops_at_the_cross_camera_window(self):
+        out = self._merge(self._pair(gap_s=400.0))
+        assert len(set(out.tolist())) == 2
+
+    def test_same_framing_uses_the_tighter_ceiling(self):
+        """0.3 apart clears the 0.38 rotation ceiling but not the 0.22 one.
+
+        Letting same-framing pairs in at 0.38 pulled neighbouring compositions
+        into one group on the Hoh trip — twelve photos of three subjects.
+        """
+        out = self._merge(self._pair(dist=0.3))
+        assert len(set(out.tolist())) == 2
+        loose = self._merge(self._pair(dist=0.3), cross_threshold=0.35)
+        assert len(set(loose.tolist())) == 1
+
+    def test_rotation_across_cameras_keeps_the_looser_ceiling(self):
+        out = self._merge(self._pair(kinds=("portrait", "landscape"), dist=0.3))
+        assert len(set(out.tolist())) == 1
+
+    def test_an_unknown_model_is_not_assumed_to_be_a_second_camera(self):
+        fixture = list(self._pair())
+        fixture[4] = ["iPhone 14", "iPhone 14", None, None]
+        out = self._merge(tuple(fixture))
+        assert len(set(out.tolist())) == 2
+
+    def test_cluster_embeddings_passes_models_through(self):
+        embeddings, timestamps, orientations, _labels, models = self._pair()
+        without = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+        )
+        withal = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+            models=models, cross_window_s=300.0, cross_threshold=0.22,
+        )
+        assert len(without) == 2
+        assert len(withal) == 1
+
+    def test_chain_span_cap_covers_the_wider_window(self):
+        """Three cameras in a row must still not chain past one re-shoot."""
+        near = [1.0, 0.0, 0.0]
+        embeddings = _embeddings([near] * 3)
+        timestamps = [0.0, 250.0, 500.0]
+        orientations = ["portrait"] * 3
+        models = ["iPhone 14", "X-T5", "iPhone 14"]
+        out = pipeline._merge_reshoot_pairs(
+            embeddings, timestamps, orientations,
+            np.array([0, 1, 2], dtype=np.int64),
+            window_s=120.0, threshold=0.38, max_span_s=300.0,
+            models=models, cross_window_s=300.0, cross_threshold=0.22,
+        )
+        assert len(set(out.tolist())) == 2
 
 
 # ---------------------------------------------------------------------------
