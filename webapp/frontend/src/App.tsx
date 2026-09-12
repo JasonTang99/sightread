@@ -25,6 +25,17 @@ export default function App() {
   const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
   const [videoTags, setVideoTags] = useState<VideoTagsState>({ tags: [], assignments: {} });
   const [videosLoaded, setVideosLoaded] = useState(false);
+  // Skip what has already been decided. A trip opened after its camera folder
+  // was reviewed on its own adopts hundreds of decisions, and without this the
+  // review queue walks the user back through every one of them. Kept in
+  // localStorage because it is a way of working, not a per-visit choice.
+  const [hideReviewed, setHideReviewed] = useState(() => {
+    try {
+      return localStorage.getItem("sightread:hideReviewed") === "1";
+    } catch {
+      return false;
+    }
+  });
   // persist() writes a video decision without refetching /api/videos, because
   // a refetch would drop delete-marked clips from the Videos tab and break
   // space-toggle. The header still has to count those, so this set covers the
@@ -108,6 +119,15 @@ export default function App() {
   useEffect(() => { landedRef.current = false; }, [state?.no_project]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("sightread:hideReviewed", hideReviewed ? "1" : "0");
+    } catch {
+      // private window, or site data blocked — the toggle still works, it just
+      // starts off again next time.
+    }
+  }, [hideReviewed]);
+
+  useEffect(() => {
     if (!error) return;
     const t = setTimeout(() => setError(null), 4000);
     return () => clearTimeout(t);
@@ -182,13 +202,28 @@ export default function App() {
   }
 
   const decisions = state.photo_decisions ?? {};
-  const hasClusters = (state.clusters?.length ?? 0) > 0;
-  const hasSingles = (state.singletons?.length ?? 0) > 0;
+  // What the review tabs offer. With "unreviewed only" on, anything already
+  // decided drops out of the queue — the tab counts included, since a count
+  // that includes what the tab will not show you is worse than no count.
+  const visibleClusters = (state.clusters ?? []).filter(
+    (c) => !hideReviewed || !isDecided(c, decisions),
+  );
+  const visibleSingles = (state.singletons ?? []).filter(
+    (c) => !hideReviewed || !isDecided(c, decisions),
+  );
+  const hasClusters = visibleClusters.length > 0;
+  const hasSingles = visibleSingles.length > 0;
   const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !isDecided(c, decisions));
   // The video reviewer works through footage that isn't marked for deletion
   // yet; the timeline shows everything, marked included, so it can colour a
   // tile by its decision the way it does for photos.
-  const reviewableVideos = videos.filter((v) => videoStatuses[v] !== "delete");
+  const reviewableVideos = videos
+    .filter((v) => videoStatuses[v] !== "delete")
+    .filter(
+      (v) =>
+        !hideReviewed ||
+        ((videoStatuses[v] ?? "undecided") === "undecided" && !justDecidedVideos.has(v)),
+    );
   const hasVideos = reviewableVideos.length > 0;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
@@ -199,6 +234,15 @@ export default function App() {
   const clusterList = state.clusters ?? [];
   const singleList = state.singletons ?? [];
   const totalUnits = clusterList.length + singleList.length + videos.length;
+  // How many units the skip filter takes out of the queue — the same three
+  // lists, counted before they were filtered.
+  const hiddenUnits =
+    clusterList.filter((c) => isDecided(c, decisions)).length +
+    singleList.filter((c) => isDecided(c, decisions)).length +
+    videos.filter(
+      (v) => videoStatuses[v] !== "delete" &&
+        ((videoStatuses[v] ?? "undecided") !== "undecided" || justDecidedVideos.has(v)),
+    ).length;
   const reviewedUnits =
     clusterList.filter((c) => isDecided(c, decisions)).length +
     singleList.filter((c) => isDecided(c, decisions)).length +
@@ -241,7 +285,7 @@ export default function App() {
               tab === "clusters" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Clusters ({state.clusters.length})
+            Clusters ({visibleClusters.length})
           </button>
         )}
         {hasSingles && (
@@ -251,7 +295,7 @@ export default function App() {
               tab === "singles" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Singles ({state.singletons.length})
+            Singles ({visibleSingles.length})
           </button>
         )}
         {hasVideos && (
@@ -293,6 +337,26 @@ export default function App() {
         </button>
 
         <div className="ml-auto flex items-center gap-2">
+          {/* Skipping what is already decided. The count is what it is hiding,
+              so the button says what turning it off would bring back. */}
+          {hiddenUnits > 0 || hideReviewed ? (
+            <button
+              onClick={() => setHideReviewed((on) => !on)}
+              className={`text-xs rounded px-2 py-0.5 border transition-colors ${
+                hideReviewed
+                  ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+                  : "text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600"
+              }`}
+              title={
+                hideReviewed
+                  ? "Showing only what still needs a decision — click to show everything"
+                  : "Skip clusters, singles and videos that have already been decided"
+              }
+              data-testid="hide-reviewed"
+            >
+              {hideReviewed ? `Unreviewed only (${hiddenUnits} hidden)` : `Skip reviewed (${hiddenUnits})`}
+            </button>
+          ) : null}
           {totalUnits > 0 && (
             <span
               className="flex items-center gap-1.5 text-xs text-gray-400"
@@ -388,12 +452,12 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView folder={state.folder} clusters={state.clusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView folder={state.folder} clusters={visibleClusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
                 folder={state.folder}
-                singletons={state.singletons}
+                singletons={visibleSingles}
                 decisions={decisions}
                 favorites={favorites}
                 onRefresh={reload}

@@ -10,6 +10,8 @@ import pytest
 import requests
 from playwright.sync_api import Page, expect
 
+from utils import save_decisions
+
 from conftest import (  # noqa: F401
     BASE_URL,
     FIXTURE_RESULTS,
@@ -747,3 +749,115 @@ class TestLivePhotoHover:
         page_loaded.get_by_role("button", name="Timeline").click()
         settle(page_loaded)
         expect(page_loaded.get_by_test_id("live-badge")).to_have_count(1)
+
+
+# ---------------------------------------------------------------------------
+# Skipping what has already been reviewed
+# ---------------------------------------------------------------------------
+class TestSkipReviewed:
+    """Opening a trip whose camera folder was reviewed on its own adopts that
+    review, so the queue is full of clusters, singles and clips that already
+    have a decision. The header toggle takes them out of it."""
+
+    @pytest.fixture()
+    def video_project(self, tmp_path, webapp_server):
+        """A throwaway project holding one real clip and no photos."""
+        folder = tmp_path / "clips"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "results.json").write_text(json.dumps({"clusters": []}))
+        video = folder / "a.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(video)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, str(video.resolve())
+
+    def _decide(self, output_dir, cluster_index: int, status: str = "kept") -> None:
+        images = FIXTURE_RESULTS["clusters"][cluster_index]["images"]
+        save_decisions(output_dir, {img["path"]: status for img in images})
+
+    def test_absent_until_there_is_something_to_skip(self, page_loaded: Page, output_dir):
+        """A project with nothing decided has nothing to hide, and a control
+        that would do nothing is noise in a header this busy."""
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_count(0)
+
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text(
+            re.compile(r"^Skip reviewed")
+        )
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
+
+    def test_the_button_counts_what_it_would_hide(self, page_loaded: Page, output_dir):
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skip reviewed (1)")
+
+    def test_a_decided_cluster_leaves_the_queue(self, page_loaded: Page, output_dir):
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
+
+    def test_a_decided_single_leaves_the_queue(self, page_loaded: Page, output_dir):
+        # Cluster index 3 is a singleton in the fixture.
+        self._decide(output_dir, 3, "favorite")
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        expect(page_loaded.get_by_text(f"Singles ({_singleton_count() - 1})")).to_be_visible()
+
+    def test_turning_it_off_brings_them_back(self, page_loaded: Page, output_dir):
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        toggle = page_loaded.get_by_test_id("hide-reviewed")
+        toggle.click()
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
+        toggle.click()
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
+
+    def test_the_choice_survives_a_reload(self, page_loaded: Page, output_dir):
+        """It is a way of working, not a per-visit decision."""
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text(
+            re.compile(r"^Unreviewed only")
+        )
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
+
+    def test_progress_still_counts_everything(self, page_loaded: Page, output_dir):
+        """Hiding reviewed work must not make the project look smaller."""
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        total = _cluster_count() + _singleton_count()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text(f"1/{total} reviewed")
+
+    def test_a_reviewed_clip_leaves_the_videos_tab(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()
+        save_decisions(out, {video: "kept"})
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        expect(page_loaded.get_by_role("button", name=re.compile(r"^Videos"))).to_have_count(0)
