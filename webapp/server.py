@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ExifTags
 from pydantic import BaseModel
 
 # Must precede the local imports below so `uvicorn webapp.server:app` (run from
@@ -928,13 +928,27 @@ def export_clips_endpoint(req: ClipsExportRequest):
 
 
 def _read_shot_time(path: str) -> str | None:
+    """Capture time from EXIF, falling back to the file's mtime.
+
+    DateTimeOriginal lives in the EXIF sub-IFD, so it has to be read through
+    get_ifd(); getexif() alone returns IFD0 and never sees it. DateTime (306)
+    is only a fallback because it means "last modified" — a re-export or an
+    edit moves it while the real capture time stays put. Mirrors
+    scripts/pipeline.py:_parse_exif_timestamp so the two agree on a file.
+    """
     EXIF_DATETIME_ORIGINAL = 36867
     EXIF_DATETIME = 306
     try:
         with Image.open(path) as img:
             exif = img.getexif()
-            for tag in (EXIF_DATETIME_ORIGINAL, EXIF_DATETIME):
-                val = exif.get(tag)
+            candidates = []
+            try:
+                candidates.append(exif.get_ifd(ExifTags.IFD.Exif).get(EXIF_DATETIME_ORIGINAL))
+            except Exception:
+                pass
+            candidates.append(exif.get(EXIF_DATETIME_ORIGINAL))
+            candidates.append(exif.get(EXIF_DATETIME))
+            for val in candidates:
                 if val and isinstance(val, str):
                     try:
                         return datetime.strptime(val.strip(), "%Y:%m:%d %H:%M:%S").isoformat()
