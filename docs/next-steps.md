@@ -1,70 +1,93 @@
 # sightread — next steps
 
-_Last updated: 2026-09-11._
+_Last updated: 2026-09-12._
 
-Creating this file for the first time; there was no next-steps doc in the repo before.
+## Done since the last update
 
-## 1. `_read_shot_time` reads `DateTimeOriginal` from the wrong IFD
+- **`_read_shot_time` read the wrong IFD** (`d7b7e98`). It now reads
+  `DateTimeOriginal` out of the EXIF sub-IFD and keeps `DateTime` (306) only as a
+  fallback, matching `scripts/pipeline.py:_parse_exif_timestamp`. The regression
+  fixture has to synthesise a photo whose 306 and 36867 disagree — no file in the
+  archive does, which is why the bug survived.
+- **The re-shoot merge now fires across cameras, not only across framings**
+  (`96d13df`). See below for what opening the `iphone/` + `xt5/` trips turned up.
 
-`webapp/server.py:930` looks for tag 36867 on `Image.getexif()`, which returns IFD0.
-`DateTimeOriginal` lives in the EXIF sub-IFD (`0x8769`), so the lookup always misses:
+## 1. Where the seven 2026 trips landed
 
-```python
-EXIF_DATETIME_ORIGINAL = 36867
-exif = img.getexif()
-val = exif.get(tag)          # always None for 36867
-```
+Every trip on h0 with an `iphone/` folder has now been through the pipeline as a
+single trip project:
 
-Verified on `Trips/2026_09_Hoh_River_Trail/xt5/DSCF5642.JPG`:
+| Trip | stills (iphone / xt5) | clusters | largest | cross-device clusters |
+|---|---|---:|---:|---:|
+| `2026_01_Japan` | 246 / 101 | 261 | 6 | 8 |
+| `2026_07_Hawaii` | 97 / 345 | 237 | 47 | 6 |
+| `2026_09_Hoh_River_Trail` | 11 / 41 (+368 `google photos/`) | 185 | 44 | 5 |
+| `2026_08_Portugal` | 19 / 268 | 167 | 10 | 0 |
+| `2026_02_Yellowstone` | 25 / 18 | 33 | 4 | 0 |
+| `2026_05_Vegas` | 2 / 3 (+1 `shared/`) | 5 | 2 | 0 |
+| `2026_07_Rattlesnake` | 0 / 5 | 5 | 1 | 0 |
 
-| read | value |
-|---|---|
-| `getexif().get(36867)` | `None` ← what the server reads |
-| `getexif().get(306)` | `2026:09:06 13:48:52` |
-| `get_ifd(ExifTags.IFD.Exif).get(36867)` | `2026:09:06 13:48:52` ← the real value |
+The two large clusters are both real: Hawaii's 47 is one 48-second X-T5 burst of
+the same kitchen scene, and Hoh's 44 is the single-viewpoint burst that `a52f2f9`
+capped. Neither grew when the cross-camera window widened, so the chain-span cap
+still holds.
 
-**Nothing is currently wrong in the UI.** The function falls through to tag 306
-(`DateTime`), and every source in the archive writes it — checked all 11 iPhone 14 stills
-and all 368 Google Photos stills in the Hoh River trip, plus the X-T5 above: tag 306
-matched `DateTimeOriginal` in every case. So this is latent, not a live defect.
+Yellowstone's and Portugal's zeros are correct, not misses. Their closest
+cross-device pairs are a day (Yellowstone, 96,000s) and four hours (Portugal,
+14,374s at distance 0.089 — the same subject revisited) apart, far outside any
+merge window.
 
-**Why fix it anyway:** 306 is semantically "last modified", not "captured". Anything that
-rewrites a file — an editor, a re-export, a stripped-metadata download — can move it while
-`DateTimeOriginal` stays put, and then shot times silently shift. The failure is invisible:
-there is no error, the photos just sort wrong. `scripts/pipeline.py:100` already does it
-correctly via `exif.get_ifd(ExifTags.IFD.Exif)`, so the two code paths can disagree about
-the same file today.
+**What the Japan run exposed:** only 3 of 272 clusters mixed devices, while the
+embeddings held 44 phone/camera pairs within 0.25 cosine distance, the closest
+nine at 0.081-0.16. Stage 4 fired solely on a portrait/landscape difference, and
+picking up the other camera does not change how you hold it — both are portrait.
+The Hoh trip hid this because the phone was held portrait and the X-T3 landscape.
+The fix gives cross-camera merges their own 300s window (the Japan pairs sit
+126-331s apart) and the *same-scene* ceiling of 0.22 rather than the 0.38
+rotation one — at 0.38 same-framing merges pulled in neighbouring compositions,
+notably a 12-photo Hoh riverbed group holding three different subjects.
 
-**First action:** change `_read_shot_time` to read the sub-IFD first and keep 306 only as
-a fallback, mirroring `scripts/pipeline.py:97-100`. A regression test wants a fixture whose
-306 and 36867 deliberately differ — none of the real archive files have that, which is
-exactly why the bug survived.
+## 2. These trips are mostly video, and the pipeline barely looks at them
 
-## 2. Exercise trip projects on an `xt5/` + `iphone/` pairing
+Counting files rather than stills changes the picture completely:
 
-The device clustering shipped in `ae276ba` and tuned in `a52f2f9` was validated only on
-`2026_09_Hoh_River_Trail`, where the second device folder was `google photos/` — 531
-phone files against 114 camera files, and the cross-device pairs were re-shoots of the
-same moment.
+| Trip | stills | `.MOV` | of those, Live Photo motion |
+|---|---:|---:|---:|
+| `2026_01_Japan` | 347 | 272 | 186 |
+| `2026_02_Yellowstone` | 43 | 58 | 10 |
+| `2026_07_Rattlesnake` | 5 | 6 | 1 |
 
-As of 2026-09-11 six more trips on h0 have an `iphone/` folder next to `xt5/`, which is
-the shape most trips will have from now on and has not been through the pipeline:
+Yellowstone has more video files than stills, and Rattlesnake's single `iphone/`
+file is a video. Live Photo pairing handles the motion files (186 paired on Japan,
+against 33 on the trip the feature was built against), but the standalone clips —
+34 on Japan's phone, 52 on its camera — get no clustering, no scoring and no
+review flow. `--video-highlights` has been off by default since 2026-09-10 because
+the clipfarm step costs more than it returned.
 
-| Trip | `xt5/` | `iphone/` |
-|---|---:|---:|
-| `2026_01_Japan` | 454 | 469 |
-| `2026_08_Portugal` | 606 | 41 |
-| `2026_07_Hawaii` | 778 | 163 |
-| `2026_02_Yellowstone` | 66 | 53 |
+**First action:** decide what a trip project should say about a standalone clip at
+all. Even shot time and a device badge in the gallery would beat the current
+silence, and that needs no model.
 
-**Why it matters:** stage 4's portrait/landscape re-shoot merge is what produced the
-74-photo cascade that `a52f2f9` fixed, and its span cap was tuned against one trip's
-cross-device distances. A near-even two-device split (Japan) stresses it differently from
-a 5:1 split.
+## 3. Open questions on the cross-camera merge
 
-**First action:** open `Trips/2026_01_Japan` as a trip project, check the largest clusters
-and the cross-device merge count the way the Hoh River analysis did. Hawaii next, as the
-most lopsided.
+- The 300s window and 0.22 ceiling were fitted to Japan and Hoh and sanity-checked
+  on Hawaii. Portugal contributed nothing to the fit (19 phone stills, none close
+  in time to a camera frame). Worth re-measuring once another near-even two-device
+  trip lands.
+- A subject revisited hours later — Portugal's 0.089 pair, four hours apart — is
+  deliberately left in separate clusters, since `MAX_CLUSTER_GAP_S` is an hour.
+  Whether trip review wants a looser "same place, another day" grouping is a
+  product question, not a threshold one, and nothing in the UI expresses it yet.
+- The X-T5 shoots portrait more than expected (64 of 101 stills on Japan). That is
+  what makes the framing-only rule miss so much, and it is worth confirming it
+  holds on the next trip rather than being a Japan habit.
 
-Live Photo handling gets exercised for free here — the six `iphone/` folders carry their
-`.MOV` motion files and `.AAE` sidecars, where Hoh River had only 33 files to test against.
+## 4. Cached shot times predate the EXIF fix
+
+`shot_times.json` in each project dir was written by the old reader, and nothing
+invalidates it on a code change. Every value happens to be identical under the new
+reader — every source in the archive writes 306 and `DateTimeOriginal` the same —
+so there is nothing to repair today. A file that arrives with the two disagreeing
+would be read correctly but then served from a stale cache entry, so if such a
+file ever shows up, delete the project's `shot_times.json` rather than debugging
+the reader.
