@@ -752,6 +752,65 @@ class TestLivePhotoHover:
 
 
 # ---------------------------------------------------------------------------
+# How big is this cluster
+# ---------------------------------------------------------------------------
+class TestClusterSize:
+    """How many photos you are deciding between, and how loud that should be.
+
+    The count used to live only inside the cluster dropdown's own label — the
+    one place you cannot read it while looking at the photos. Size also decides
+    what kind of job this is: a pair is a glance, Hawaii's 47-frame burst is
+    not, and the colour says which before you start.
+    """
+
+    def _sizes(self):
+        return [len(c["images"]) for c in FIXTURE_RESULTS["clusters"] if len(c["images"]) > 1]
+
+    def test_the_count_is_on_the_bar(self, page_loaded: Page):
+        first = self._sizes()[0]
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text(f"{first} photos")
+
+    def test_it_follows_the_cluster_you_move_to(self, page_loaded: Page):
+        sizes = self._sizes()
+        page_loaded.get_by_role("button", name="→", exact=True).click()
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text(f"{sizes[1]} photos")
+
+    def test_a_small_cluster_is_quiet(self, page_loaded: Page):
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_class(re.compile(r"bg-blue-50"))
+
+    def test_a_burst_is_loud(self, page_loaded: Page, output_dir):
+        """A 20-plus cluster is the shape that hides work behind a best pick."""
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        first = results["clusters"][0]
+        template = first["images"][0]
+        first["images"] = [
+            {**template, "path": f"demo_photos/burst_{i}.JPG", "rank": i + 1}
+            for i in range(24)
+        ]
+        (output_dir / "results.json").write_text(json.dumps(results))
+        page_loaded.reload()
+        settle(page_loaded)
+
+        badge = page_loaded.get_by_test_id("cluster-size")
+        expect(badge).to_have_text("24 photos")
+        expect(badge).to_have_class(re.compile(r"bg-red-100"))
+
+    def test_the_middle_band_sits_between_them(self, page_loaded: Page, output_dir):
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        first = results["clusters"][0]
+        template = first["images"][0]
+        first["images"] = [
+            {**template, "path": f"demo_photos/mid_{i}.JPG", "rank": i + 1}
+            for i in range(9)
+        ]
+        (output_dir / "results.json").write_text(json.dumps(results))
+        page_loaded.reload()
+        settle(page_loaded)
+
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_class(re.compile(r"bg-orange-100"))
+
+
+# ---------------------------------------------------------------------------
 # Skipping what has already been reviewed
 # ---------------------------------------------------------------------------
 class TestSkipReviewed:
