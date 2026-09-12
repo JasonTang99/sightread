@@ -910,6 +910,33 @@ class TestSkipReviewed:
         total = _cluster_count() + _singleton_count()
         expect(page_loaded.get_by_test_id("session-progress")).to_contain_text(f"1/{total} reviewed")
 
+    def test_enter_does_not_skip_the_next_cluster(self, page_loaded: Page, output_dir):
+        """Hide-reviewed drops the cluster you just confirmed. Advancing by
+        index as well walks past the one that slid into its place."""
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        template = results["clusters"][0]["images"][0]
+        results["clusters"].insert(2, {
+            "cluster_id": 99,
+            "best_image": "demo_photos/extra1.JPG",
+            "images": [
+                {**template, "path": f"demo_photos/extra{i}.JPG", "rank": i + 1}
+                for i in range(4)
+            ],
+        })
+        (output_dir / "results.json").write_text(json.dumps(results))
+        # A decided singleton makes the skip control appear without touching
+        # the cluster queue, so the first Enter is the one under test.
+        self._decide(output_dir, 3)
+        page_loaded.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
+        page_loaded.reload()
+        settle(page_loaded)
+
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("3 photos")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
+        expect(page_loaded.locator("select")).to_have_value("0")
+
     def test_a_reviewed_clip_leaves_the_videos_tab(self, page_loaded: Page, video_project):
         out, video = video_project
         page_loaded.goto(BASE_URL)
