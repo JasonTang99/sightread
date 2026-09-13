@@ -208,6 +208,24 @@ class TestToggle:
         page_loaded.locator("button.bg-green-50").first.click()
         expect(page_loaded.locator("button.bg-red-50")).to_have_count(3)
 
+    def test_a_partial_decision_is_honoured(self, page_loaded: Page, output_dir):
+        """Keep/delete/star belong to the photo, not the whole cluster.
+
+        Rank-1 starts keep and rank-2 starts delete when nothing is stored.
+        After a child-folder review those statuses are already on disk —
+        they must show even though the rest of the cluster is still blank.
+        """
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        save_decisions(output_dir, {
+            images[0]["path"]: "to_delete",
+            images[1]["path"]: "favorite",
+        })
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
+
 
 # ---------------------------------------------------------------------------
 # Keep Best

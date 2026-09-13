@@ -92,11 +92,13 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
       setKeeps(saved);
     } else {
       const init: Record<string, boolean> = {};
-      // Reopening a decided cluster restores what was kept; an undecided one
-      // pre-selects the top-ranked image.
-      const decided = isDecided(cluster, decisions);
+      // Decisions are per photo. A cluster can mix adopted keeps (the XT5
+      // folder already reviewed) with still-blank iPhone frames — each
+      // photo that has a status uses it; the rest fall back to rank.
       for (const img of cluster.images) {
-        init[img.path] = decided ? !isDoomed(decisions[img.path]) : img.rank === 1;
+        init[img.path] = img.path in decisions
+          ? !isDoomed(decisions[img.path])
+          : img.rank === 1;
       }
       setKeeps(init);
     }
