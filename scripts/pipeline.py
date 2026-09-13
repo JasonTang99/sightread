@@ -175,6 +175,80 @@ def load_paths_and_meta(
     return paths, timestamps, orientations, models
 
 
+def _day_chunks(
+    paths: list[str], timestamps: list[float | None] | None
+) -> list[tuple[str, list[str]]]:
+    """Split photos into one chunk per shooting day, in day order.
+
+    The expensive stages checkpoint their cache after each chunk. A 9,500-photo
+    trip scores for two hours, and the cache used to be written only once the
+    whole stage finished — a crash at 90% threw all of it away. A day is the
+    natural unit: nothing clusters across a one-hour gap, let alone a night.
+    Undated photos trail as one last chunk. Input order is kept within a day.
+    """
+    days: dict[str, list[str]] = {}
+    undated: list[str] = []
+    for i, p in enumerate(paths):
+        t = timestamps[i] if timestamps is not None else None
+        if t is None:
+            undated.append(p)
+        else:
+            days.setdefault(datetime.fromtimestamp(t).date().isoformat(), []).append(p)
+    chunks = sorted(days.items())
+    if undated:
+        chunks.append(("undated", undated))
+    return chunks
+
+
+def _load_path_cache(cache_path: Path, paths: list[str], load) -> dict | None:
+    """Rows of a path-keyed cache, or None when it cannot be used incrementally.
+
+    Unusable means absent, unreadable, holding photos no longer in the folder
+    (the pre-existing rule: that triggers a full recompute), or — new with
+    checkpointing, which rewrites the pair many times a run — a data file whose
+    row count disagrees with its sidecar, which would map rows to the wrong
+    photos.
+    """
+    sidecar = cache_path.with_suffix(".paths.json")
+    if not (cache_path.exists() and sidecar.exists()):
+        return None
+    try:
+        cached_paths = json.loads(sidecar.read_text())
+        rows = load(cache_path)
+    except Exception:
+        return None
+    if not set(cached_paths) <= set(paths):
+        return None
+    if any(len(v) != len(cached_paths) for v in rows.values()):
+        warnings.warn(f"{cache_path.name} does not match its sidecar — recomputing")
+        return None
+    return {k: dict(zip(cached_paths, v)) for k, v in rows.items()}
+
+
+def _write_path_cache(cache_path: Path, paths: list[str], write) -> None:
+    """Write a data file and its paths sidecar, each via rename.
+
+    `write(fileobj)` writes the data. The data file is replaced first, so a
+    crash between the two renames leaves a longer data file than sidecar, which
+    _load_path_cache rejects rather than misreads.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = cache_path.with_suffix(".paths.json")
+    tmp_data = cache_path.with_name(cache_path.name + ".tmp")
+    tmp_side = sidecar.with_name(sidecar.name + ".tmp")
+    with open(tmp_data, "wb") as f:
+        write(f)
+    tmp_side.write_text(json.dumps(paths))
+    os.replace(tmp_data, cache_path)
+    os.replace(tmp_side, sidecar)
+
+
+def _release_gpu() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Embeddings (mean-pool patch tokens + CLS concat, flip TTA, parallel decode)
 # ---------------------------------------------------------------------------
@@ -251,30 +325,6 @@ def _load_embedding_model(model_name: str = MODEL_NAME, device: str = DEVICE):
     return model, processor, 1 + num_register
 
 
-def _run_embedding_model(
-    paths: list[str],
-    device: str = DEVICE,
-    model_name: str = MODEL_NAME,
-    batch_size: int = BATCH_SIZE,
-    num_workers: int = NUM_WORKERS,
-    flip_tta: bool = False,
-) -> np.ndarray:
-    """Compute L2-normalized embeddings. No caching. Returns float32 [N, 2D]."""
-    model, processor, num_skip = _load_embedding_model(model_name, device)
-
-    embeddings = _embed_with_model(
-        paths, model, processor, num_skip,
-        device=device, batch_size=batch_size, num_workers=num_workers, flip_tta=flip_tta,
-    )
-
-    del model, processor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return embeddings
-
-
 def compute_embeddings(
     paths: list[str],
     cache_path: Path,
@@ -283,46 +333,51 @@ def compute_embeddings(
     batch_size: int = BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     flip_tta: bool = False,
+    timestamps: list[float | None] | None = None,
 ) -> np.ndarray:
-    """Compute or load cached embeddings. Incremental: only new paths are processed."""
-    paths_sidecar = cache_path.with_suffix(".paths.json")
+    """Compute or load cached embeddings.
 
-    if cache_path.exists() and paths_sidecar.exists():
-        cached_paths = json.loads(paths_sidecar.read_text())
-        cached_set = set(cached_paths)
-        new_paths = [p for p in paths if p not in cached_set]
+    Incremental: only photos missing from the cache are embedded, one shooting
+    day at a time, and the cache is written after every day.
+    """
+    cached = _load_path_cache(cache_path, paths, lambda f: {"emb": np.load(str(f))})
+    done: dict[str, np.ndarray] = cached["emb"] if cached else {}
+    todo = [i for i, p in enumerate(paths) if p not in done]
 
-        if cached_set <= set(paths):
-            old_embs = np.load(str(cache_path))
-            old_idx = {p: i for i, p in enumerate(cached_paths)}
+    if not todo:
+        print(f"Loading cached embeddings ({len(paths)} paths)")
+        return np.stack([done[p] for p in paths]).astype(np.float32)
+    if done:
+        print(f"Incremental embeddings: {len(done)} cached + {len(todo)} new")
 
-            if not new_paths:
-                print(f"Loading cached embeddings ({len(paths)} paths)")
-                return np.array([old_embs[old_idx[p]] for p in paths], dtype=np.float32)
+    chunks = _day_chunks(
+        [paths[i] for i in todo],
+        [timestamps[i] for i in todo] if timestamps is not None else None,
+    )
+    model, processor, num_skip = _load_embedding_model(model_name, device)
+    try:
+        for day, chunk in chunks:
+            embs = _embed_with_model(
+                chunk, model, processor, num_skip,
+                device=device, batch_size=batch_size, num_workers=num_workers, flip_tta=flip_tta,
+                desc=f"DINOv3 embeddings {day} ({len(chunk)} images)",
+            )
+            done.update(zip(chunk, embs))
+            have = [p for p in paths if p in done]
+            _write_path_cache(
+                cache_path, have,
+                lambda f: np.save(f, np.stack([done[p] for p in have]).astype(np.float32)),
+            )
+    finally:
+        del model, processor
+        _release_gpu()
 
-            print(f"Incremental embeddings: {len(cached_paths)} cached + {len(new_paths)} new")
-            new_embs = _run_embedding_model(new_paths, device, model_name, batch_size, num_workers, flip_tta)
-            new_idx = {p: i for i, p in enumerate(new_paths)}
-            d = old_embs.shape[1]
-            result = np.empty((len(paths), d), dtype=np.float32)
-            for i, p in enumerate(paths):
-                result[i] = old_embs[old_idx[p]] if p in old_idx else new_embs[new_idx[p]]
-            np.save(str(cache_path), result)
-            paths_sidecar.write_text(json.dumps(paths))
-            print(f"Updated embeddings cache → {len(paths)} total")
-            return result
-
-    # Full recompute
-    embeddings = _run_embedding_model(paths, device, model_name, batch_size, num_workers, flip_tta)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(str(cache_path), embeddings)
-    paths_sidecar.write_text(json.dumps(paths))
     # Remove stale .hash sidecar from old cache format
     old_hash = cache_path.with_suffix(".hash")
     if old_hash.exists():
         old_hash.unlink()
-    print(f"Saved embeddings to {cache_path}  shape={embeddings.shape}")
-    return embeddings
+    print(f"Saved embeddings to {cache_path}  ({len(paths)} total, {len(chunks)} day checkpoint(s))")
+    return np.stack([done[p] for p in paths]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -768,10 +823,31 @@ def _emit_thumbs(thumb_dir: Path, path: str, img) -> None:
         warnings.warn(f"Thumbnail failed {path}: {exc}")  # the webapp renders it on demand
 
 
-def _run_score_model(
-    paths: list[str], device: str = DEVICE, thumb_dir: Path | None = None
+SCORE_EXTRA_KEYS = ["sharpness", "exposure_penalty", "face_bonus"]
+
+
+def _load_score_models(device: str = DEVICE) -> tuple[dict, object]:
+    """The IQA metrics that loaded, and the face detector (or None)."""
+    import pyiqa
+
+    metrics: dict[str, object] = {}
+    for name in ["musiq", "nima", "clipiqa+", "laion_aes"]:
+        try:
+            metrics[name] = pyiqa.create_metric(name, device=device)
+        except Exception as exc:
+            warnings.warn(f"Metric {name} unavailable ({exc}) — skipping")
+    return metrics, _load_face_detector()
+
+
+def _score_with_models(
+    paths: list[str],
+    metrics: dict,
+    detector,
+    device: str = DEVICE,
+    thumb_dir: Path | None = None,
+    desc: str | None = None,
 ) -> dict[str, np.ndarray]:
-    """Batch-score images. Returns dict of raw component arrays.
+    """Batch-score images with loaded models. Returns dict of raw component arrays.
 
     Writes the webapp's thumbnails as a side effect when thumb_dir is given:
     scoring already decodes every photo off the NAS, which is the expensive
@@ -779,22 +855,10 @@ def _run_score_model(
     being spent. Rendering them later from the webapp instead costs ~1310ms
     per photo, and costs it while someone is waiting to look at them.
     """
-    import pyiqa
     import torchvision.transforms.functional as TF
 
-    metric_names = ["musiq", "nima", "clipiqa+", "laion_aes"]
-    metrics: dict[str, object] = {}
-    for name in metric_names:
-        try:
-            metrics[name] = pyiqa.create_metric(name, device=device)
-        except Exception as exc:
-            warnings.warn(f"Metric {name} unavailable ({exc}) — skipping")
-
-    detector = _load_face_detector()
     n = len(paths)
-    raw: dict[str, list[float]] = {
-        k: [0.0] * n for k in list(metrics.keys()) + ["sharpness", "exposure_penalty", "face_bonus"]
-    }
+    raw: dict[str, list[float]] = {k: [0.0] * n for k in list(metrics.keys()) + SCORE_EXTRA_KEYS}
 
     def _load_img(p: str):
         try:
@@ -809,7 +873,7 @@ def _run_score_model(
             warnings.warn(f"Open failed {p}: {exc}")
             return None
 
-    for batch_start in tqdm(range(0, n, SCORE_BATCH_SIZE), desc=f"Scoring images ({n} total)"):
+    for batch_start in tqdm(range(0, n, SCORE_BATCH_SIZE), desc=desc or f"Scoring images ({n} total)"):
         batch_end = min(batch_start + SCORE_BATCH_SIZE, n)
         imgs = [_load_img(paths[i]) for i in range(batch_start, batch_end)]
 
@@ -858,10 +922,6 @@ def _run_score_model(
             raw["exposure_penalty"][batch_start + i] = _exposure_penalty(img)
             raw["face_bonus"][batch_start + i] = _face_bonus(img, detector)
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     return {k: np.asarray(v, dtype=np.float32) for k, v in raw.items()}
 
 
@@ -870,58 +930,61 @@ def score_images(
     cache_path: Path,
     device: str = DEVICE,
     thumb_dir: Path | None = None,
+    timestamps: list[float | None] | None = None,
 ) -> tuple[list[float], dict]:
-    """Compute or load cached scores. Incremental: only new paths are scored.
+    """Compute or load cached scores.
 
-    Cache stores raw components; scores recomputed on load so SCORE_WEIGHTS changes
+    Incremental: only photos missing from the cache are scored, one shooting
+    day at a time, and the cache is written after every day. The cache stores
+    raw components; scores are recomputed on load so SCORE_WEIGHTS changes
     invalidate nothing.
     """
-    paths_sidecar = cache_path.with_suffix(".paths.json")
+    def _load(f):
+        data = np.load(str(f))
+        return {k: data[k] for k in data.files}
 
-    if cache_path.exists() and paths_sidecar.exists():
-        cached_paths = json.loads(paths_sidecar.read_text())
-        cached_set = set(cached_paths)
-        new_paths = [p for p in paths if p not in cached_set]
+    cached = _load_path_cache(cache_path, paths, _load)
+    have_all = cached is not None and all(p in next(iter(cached.values()), {}) for p in paths)
+    if have_all:
+        print(f"Loading cached scores ({len(paths)} paths)")
+        components = {k: np.array([v[p] for p in paths], dtype=np.float32) for k, v in cached.items()}
+        return _compute_scores_from_components(components), components
 
-        if cached_set <= set(paths):
-            data = np.load(str(cache_path))
-            old_components = {k: data[k] for k in data.files}
-            old_idx = {p: i for i, p in enumerate(cached_paths)}
+    metrics, detector = _load_score_models(device)
+    keys = list(metrics.keys()) + SCORE_EXTRA_KEYS
+    if cached is not None and set(cached) != set(keys):
+        cached = None  # metric added/removed → full recompute
+    done: dict[str, dict[str, float]] = cached or {k: {} for k in keys}
+    todo = [i for i, p in enumerate(paths) if p not in done[keys[0]]]
+    if cached:
+        print(f"Incremental scoring: {len(paths) - len(todo)} cached + {len(todo)} new")
 
-            if not new_paths:
-                print(f"Loading cached scores ({len(paths)} paths)")
-                components = {
-                    k: np.array([v[old_idx[p]] for p in paths], dtype=np.float32)
-                    for k, v in old_components.items()
-                }
-                return _compute_scores_from_components(components), components
+    chunks = _day_chunks(
+        [paths[i] for i in todo],
+        [timestamps[i] for i in todo] if timestamps is not None else None,
+    )
+    try:
+        for day, chunk in chunks:
+            new = _score_with_models(
+                chunk, metrics, detector, device, thumb_dir,
+                desc=f"Scoring {day} ({len(chunk)} images)",
+            )
+            for k in keys:
+                done[k].update(zip(chunk, new[k]))
+            have = [p for p in paths if p in done[keys[0]]]
+            _write_path_cache(
+                cache_path, have,
+                lambda f: np.savez(f, **{
+                    k: np.array([done[k][p] for p in have], dtype=np.float32) for k in keys
+                }),
+            )
+    finally:
+        del metrics, detector
+        _release_gpu()
 
-            print(f"Incremental scoring: {len(cached_paths)} cached + {len(new_paths)} new")
-            new_components = _run_score_model(new_paths, device, thumb_dir)
-
-            if set(new_components.keys()) == set(old_components.keys()):
-                new_idx = {p: i for i, p in enumerate(new_paths)}
-                merged = {}
-                for k in old_components:
-                    arr = np.empty(len(paths), dtype=np.float32)
-                    for i, p in enumerate(paths):
-                        arr[i] = old_components[k][old_idx[p]] if p in old_idx else new_components[k][new_idx[p]]
-                    merged[k] = arr
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez(str(cache_path), **merged)
-                paths_sidecar.write_text(json.dumps(paths))
-                print(f"Updated scores cache → {len(paths)} total")
-                return _compute_scores_from_components(merged), merged
-            # Keys differ (metric added/removed) → fall through to full recompute
-
-    # Full recompute (also handles legacy cache without paths sidecar)
-    components = _run_score_model(paths, device, thumb_dir)
-    scores = _compute_scores_from_components(components)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(str(cache_path), **components)
-    paths_sidecar.write_text(json.dumps(paths))
-    print(f"Saved scores to {cache_path}")
-    return scores, components
+    print(f"Saved scores to {cache_path}  ({len(paths)} total, {len(chunks)} day checkpoint(s))")
+    components = {k: np.array([done[k][p] for p in paths], dtype=np.float32) for k in keys}
+    return _compute_scores_from_components(components), components
 
 
 # ---------------------------------------------------------------------------
@@ -1197,6 +1260,7 @@ def run_pipeline(
         cache_path=emb_cache,
         batch_size=batch_size,
         flip_tta=flip_tta,
+        timestamps=timestamps,
     )
 
     clusters = cluster_embeddings(
@@ -1214,7 +1278,9 @@ def run_pipeline(
         cross_threshold=cross_threshold,
     )
 
-    scores, components = score_images(paths, cache_path=score_cache, thumb_dir=out)
+    scores, components = score_images(
+        paths, cache_path=score_cache, thumb_dir=out, timestamps=timestamps,
+    )
     motions = media.motion_map(paths)
     if motions:
         print(f"Paired {len(motions)} Live Photo motion file(s) with their stills")
