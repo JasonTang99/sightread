@@ -57,22 +57,31 @@ def count_images(folder: Path, cap: int = 20_000) -> int:
     return n
 
 
-# What a pipeline run costs, fitted to the runs of 2026-09-12 on the RTX 3060 Ti.
-# Scoring dominates and grows with file size, because every photo is decoded at
-# full resolution for the IQA models and the thumbnails:
+# What a pipeline run costs, least-squares fitted to whole-run wall time of the
+# batch of 2026-09-13 on the RTX 3060 Ti:
 #
-#   run          avg file   scoring / photo
-#   Vegas         1.2 MB      0.40 s
-#   Hoh           5.0 MB      0.61 s
-#   Japan         7.6 MB      0.78 s
-#   Portugal     17.7 MB      0.89 s
-#   Hawaii       15.2 MB      1.32 s   (hit the per-image fallback)
+#   run                        pending      MB   actual   fit    old fit
+#   2026_03_Alyeska                 85     232     96 s   91 s     83 s
+#   2026_04_Mammoth_Easter         106     231    118 s  107 s     93 s
+#   2026_01_Panorama               210     363    169 s  186 s    148 s
+#   2026_07_Climbing                98    1632    121 s  123 s    180 s
+#   2026_07_Hawaii (google photos) 731    1944    597 s  594 s    485 s
 #
-# Embedding measured 0.07 s/photo on Vegas and is folded into the intercept.
-# The fixed part is EXIF reading and loading both model stacks. Expect ±30%.
-ETA_FIXED_S = 30.0
-ETA_PER_PHOTO_S = 0.45
-ETA_PER_MB_S = 0.065
+# The 2026-09-12 fit (30 s + 0.45 s/photo + 0.065 s/MB) was built from per-photo
+# scoring rates and ran 12-21% low on every trip here while overcharging big
+# files by half: Climbing's 17 MB photos cost barely more than Alyeska's 3 MB
+# ones. Per-photo work now carries more of the cost, partly because each shooting
+# day starts its own DataLoader since the per-day checkpoints (52a6cd3), roughly
+# 2-3 s a day per stage. The estimate cannot see day counts without reading EXIF,
+# so that folds into the per-photo rate.
+#
+# Every run in the batch shared the GPU with ~2.9 GB of other processes and hit
+# the clipiqa+ per-image OOM fallback, so a run with the card to itself should
+# come in under this. Within 10% on these five, but three constants fitted to five
+# runs is thin — still expect ±30% elsewhere.
+ETA_FIXED_S = 25.0
+ETA_PER_PHOTO_S = 0.74
+ETA_PER_MB_S = 0.016
 
 
 @dataclass
