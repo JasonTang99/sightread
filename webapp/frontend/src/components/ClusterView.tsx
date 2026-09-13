@@ -129,6 +129,14 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
     setKeeps((prev) => ({ ...prev, [path]: !prev[path] }));
   };
 
+  // Keep this photo and mark the rest of the cluster for deletion. Starred
+  // photos are kept regardless, so this leaves them alone.
+  const keepOnly = (path: string) => {
+    const next: Record<string, boolean> = {};
+    for (const img of cluster.images) next[img.path] = img.path === path;
+    setKeeps(next);
+  };
+
   const star = (path: string) => {
     if (!favSet.has(path)) setKeeps((prev) => ({ ...prev, [path]: true }));
     onToggleFavorite(path).catch((err) =>
@@ -279,10 +287,14 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
         e.preventDefault();
         focusImage(Math.max(0, focusedImg - cols));
         break;
-      case " ":
+      case " ": {
         e.preventDefault();
-        if (cluster.images[focusedImg]) toggle(cluster.images[focusedImg].path);
+        const img = cluster.images[focusedImg];
+        if (!img) break;
+        if (e.shiftKey) keepOnly(img.path);
+        else toggle(img.path);
         break;
+      }
       case "K":
         e.preventDefault();
         keepBest();
