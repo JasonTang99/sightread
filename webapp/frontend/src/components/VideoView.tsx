@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
+import { nextPendingIndex } from "../decisions";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
@@ -195,6 +196,8 @@ interface Props {
   // Server-side decision per video. "reviewed" means exactly this, not a
   // browser-local memory of having pressed enter — see the note on `reviewed`.
   statuses?: VideoStatuses;
+  // Enter jumps to the next unreviewed clip instead of the next one.
+  skipReviewed?: boolean;
   onError: (msg: string) => void;
   onConfirmed: () => Promise<void>;
   // Header session-progress reads App videoStatuses, which persist() does not
@@ -212,6 +215,7 @@ interface Props {
 export function VideoView({
   videos,
   statuses = {},
+  skipReviewed = false,
   onError,
   onConfirmed,
   onPersisted,
@@ -241,6 +245,8 @@ export function VideoView({
     [statuses, justDecided],
   );
   const [submitting, setSubmitting] = useState(false);
+  // Clips confirmed with Enter this session, ahead of persist() coming back.
+  const enteredRef = useRef<Set<string>>(new Set());
   // Browsers block autoplay *with sound* until the user interacts with the page.
   // Start muted so the clip always plays, then unmute on the first gesture.
   const [soundOn, setSoundOn] = useState(false);
@@ -552,7 +558,15 @@ export function VideoView({
     if (e.key === "Enter") {
       e.preventDefault();
       if (current) persist(current, favorites.includes(current) || (keeps[current] ?? true));
-      setIdx((i) => Math.min(videos.length - 1, i + 1));
+      // justDecided only fills in once persist() hears back, so a quick
+      // second Enter would still see this clip as unreviewed and wrap back
+      // onto it. The ref is updated synchronously.
+      if (current) enteredRef.current.add(current);
+      const pending = skipReviewed
+        ? nextPendingIndex(videos.length, idx, (i) =>
+            !reviewed(videos[i]) && !enteredRef.current.has(videos[i]))
+        : -1;
+      setIdx(pending !== -1 ? pending : Math.min(videos.length - 1, idx + 1));
       return;
     }
     // 1–9: apply tag by slot (same convention as cluster rank keys).

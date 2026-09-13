@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
-import { isDecided, isDoomed, isWiped } from "../decisions";
+import { isDecided, isDoomed, isWiped, nextPendingIndex } from "../decisions";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
@@ -14,6 +14,8 @@ interface Props {
   folder?: string;
   clusters: Cluster[];
   decisions: PhotoDecisions;
+  // Confirm jumps to the next undecided cluster instead of the next one.
+  skipReviewed?: boolean;
   favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
@@ -38,7 +40,7 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ folder, clusters: allClusters, decisions, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
+export function ClusterView({ folder, clusters: allClusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
     const first = allClusters.findIndex((c) => !isDecided(c, decisions));
@@ -52,9 +54,9 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
-  // After confirm the current row may leave the list (hide-reviewed). Index
-  // +1 then walks past the cluster that slid into its place. Remember who
-  // was next and land on that id once the list updates.
+  // Where confirm lands, by id: the list is rebuilt when the refresh comes
+  // back (and can change shape under the fully-deleted filter), so an index
+  // taken before it may no longer point at the same cluster.
   const landOnRef = useRef<number | "stay" | undefined>(undefined);
 
   const wipedCount = useMemo(
@@ -204,7 +206,12 @@ export function ClusterView({ folder, clusters: allClusters, decisions, favorite
         }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
-      const next = clusters[clusterIdx + 1];
+      // With skip on, jump past clusters that already have a decision —
+      // everything stays in the list for ←/→, only this hop changes.
+      const pending = skipReviewed
+        ? nextPendingIndex(clusters.length, clusterIdx, (i) => !isDecided(clusters[i], decisions))
+        : -1;
+      const next = clusters[pending !== -1 ? pending : clusterIdx + 1];
       landOnRef.current = next ? next.cluster_id : "stay";
       await onRefresh();
     } catch (e) {

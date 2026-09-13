@@ -13,6 +13,18 @@ export function isDecided(cluster: Cluster, decisions: PhotoDecisions): boolean 
   return cluster.images.length > 0 && cluster.images.every((img) => img.path in decisions);
 }
 
+// Where confirm lands with "skip reviewed" on: the next still-pending entry
+// after `from`, wrapping round to the top, never `from` itself — it was just
+// confirmed, and the decision that says so has not come back from the server
+// yet. -1 when nothing else is pending.
+export function nextPendingIndex(count: number, from: number, isPending: (i: number) => boolean): number {
+  for (let step = 1; step < count; step++) {
+    const i = (from + step) % count;
+    if (isPending(i)) return i;
+  }
+  return -1;
+}
+
 // ...and wiped when it was decided and nothing survived.
 export function isWiped(cluster: Cluster, decisions: PhotoDecisions): boolean {
   return isDecided(cluster, decisions) && cluster.images.every((img) => isDoomed(decisions[img.path]));
