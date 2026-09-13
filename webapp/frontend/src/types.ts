@@ -72,6 +72,10 @@ export interface ProjectEntry {
   image_count: number;
   status: ProjectStatus;
   done_at: string | null;
+  /** Photos the project's caches do not cover yet. */
+  pending_count: number;
+  /** Estimated pipeline run time in seconds; null when there is nothing to run. */
+  eta_s: number | null;
 }
 
 export interface FsEntry {
@@ -79,6 +83,8 @@ export interface FsEntry {
   path: string;
   is_dir: boolean;
   image_count: number;
+  pending_count: number;
+  eta_s: number | null;
 }
 
 export interface FsListing {

@@ -43,7 +43,7 @@ from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
     adopt_subfolder_reviews,
-    count_images,
+    estimate_pipeline,
     image_files_in,
     clean_pipeline_cache,
     clear_done,
@@ -1391,6 +1391,10 @@ def list_projects():
         job = current_job()
         if job and job.running and job.folder == e["folder"]:
             status = "running"
+        estimate = (
+            estimate_pipeline(folder, out_dir)
+            if folder.exists() and status != "running" else None
+        )
         result.append({
             "folder": e["folder"],
             "display_name": folder.name,
@@ -1399,6 +1403,8 @@ def list_projects():
             "image_count": e.get("image_count", 0),
             "status": status,
             "done_at": is_done(out_dir),
+            "pending_count": estimate.pending if estimate else 0,
+            "eta_s": estimate.eta_s if estimate else None,
         })
     return result
 
@@ -1584,14 +1590,16 @@ def fs_list(path: str = Query(default=str(PRIMARY_ROOT / "Editing" / "imports"))
             if child.name.startswith(".") or not child.is_dir():
                 continue
             try:
-                img_count = count_images(child)
+                estimate = estimate_pipeline(child, project_output_dir(child))
             except PermissionError:
-                img_count = 0
+                estimate = None
             entries.append({
                 "name": child.name,
                 "path": str(child),
                 "is_dir": True,
-                "image_count": img_count,
+                "image_count": estimate.image_count if estimate else 0,
+                "pending_count": estimate.pending if estimate else 0,
+                "eta_s": estimate.eta_s if estimate else None,
             })
     except PermissionError:
         raise HTTPException(403, "Permission denied")
