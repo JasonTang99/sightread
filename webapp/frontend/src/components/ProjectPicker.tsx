@@ -12,6 +12,26 @@ const STATUS_BADGE: Record<ProjectStatus, { label: string; cls: string }> = {
   running:   { label: "Running…",  cls: "bg-blue-100 text-blue-600" },
 };
 
+/** "~8 min", "~1.7 h" — the fit behind eta_s is ±30%, so no finer. */
+function formatEta(seconds: number): string {
+  if (seconds < 60) return "<1 min";
+  if (seconds < 90 * 60) return `~${Math.round(seconds / 60)} min`;
+  return `~${(seconds / 3600).toFixed(1)} h`;
+}
+
+function EtaTag({ etaS, pending }: { etaS: number | null; pending: number }) {
+  if (etaS == null) return null;
+  return (
+    <span
+      data-testid="pipeline-eta"
+      title={`Estimated pipeline time for ${pending} unprocessed photo${pending === 1 ? "" : "s"}`}
+      className="inline-block mt-0.5 text-[10px] leading-4 px-1.5 rounded bg-slate-100 text-slate-500"
+    >
+      ⏱ {formatEta(etaS)} · {pending} to process
+    </span>
+  );
+}
+
 export function ProjectPicker({ onProjectOpened }: Props) {
   const [recents, setRecents] = useState<ProjectEntry[]>([]);
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -183,6 +203,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
                         {p.image_count > 0 && (
                           <p className="text-xs text-gray-400">{p.image_count} images</p>
                         )}
+                        <EtaTag etaS={p.eta_s} pending={p.pending_count} />
                       </div>
                       <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}>
                         {badge.label}
@@ -231,7 +252,10 @@ export function ProjectPicker({ onProjectOpened }: Props) {
                           <span className="text-base leading-none">
                             {entry.image_count > 0 ? "📸" : "📁"}
                           </span>
-                          <span className="flex-1 text-sm text-gray-700 truncate">{entry.name}</span>
+                          <span className="flex-1 min-w-0 flex flex-col items-start">
+                            <span className="w-full text-sm text-gray-700 truncate">{entry.name}</span>
+                            <EtaTag etaS={entry.eta_s} pending={entry.pending_count} />
+                          </span>
                           {entry.image_count > 0 && (
                             <span className="text-xs text-gray-400 shrink-0">{entry.image_count}</span>
                           )}

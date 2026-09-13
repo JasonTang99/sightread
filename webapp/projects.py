@@ -57,6 +57,77 @@ def count_images(folder: Path, cap: int = 20_000) -> int:
     return n
 
 
+# What a pipeline run costs, fitted to the runs of 2026-09-12 on the RTX 3060 Ti.
+# Scoring dominates and grows with file size, because every photo is decoded at
+# full resolution for the IQA models and the thumbnails:
+#
+#   run          avg file   scoring / photo
+#   Vegas         1.2 MB      0.40 s
+#   Hoh           5.0 MB      0.61 s
+#   Japan         7.6 MB      0.78 s
+#   Portugal     17.7 MB      0.89 s
+#   Hawaii       15.2 MB      1.32 s   (hit the per-image fallback)
+#
+# Embedding measured 0.07 s/photo on Vegas and is folded into the intercept.
+# The fixed part is EXIF reading and loading both model stacks. Expect ±30%.
+ETA_FIXED_S = 30.0
+ETA_PER_PHOTO_S = 0.45
+ETA_PER_MB_S = 0.065
+
+
+@dataclass
+class PipelineEstimate:
+    image_count: int
+    pending: int  # photos the caches do not cover yet
+    eta_s: float | None  # None when there is nothing to run
+
+
+def _cached_paths(output_dir: Path | None) -> set[str]:
+    """Photos a rerun would load from cache rather than score again.
+
+    The scores sidecar is written after the embeddings one, so a photo in it
+    has been through both expensive stages.
+    """
+    if output_dir is None:
+        return set()
+    try:
+        return set(json.loads((output_dir / "scores_ensemble.paths.json").read_text()))
+    except Exception:
+        return set()
+
+
+def estimate_pipeline(folder: Path, output_dir: Path | None, cap: int = 20_000) -> PipelineEstimate:
+    """How many photos a folder holds and how long running the pipeline would take.
+
+    Only photos the project's caches do not cover count towards the time, so a
+    stale trip is estimated for its new folder alone. One walk serves both
+    numbers, since the picker needs the count anyway. Capped like count_images.
+    """
+    cached = _cached_paths(output_dir)
+    n = pending = 0
+    pending_bytes = 0
+    for dirpath, names in walk_media(folder):
+        for name in names:
+            if not is_image(name):
+                continue
+            n += 1
+            path = Path(dirpath, name)
+            if cached and str(path.resolve()) in cached:
+                continue
+            pending += 1
+            try:
+                pending_bytes += path.stat().st_size
+            except OSError:
+                pass
+        if n >= cap:
+            break
+    has_results = output_dir is not None and (output_dir / "results.json").exists()
+    if n == 0 or (pending == 0 and has_results):
+        return PipelineEstimate(n, pending, None)
+    eta = ETA_FIXED_S + pending * ETA_PER_PHOTO_S + pending_bytes / 1e6 * ETA_PER_MB_S
+    return PipelineEstimate(n, pending, eta)
+
+
 def project_status(folder: Path, output_dir: Path) -> ProjectStatus:
     sidecar = output_dir / "embeddings_dinov3_mpcls_tta.paths.json"
     if not sidecar.exists():
