@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -269,6 +270,49 @@ def discover_pipeline_projects() -> list[dict]:
     return found
 
 
+_TRIP_NAME = re.compile(r"^\d{4}_\d{2}_")
+
+
+def trip_folder(folder: Path) -> Path | None:
+    """The trip a folder belongs to: its outermost `YYYY_MM_Name` ancestor, or itself."""
+    for i, part in enumerate(folder.parts):
+        if _TRIP_NAME.match(part):
+            return Path(*folder.parts[: i + 1])
+    return None
+
+
+def roll_up_to_trips(entries: list[dict]) -> list[dict]:
+    """One picker entry per trip, not one per device folder under it.
+
+    Device folders (`xt5/`, `iphone/`) were run as projects before whole trips
+    were, and opening the trip adopts the review done on them, so listing them
+    beside it only offers a second, partial copy of the same trip. Their
+    activity still counts toward when the trip was last used. A trip that has
+    only device-folder projects gets an entry for the trip folder itself.
+    """
+    by_folder: dict[str, dict] = {}
+    children: list[tuple[str, dict]] = []
+    for entry in entries:
+        trip = trip_folder(Path(entry["folder"]))
+        if trip is None or str(trip) == entry["folder"]:
+            by_folder[entry["folder"]] = dict(entry)
+        else:
+            children.append((str(trip), entry))
+    for trip, child in children:
+        parent = by_folder.get(trip)
+        if parent is None:
+            parent = by_folder[trip] = {
+                "folder": trip,
+                "output_dir": str(DATA_DIR / project_output_dir_name(Path(trip))),
+                "last_opened": None,
+                "last_pipeline_run": None,
+                "image_count": 0,
+            }
+        for key in ("last_opened", "last_pipeline_run"):
+            parent[key] = max(filter(None, [parent.get(key), child.get(key)]), default=None)
+    return list(by_folder.values())
+
+
 def known_projects() -> list[dict]:
     """Recents merged with pipeline output found on disk, newest first."""
     merged: dict[str, dict] = {}
@@ -287,7 +331,7 @@ def known_projects() -> list[dict]:
         )
         if entry.get("image_count"):
             existing["image_count"] = entry["image_count"]
-    entries = list(merged.values())
+    entries = roll_up_to_trips(list(merged.values()))
     entries.sort(
         key=lambda e: max(e.get("last_opened") or "", e.get("last_pipeline_run") or ""),
         reverse=True,

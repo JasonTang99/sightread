@@ -33,8 +33,9 @@ function EtaTag({ etaS, pending }: { etaS: number | null; pending: number }) {
 }
 
 /** The trip a project belongs to, read off the archive's `YYYY_MM_Name`
- * folder convention. The deepest dated segment wins, so a device folder like
- * `2026_01_Japan/xt5` files under its trip. Null when no segment is dated. */
+ * folder convention. The server already rolls device folders up into their
+ * trip, so this is normally the folder's own name. Null when nothing in the
+ * path is dated. */
 export function tripKey(folder: string): string | null {
   const segments = folder.split("/");
   for (let i = segments.length - 1; i >= 0; i--) {
@@ -43,8 +44,7 @@ export function tripKey(folder: string): string | null {
   return null;
 }
 
-/** Newest trip first; within a trip the trip folder before its device
- * folders; undated projects last, by name. */
+/** Newest trip first; undated projects last, by path. */
 function byTripDate(a: ProjectEntry, b: ProjectEntry): number {
   const ka = tripKey(a.folder);
   const kb = tripKey(b.folder);
