@@ -147,6 +147,36 @@ class TestKeyboardNav:
         page_loaded.keyboard.press("Space")  # → keep again
         expect(page_loaded.locator("button.bg-green-50").first).to_be_visible()
 
+    def test_shift_space_keeps_only_the_focused_image(self, page_loaded: Page, output_dir):
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Space")  # rank 1 is kept too now: two keeps
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Shift+Space")
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        assert statuses(output_dir)[images[2]["path"]] == "kept"
+        assert len(queued(output_dir)) == 2
+
+    def test_shift_space_leaves_starred_images_kept(self, page_loaded: Page, output_dir):
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        page_loaded.keyboard.press("s")  # star the first image
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Space")  # keep the second image as well
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Shift+Space")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        # Only the unstarred, unfocused second image goes; the starred first stays.
+        deleted = queued(output_dir)
+        assert len(deleted) == 1
+        assert Path(images[1]["path"]).name in deleted[0]
+
     def test_enter_confirms(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)

@@ -7,6 +7,7 @@ const CLUSTER_KEYS = [
   ["h / l", "move image focus left / right"],
   ["j / k", "move image focus up / down"],
   ["Space", "toggle focused image keep/delete"],
+  ["Shift+Space", "keep only the focused image (starred stay kept)"],
   ["1–9", "toggle image by rank number"],
   ["K", "keep best (rank 1 only)"],
   ["n", "jump to next unreviewed cluster"],
