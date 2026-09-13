@@ -1,6 +1,6 @@
 # sightread — next steps
 
-_Last updated: 2026-09-12 (evening)._
+_Last updated: 2026-09-13 (evening)._
 
 ## Done since the last update
 
@@ -25,8 +25,24 @@ _Last updated: 2026-09-12 (evening)._
 - **Confirm no longer skips a cluster when hide-reviewed is on** (`9c3b49f`).
   Enter used to advance by index *and* drop the row you just decided, so the
   cluster that slid into its place was walked past. Landing is now by
-  `cluster_id`. Singles and videos still advance by index — same shape of bug,
-  not yet hit.
+  `cluster_id`. Singles and videos still advance by index, but since `f5e50e1`
+  made skip-reviewed navigation-only nothing drops out of their lists, so the
+  index no longer slides — that half of the bug is gone rather than fixed.
+- **Every trip in the picker has a time estimate** (`185d959`, refit in
+  `cea0354` to 25 s + 0.74 s/photo + 0.016 s/MB). Over today's 25-trip batch it
+  landed within 10% on nearly every run; the misses were small trips, where the
+  fixed 25 s dominates (Revelstoke 65 s against 92 s).
+- **Embedding and scoring checkpoint after every shooting day** (`52a6cd3`), so
+  a GPU crash mid-Europe costs one day, not two hours.
+- **A partly decided cluster shows its per-photo decisions** (`dbc3a6e`) instead
+  of falling back to rank for every photo until the whole cluster is decided.
+- **The picker lists projects by trip date beside Recent, one entry per trip**
+  (`149239b`, `e83d51c`). Device folders roll up into their trip (42 entries to
+  36); a trip only ever run per device, like `2024_02_Korea/canon`, shows as the
+  trip. Browse sits behind "Other folder…" — it had been returning a 400 on
+  lynx because its default `/mnt/h0/Editing/imports` does not exist.
+- **Shift+Space keeps only the focused photo** (`bb02680`), was §7. Starred
+  photos stay kept.
 
 ## 1. Where the seven 2026 trips landed
 
@@ -63,29 +79,23 @@ The fix gives cross-camera merges their own 300s window (the Japan pairs sit
 rotation one — at 0.38 same-framing merges pulled in neighbouring compositions,
 notably a 12-photo Hoh riverbed group holding three different subjects.
 
-## 2. Three trips are stale — a `google photos/` folder appeared in them
+## 2. Preprocessing the archive
 
-**Blocked on a go-ahead.** As of this evening the picker reads:
+The three stale trips were re-run: Vegas on the evening of the 12th, Hawaii on the
+afternoon of the 13th, and Yellowstone at the head of the evening batch. That batch
+then took every 2025 trip and the smaller 2024 ones — 25 runs in 88 minutes, all rc 0 — and a second,
+unbounded pass is walking the rest, newest first. Sigil (`sigil.service`,
+`sigil-stt.service`) was stopped to give it the GPU: with them up, clipiqa+ ran
+out of memory and fell back to per-image scoring on every trip (10-14 fallbacks
+each on Yellowstone and Gothics); after, none. **Restart them when the batch is
+done:** `systemctl --user start sigil-stt sigil`.
 
-| Trip | processed | in folder now | unprocessed, all in `google photos/` |
-|---|---:|---:|---:|
-| `2026_07_Hawaii` | 442 | 1173 | 731 |
-| `2026_02_Yellowstone` | 43 | 739 | 696 |
-| `2026_05_Vegas` | 6 | 268 | 262 |
-
-"Stale" is `projects.py:project_status` finding the folder's image set different
-from the paths in the embeddings sidecar. Nothing is missing in these three —
-they are pure additions, a folder that landed after today's runs scanned only
-`xt5/` and `iphone/`.
-
-Re-running is cheaper than it looks: `compute_embeddings` is incremental
-(`scripts/pipeline.py:288`), so the stills already done load from cache and only
-the new ones are embedded. Cluster ids get renumbered, but decisions are keyed by
-photo path, so review survives.
-
-**First action:** ask whether to re-run those three. Hawaii is the interesting
-one — with `google photos/` it becomes a three-device trip, which is a better
-test of the cross-camera merge than anything in §4.
+As of 18:45 on the 13th, `2024_03_Europe` (9,522 photos, estimated 2 h 10 m) is
+running. Still to come: `2024_02_Taiwan`, `2024_02_Korea` (as a whole trip, 1,305
+photos), `2024_02_China`, `2024_01_Japan` (6,324 photos, ~1.5 h), then 2023 back
+to 2020 — about 50 small trips, 2022's LA, Stratford and Greece the only ones over
+five minutes. The runner and per-trip logs are in the session scratchpad, not the
+repo; the picker's estimate tag is the source of truth for what is left.
 
 ## 3. Adoption covers trips, not the other direction
 
@@ -104,14 +114,44 @@ The gap: adoption is one-directional. Opening `<trip>/xt5` on its own still know
 nothing of review done at the trip level, so a decision made in the trip and then
 revisited in the camera folder will be offered again. Nobody has hit this yet —
 it needs someone to open a camera folder after reviewing its trip — so it is
-recorded rather than fixed.
+recorded rather than fixed. Since `e83d51c` the picker no longer lists device
+folders at all, so reaching one takes "Other folder…"; that makes this gap even
+less likely to bite.
 
 ## 4. Open questions on the cross-camera merge
 
-- The 300s window and 0.22 ceiling were fitted to Japan and Hoh and sanity-checked
-  on Hawaii. Portugal contributed nothing to the fit (19 phone stills, none close
-  in time to a camera frame). A re-run of Hawaii with `google photos/` (§2) would
-  be the first near-even three-device measurement.
+- **The cross-camera merge over-merges on group trips.** This is the most useful
+  thing the `google photos/` re-runs showed, and it wants a decision before more
+  review happens on those trips.
+
+  `google photos/` is not a third device of Jason's but a shared album: on Hawaii
+  it holds nine camera models from other people (Galaxy Z Fold6 181, Xiaomi 17 Pro
+  Max 215, iPhone 17 Pro 123, …) plus 7 iPhone 14 frames that fill numbering gaps
+  in `iphone/` — missing frames, not duplicates (no photo matches another folder's
+  on model and shot time). Counted by EXIF model, clusters mixing cameras are now
+  31 of 528 on Hawaii, 29 of 331 on Yellowstone, 14 on Hoh and 8 on Vegas.
+
+  Looked at, the big ones are not one subject. Hawaii cluster 443 is 23 photos from
+  six cameras in 263 s at the lava field: a person in a crack, a man by a tree, a
+  selfie, a group shot, a woman in red and two landscapes. Yellowstone 159 is 19
+  photos of four or five different skiers on one trail. With keep-best's rank-1
+  default that is 22 distinct shots marked for deletion in one cluster.
+
+  Replaying Hawaii's clustering from cached embeddings pins it on stage 4's
+  cross-camera path: with `cross_window_s=0` cluster 443 falls apart into 9
+  clusters (largest 10), while turning off the 3 s burst fusion changes nothing.
+  Tightening `CROSS_DEVICE_THRESHOLD` is not the lever — at 0.12 cluster 443 still
+  keeps 19 — because the damage is chaining: when many people shoot one place at
+  once, some neighbour is always within 0.22 and 300 s. Limiting a merged group to
+  one cluster per camera helps partly (443 → 10/7/3/3, Yellowstone 264 28 → 18)
+  and leaves Japan, the trip the rule was fitted to, at 8 cross clusters.
+
+  **First action:** decide what a cross-camera merge is for. If it is "Jason's
+  phone and Jason's camera on the same subject", the simplest fix is to allow it
+  only between the trip's own device folders and never into `google photos/`.
+  The one-cluster-per-camera cap is the model-agnostic alternative. Either
+  changes clusters on already-reviewed trips; decisions are keyed by path, so
+  review survives a re-cluster.
 - A subject revisited hours later — Portugal's 0.089 pair, four hours apart — is
   deliberately left in separate clusters, since `MAX_CLUSTER_GAP_S` is an hour.
   Whether trip review wants a looser "same place, another day" grouping is a
