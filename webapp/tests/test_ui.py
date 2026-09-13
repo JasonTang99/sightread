@@ -816,7 +816,8 @@ class TestClusterSize:
 class TestSkipReviewed:
     """Opening a trip whose camera folder was reviewed on its own adopts that
     review, so the queue is full of clusters, singles and clips that already
-    have a decision. The header toggle takes them out of it."""
+    have a decision. The header toggle makes confirm jump over them; it does
+    not take them out of the lists, so arrows still reach everything."""
 
     @pytest.fixture()
     def video_project(self, tmp_path, webapp_server):
@@ -843,8 +844,31 @@ class TestSkipReviewed:
         images = FIXTURE_RESULTS["clusters"][cluster_index]["images"]
         save_decisions(output_dir, {img["path"]: status for img in images})
 
+    def _with_extra(self, output_dir, at: int, cluster: dict) -> dict:
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        results["clusters"].insert(at, cluster)
+        (output_dir / "results.json").write_text(json.dumps(results))
+        return results
+
+    def _extra_cluster(self) -> dict:
+        """A 4-photo cluster, so where the cursor lands reads off the size badge."""
+        template = FIXTURE_RESULTS["clusters"][0]["images"][0]
+        return {
+            "cluster_id": 99,
+            "best_image": "demo_photos/extra0.JPG",
+            "images": [
+                {**template, "path": f"demo_photos/extra{i}.JPG", "rank": i + 1}
+                for i in range(4)
+            ],
+        }
+
+    def _skip_on(self, page: Page) -> None:
+        page.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
+        page.reload()
+        settle(page)
+
     def test_absent_until_there_is_something_to_skip(self, page_loaded: Page, output_dir):
-        """A project with nothing decided has nothing to hide, and a control
+        """A project with nothing decided has nothing to skip, and a control
         that would do nothing is noise in a header this busy."""
         expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_count(0)
 
@@ -852,41 +876,21 @@ class TestSkipReviewed:
         page_loaded.reload()
         settle(page_loaded)
 
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text(
-            re.compile(r"^Skip reviewed")
-        )
-        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skip reviewed")
 
-    def test_the_button_counts_what_it_would_hide(self, page_loaded: Page, output_dir):
-        self._decide(output_dir, 0)
-        page_loaded.reload()
-        settle(page_loaded)
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skip reviewed (1)")
-
-    def test_a_decided_cluster_leaves_the_queue(self, page_loaded: Page, output_dir):
-        self._decide(output_dir, 0)
+    def test_it_never_shrinks_the_tabs(self, page_loaded: Page, output_dir):
+        """Filtering made every count drop on confirm and put decided work
+        out of reach of the arrows."""
+        save_decisions(output_dir, {
+            **{img["path"]: "kept" for img in FIXTURE_RESULTS["clusters"][0]["images"]},
+            FIXTURE_RESULTS["clusters"][3]["images"][0]["path"]: "kept",
+        })
         page_loaded.reload()
         settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
-        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
-
-    def test_a_decided_single_leaves_the_queue(self, page_loaded: Page, output_dir):
-        # Cluster index 3 is a singleton in the fixture.
-        self._decide(output_dir, 3, "favorite")
-        page_loaded.reload()
-        settle(page_loaded)
-        page_loaded.get_by_test_id("hide-reviewed").click()
-        expect(page_loaded.get_by_text(f"Singles ({_singleton_count() - 1})")).to_be_visible()
-
-    def test_turning_it_off_brings_them_back(self, page_loaded: Page, output_dir):
-        self._decide(output_dir, 0)
-        page_loaded.reload()
-        settle(page_loaded)
-        toggle = page_loaded.get_by_test_id("hide-reviewed")
-        toggle.click()
-        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
-        toggle.click()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skipping reviewed")
         expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
+        expect(page_loaded.get_by_text(f"Singles ({_singleton_count()})")).to_be_visible()
 
     def test_the_choice_survives_a_reload(self, page_loaded: Page, output_dir):
         """It is a way of working, not a per-visit decision."""
@@ -896,13 +900,10 @@ class TestSkipReviewed:
         page_loaded.get_by_test_id("hide-reviewed").click()
         page_loaded.reload()
         settle(page_loaded)
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text(
-            re.compile(r"^Unreviewed only")
-        )
-        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() - 1})")).to_be_visible()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skipping reviewed")
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-pressed", "true")
 
     def test_progress_still_counts_everything(self, page_loaded: Page, output_dir):
-        """Hiding reviewed work must not make the project look smaller."""
         self._decide(output_dir, 0)
         page_loaded.reload()
         settle(page_loaded)
@@ -910,40 +911,63 @@ class TestSkipReviewed:
         total = _cluster_count() + _singleton_count()
         expect(page_loaded.get_by_test_id("session-progress")).to_contain_text(f"1/{total} reviewed")
 
-    def test_enter_does_not_skip_the_next_cluster(self, page_loaded: Page, output_dir):
-        """Hide-reviewed drops the cluster you just confirmed. Advancing by
-        index as well walks past the one that slid into its place."""
-        results = json.loads(json.dumps(FIXTURE_RESULTS))
-        template = results["clusters"][0]["images"][0]
-        results["clusters"].insert(2, {
-            "cluster_id": 99,
-            "best_image": "demo_photos/extra1.JPG",
-            "images": [
-                {**template, "path": f"demo_photos/extra{i}.JPG", "rank": i + 1}
-                for i in range(4)
-            ],
-        })
-        (output_dir / "results.json").write_text(json.dumps(results))
-        # A decided singleton makes the skip control appear without touching
-        # the cluster queue, so the first Enter is the one under test.
-        self._decide(output_dir, 3)
-        page_loaded.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
-        page_loaded.reload()
-        settle(page_loaded)
+    def test_enter_jumps_past_a_decided_cluster(self, page_loaded: Page, output_dir):
+        # 3 photos (undecided), 2 photos (decided), 4 photos (undecided).
+        self._with_extra(output_dir, 2, self._extra_cluster())
+        self._decide(output_dir, 1)
+        self._skip_on(page_loaded)
 
         expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("3 photos")
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
-        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
-        expect(page_loaded.locator("select")).to_have_value("0")
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("4 photos")
+        expect(page_loaded.locator("select")).to_have_value("2")
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() + 1})")).to_be_visible()
 
-    def test_a_reviewed_clip_leaves_the_videos_tab(self, page_loaded: Page, video_project):
-        out, video = video_project
-        page_loaded.goto(BASE_URL)
-        settle(page_loaded)
-        expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()
-        save_decisions(out, {video: "kept"})
+        # The decided one is still there to go back to.
+        page_loaded.keyboard.press("ArrowLeft")
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
+
+    def test_enter_steps_one_at_a_time_when_off(self, page_loaded: Page, output_dir):
+        self._with_extra(output_dir, 2, self._extra_cluster())
+        self._decide(output_dir, 1)
         page_loaded.reload()
         settle(page_loaded)
+
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
+
+    def test_enter_wraps_to_an_earlier_undecided_cluster(self, page_loaded: Page, output_dir):
+        self._skip_on(page_loaded)
+        page_loaded.keyboard.press("ArrowRight")
+        expect(page_loaded.locator("select")).to_have_value("1")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.locator("select")).to_have_value("0")
+
+    def test_enter_jumps_past_a_decided_single(self, page_loaded: Page, output_dir):
+        # Singles sort by score: 0.30, then this 0.50 one, then 0.65.
+        self._with_extra(output_dir, 3, {
+            "cluster_id": 98,
+            "best_image": "demo_photos/extra_single.JPG",
+            "images": [{"path": "demo_photos/extra_single.JPG", "score": 0.50,
+                        "centrality": 1.0, "rank": 1}],
+        })
+        save_decisions(output_dir, {"demo_photos/extra_single.JPG": "kept"})
+        self._skip_on(page_loaded)
+
+        page_loaded.get_by_text(f"Singles ({_singleton_count() + 1})").click()
+        expect(page_loaded.get_by_text("1 / 3")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        expect(page_loaded.get_by_text("3 / 3")).to_be_visible()
+        page_loaded.keyboard.press("k")
+        expect(page_loaded.get_by_text("2 / 3")).to_be_visible()
+
+    def test_a_reviewed_clip_stays_in_the_videos_tab(self, page_loaded: Page, video_project):
+        out, video = video_project
+        save_decisions(out, {video: "kept"})
+        page_loaded.goto(BASE_URL)
+        settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
-        expect(page_loaded.get_by_role("button", name=re.compile(r"^Videos"))).to_have_count(0)
+        expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()

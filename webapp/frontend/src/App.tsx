@@ -26,8 +26,8 @@ export default function App() {
   const [videoTags, setVideoTags] = useState<VideoTagsState>({ tags: [], assignments: {} });
   const [videosLoaded, setVideosLoaded] = useState(false);
   // Skip what has already been decided. A trip opened after its camera folder
-  // was reviewed on its own adopts hundreds of decisions, and without this the
-  // review queue walks the user back through every one of them. Kept in
+  // was reviewed on its own adopts hundreds of decisions, and without this
+  // confirm walks the user back through every one of them. Kept in
   // localStorage because it is a way of working, not a per-visit choice.
   const [hideReviewed, setHideReviewed] = useState(() => {
     try {
@@ -202,28 +202,19 @@ export default function App() {
   }
 
   const decisions = state.photo_decisions ?? {};
-  // What the review tabs offer. With "unreviewed only" on, anything already
-  // decided drops out of the queue — the tab counts included, since a count
-  // that includes what the tab will not show you is worse than no count.
-  const visibleClusters = (state.clusters ?? []).filter(
-    (c) => !hideReviewed || !isDecided(c, decisions),
-  );
-  const visibleSingles = (state.singletons ?? []).filter(
-    (c) => !hideReviewed || !isDecided(c, decisions),
-  );
-  const hasClusters = visibleClusters.length > 0;
-  const hasSingles = visibleSingles.length > 0;
-  const hasUnconfirmedSingles = (state.singletons ?? []).some((c) => !isDecided(c, decisions));
+  // "Skip reviewed" does not filter these lists. It used to, and the tabs
+  // shrank under you: counts dropped on every confirm and arrowing back to
+  // something already decided was impossible. Everything stays browsable;
+  // the toggle only changes where confirm lands (see the views).
+  const clusterList = state.clusters ?? [];
+  const singleList = state.singletons ?? [];
+  const hasClusters = clusterList.length > 0;
+  const hasSingles = singleList.length > 0;
+  const hasUnconfirmedSingles = singleList.some((c) => !isDecided(c, decisions));
   // The video reviewer works through footage that isn't marked for deletion
   // yet; the timeline shows everything, marked included, so it can colour a
   // tile by its decision the way it does for photos.
-  const reviewableVideos = videos
-    .filter((v) => videoStatuses[v] !== "delete")
-    .filter(
-      (v) =>
-        !hideReviewed ||
-        ((videoStatuses[v] ?? "undecided") === "undecided" && !justDecidedVideos.has(v)),
-    );
+  const reviewableVideos = videos.filter((v) => videoStatuses[v] !== "delete");
   const hasVideos = reviewableVideos.length > 0;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
@@ -231,18 +222,7 @@ export default function App() {
   // Session progress across everything that needs a decision. Clusters and
   // singles count as one unit each — that is how they are reviewed — and every
   // video counts, pending deletes included, since a delete mark is a decision.
-  const clusterList = state.clusters ?? [];
-  const singleList = state.singletons ?? [];
   const totalUnits = clusterList.length + singleList.length + videos.length;
-  // How many units the skip filter takes out of the queue — the same three
-  // lists, counted before they were filtered.
-  const hiddenUnits =
-    clusterList.filter((c) => isDecided(c, decisions)).length +
-    singleList.filter((c) => isDecided(c, decisions)).length +
-    videos.filter(
-      (v) => videoStatuses[v] !== "delete" &&
-        ((videoStatuses[v] ?? "undecided") !== "undecided" || justDecidedVideos.has(v)),
-    ).length;
   const reviewedUnits =
     clusterList.filter((c) => isDecided(c, decisions)).length +
     singleList.filter((c) => isDecided(c, decisions)).length +
@@ -285,7 +265,7 @@ export default function App() {
               tab === "clusters" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Clusters ({visibleClusters.length})
+            Clusters ({clusterList.length})
           </button>
         )}
         {hasSingles && (
@@ -295,7 +275,7 @@ export default function App() {
               tab === "singles" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
-            Singles ({visibleSingles.length})
+            Singles ({singleList.length})
           </button>
         )}
         {hasVideos && (
@@ -337,9 +317,9 @@ export default function App() {
         </button>
 
         <div className="ml-auto flex items-center gap-2">
-          {/* Skipping what is already decided. The count is what it is hiding,
-              so the button says what turning it off would bring back. */}
-          {hiddenUnits > 0 || hideReviewed ? (
+          {/* Skipping what is already decided: confirm jumps over it. Shown
+              once something is decided, since before that it would do nothing. */}
+          {reviewedUnits > 0 || hideReviewed ? (
             <button
               onClick={() => setHideReviewed((on) => !on)}
               className={`text-xs rounded px-2 py-0.5 border transition-colors ${
@@ -349,12 +329,13 @@ export default function App() {
               }`}
               title={
                 hideReviewed
-                  ? "Showing only what still needs a decision — click to show everything"
-                  : "Skip clusters, singles and videos that have already been decided"
+                  ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
+                  : "Make confirm jump past clusters, singles and videos that have already been decided"
               }
+              aria-pressed={hideReviewed}
               data-testid="hide-reviewed"
             >
-              {hideReviewed ? `Unreviewed only (${hiddenUnits} hidden)` : `Skip reviewed (${hiddenUnits})`}
+              {hideReviewed ? "Skipping reviewed" : "Skip reviewed"}
             </button>
           ) : null}
           {totalUnits > 0 && (
@@ -420,6 +401,7 @@ export default function App() {
         ) : tab === "videos" ? (
           <VideoView
             videos={reviewableVideos}
+            skipReviewed={hideReviewed}
             statuses={videoStatuses}
             highlights={videoHighlights}
             userClips={videoUserClips}
@@ -452,12 +434,13 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView folder={state.folder} clusters={visibleClusters} decisions={decisions} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
                 folder={state.folder}
-                singletons={visibleSingles}
+                singletons={singleList}
+                skipReviewed={hideReviewed}
                 decisions={decisions}
                 favorites={favorites}
                 onRefresh={reload}

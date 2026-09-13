@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { DeviceBadge } from "./DeviceBadge";
 import { deviceOf } from "../device";
+import { nextPendingIndex } from "../decisions";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
   folder?: string;
   singletons: Cluster[];
   decisions: PhotoDecisions;
+  // Enter jumps to the next unconfirmed single instead of the next one.
+  skipReviewed?: boolean;
   favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
@@ -32,6 +35,7 @@ export function SingletonsView({
   folder,
   singletons,
   decisions,
+  skipReviewed = false,
   favorites,
   onRefresh,
   onError,
@@ -42,6 +46,10 @@ export function SingletonsView({
   const [idx, setIdx] = useState(0);
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
+  // Confirmed this session. Enter does not wait for the refresh, so a quick
+  // second press would still see the first single as undecided and wrap
+  // back onto it.
+  const confirmedRef = useRef<Set<string>>(new Set());
   const favSet = new Set(favorites);
 
   const { assignTag, addTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
@@ -99,7 +107,12 @@ export function SingletonsView({
         return onRefresh();
       })
       .catch((err) => onError(err instanceof Error ? err.message : String(err)));
-    setIdx((i) => Math.min(items.length - 1, i + 1));
+    confirmedRef.current.add(it.path);
+    const pending = skipReviewed
+      ? nextPendingIndex(items.length, idx, (i) =>
+          !(items[i].path in decisions) && !confirmedRef.current.has(items[i].path))
+      : -1;
+    setIdx(pending !== -1 ? pending : Math.min(items.length - 1, idx + 1));
   };
 
   useWindowKeydown((e) => {
