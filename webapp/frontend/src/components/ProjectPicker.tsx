@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FsListing, JobStatus, ProjectEntry, ProjectStatus } from "../types";
 
 interface Props {
@@ -32,6 +32,82 @@ function EtaTag({ etaS, pending }: { etaS: number | null; pending: number }) {
   );
 }
 
+/** The trip a project belongs to, read off the archive's `YYYY_MM_Name`
+ * folder convention. The deepest dated segment wins, so a device folder like
+ * `2026_01_Japan/xt5` files under its trip. Null when no segment is dated. */
+export function tripKey(folder: string): string | null {
+  const segments = folder.split("/");
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (/^\d{4}_\d{2}/.test(segments[i])) return segments[i];
+  }
+  return null;
+}
+
+/** Newest trip first; within a trip the trip folder before its device
+ * folders; undated projects last, by name. */
+function byTripDate(a: ProjectEntry, b: ProjectEntry): number {
+  const ka = tripKey(a.folder);
+  const kb = tripKey(b.folder);
+  if (ka !== kb) {
+    if (ka === null) return 1;
+    if (kb === null) return -1;
+    return ka < kb ? 1 : -1;
+  }
+  return a.folder.localeCompare(b.folder);
+}
+
+interface ProjectListProps {
+  title: string;
+  testId: string;
+  projects: ProjectEntry[];
+  selected: string | null;
+  onSelect: (folder: string) => void;
+}
+
+function ProjectList({ title, testId, projects, selected, onSelect }: ProjectListProps) {
+  return (
+    <div data-testid={testId} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      <div className="px-3 py-2 border-b border-gray-100">
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{title}</p>
+      </div>
+      {projects.length === 0 ? (
+        <p className="text-xs text-gray-400 px-3 py-4">No projects yet.</p>
+      ) : (
+        <ul className="max-h-[65vh] overflow-y-auto">
+          {projects.map((p) => {
+            const badge = p.done_at
+              ? { label: "Done", cls: "bg-green-100 text-green-700" }
+              : STATUS_BADGE[p.status];
+            const isSelected = selected === p.folder;
+            return (
+              <li key={p.folder}>
+                <button
+                  onClick={() => onSelect(p.folder)}
+                  className={`w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
+                    isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-800 truncate">{p.display_name}</p>
+                    <p className="text-xs text-gray-400 truncate">{p.folder}</p>
+                    {p.image_count > 0 && (
+                      <p className="text-xs text-gray-400">{p.image_count} images</p>
+                    )}
+                    <EtaTag etaS={p.eta_s} pending={p.pending_count} />
+                  </div>
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}>
+                    {badge.label}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function ProjectPicker({ onProjectOpened }: Props) {
   const [recents, setRecents] = useState<ProjectEntry[]>([]);
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -39,6 +115,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   const [job, setJob] = useState<JobStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Browsing is for folders no project covers yet — rare once the archive
+  // has been through the pipeline, so it stays out of the way until asked.
+  const [browsing, setBrowsing] = useState(false);
 
   const loadRecents = useCallback(async () => {
     const res = await fetch("/api/projects");
@@ -57,8 +136,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
 
   useEffect(() => {
     loadRecents();
-    browse();
-  }, [loadRecents, browse]);
+  }, [loadRecents]);
+
+  const byDate = useMemo(() => [...recents].sort(byTripDate), [recents]);
 
   // Poll job status while running
   useEffect(() => {
@@ -175,55 +255,44 @@ export function ProjectPicker({ onProjectOpened }: Props) {
       </header>
 
       <div className="max-w-5xl mx-auto p-4 grid grid-cols-[280px_1fr] gap-4">
-        {/* Recents */}
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-100">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Recent</p>
-          </div>
-          {recents.length === 0 ? (
-            <p className="text-xs text-gray-400 px-3 py-4">No recent projects.</p>
-          ) : (
-            <ul>
-              {recents.map((p) => {
-                const badge = p.done_at
-                  ? { label: "Done", cls: "bg-green-100 text-green-700" }
-                  : STATUS_BADGE[p.status];
-                const isSelected = selected === p.folder;
-                return (
-                  <li key={p.folder}>
-                    <button
-                      onClick={() => setSelected(p.folder)}
-                      className={`w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
-                        isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800 truncate">{p.display_name}</p>
-                        <p className="text-xs text-gray-400 truncate">{p.folder}</p>
-                        {p.image_count > 0 && (
-                          <p className="text-xs text-gray-400">{p.image_count} images</p>
-                        )}
-                        <EtaTag etaS={p.eta_s} pending={p.pending_count} />
-                      </div>
-                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}>
-                        {badge.label}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+        <ProjectList
+          title="Recent"
+          testId="recent-projects"
+          projects={recents}
+          selected={selected}
+          onSelect={setSelected}
+        />
 
-        {/* Browser + actions */}
         <div className="flex flex-col gap-3">
+          <ProjectList
+            title="By trip date"
+            testId="projects-by-date"
+            projects={byDate}
+            selected={selected}
+            onSelect={setSelected}
+          />
+
+          {!browsing ? (
+            <button
+              onClick={() => { setBrowsing(true); browse(); }}
+              className="self-start px-3 py-1.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50"
+            >
+              Other folder…
+            </button>
+          ) : (
           <div className="bg-white border border-gray-200 rounded-lg overflow-hidden flex-1">
             <div className="px-3 py-2 border-b border-gray-100 flex items-center gap-2">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Browse</p>
               {listing && (
-                <p className="text-xs text-gray-400 truncate font-mono">{listing.path}</p>
+                <p className="flex-1 text-xs text-gray-400 truncate font-mono">{listing.path}</p>
               )}
+              <button
+                onClick={() => setBrowsing(false)}
+                className="ml-auto text-xs text-gray-400 hover:text-gray-600 shrink-0"
+                title="Close browser"
+              >
+                ✕
+              </button>
             </div>
 
             {listing && (
@@ -279,6 +348,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
               </>
             )}
           </div>
+          )}
 
           {/* Action bar */}
           {selected && (

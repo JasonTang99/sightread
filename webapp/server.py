@@ -1578,8 +1578,16 @@ def job_status():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/fs/list")
-def fs_list(path: str = Query(default=str(PRIMARY_ROOT / "Editing" / "imports"))):
-    target = Path(path).resolve()
+def fs_list(path: str | None = None):
+    if path is None:
+        # The imports folder is only a starting point; when it is missing
+        # (it is on lynx) start from the nearest folder that exists rather
+        # than answer the picker's first request with a 400.
+        target = PRIMARY_ROOT / "Editing" / "imports"
+        while not target.is_dir() and target != target.parent:
+            target = target.parent
+    else:
+        target = Path(path).resolve()
     if not target.exists() or not target.is_dir():
         raise HTTPException(400, "Not a directory")
     parent = str(target.parent) if target != target.parent else None

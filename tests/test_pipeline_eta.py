@@ -111,3 +111,18 @@ def test_fs_listing_carries_each_folder_estimate(trip, tmp_path, monkeypatch):
     assert (by_name["xt5"]["pending_count"], by_name["xt5"]["eta_s"]) == (0, None)
     assert by_name["google photos"]["pending_count"] == 2
     assert by_name["google photos"]["eta_s"] == pytest.approx(_expected([500_000] * 2))
+
+
+def test_fs_listing_without_a_path_starts_at_the_nearest_existing_folder(tmp_path, monkeypatch):
+    """The default imports folder does not exist on every machine; the picker's
+    first browse must still land somewhere instead of failing with a 400."""
+    (tmp_path / "h0" / "Trips").mkdir(parents=True)
+    monkeypatch.setattr(server, "PRIMARY_ROOT", tmp_path / "h0")
+    monkeypatch.setattr(projects, "DATA_DIR", tmp_path / "data")
+
+    client = TestClient(server.app, base_url="http://localhost")
+    res = client.get("/api/fs/list")
+
+    assert res.status_code == 200
+    assert res.json()["path"] == str(tmp_path / "h0")
+    assert [e["name"] for e in res.json()["entries"]] == ["Trips"]
