@@ -96,14 +96,14 @@ def test_browse_rows_carry_the_tag_under_the_name(browser, webapp_server):
     page.context.close()
 
 
-def test_trips_list_newest_trip_first_with_device_folders_under_their_trip(browser, webapp_server):
+def test_trips_list_newest_trip_first(browser, webapp_server):
     page = _open_picker(
         browser, webapp_server,
         # /api/projects answers most recently used first.
         projects=[
             _project("/mnt/h0/Trips/2024/2024_05_NYC", "ready", 0, None),
             _project("/home/jason/demo_photos", "ready", 0, None),
-            _project("/mnt/h0/Trips/2026_01_Japan/xt5", "ready", 0, None),
+            _project("/mnt/h0/Trips/2026_01_Panorama", "ready", 0, None),
             _project("/mnt/h0/Trips/2025/2025_12_Gothics", "ready", 0, None),
             _project("/mnt/h0/Trips/2026_01_Japan", "ready", 0, None),
             _project("/mnt/h0/Trips/2026_07_Hawaii", "stale", 731, 488),
@@ -113,11 +113,11 @@ def test_trips_list_newest_trip_first_with_device_folders_under_their_trip(brows
     names = lambda list_id: page.get_by_test_id(list_id).locator("li p.font-medium").all_inner_texts()
     expect(page.get_by_test_id("projects-by-date").locator("li")).to_have_count(6)
     assert names("projects-by-date") == [
-        "2026_07_Hawaii", "2026_01_Japan", "xt5", "2025_12_Gothics", "2024_05_NYC", "demo_photos",
+        "2026_07_Hawaii", "2026_01_Panorama", "2026_01_Japan", "2025_12_Gothics", "2024_05_NYC", "demo_photos",
     ]
     # Recent keeps the server's order.
     assert names("recent-projects") == [
-        "2024_05_NYC", "demo_photos", "xt5", "2025_12_Gothics", "2026_01_Japan", "2026_07_Hawaii",
+        "2024_05_NYC", "demo_photos", "2026_01_Panorama", "2025_12_Gothics", "2026_01_Japan", "2026_07_Hawaii",
     ]
     page.context.close()
 

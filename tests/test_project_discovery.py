@@ -113,3 +113,41 @@ def test_results_without_matching_embeddings_is_still_stale(tmp_path):
     (out_dir / "results.json").write_text(json.dumps({"clusters": []}))
 
     assert projects.project_status(folder, out_dir) == "stale"
+
+
+def test_device_folders_roll_up_into_their_trip(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(projects, "DATA_DIR", data_dir)
+    monkeypatch.setattr(projects, "RECENTS_FILE", tmp_path / "recents.json")
+    trips = tmp_path / "Trips"
+    # A trip run whole, with device folders that were run on their own first.
+    hoh = trips / "2026_09_Hoh_River_Trail"
+    _fake_project(data_dir, hoh / "xt5", ["a.jpg"])
+    _fake_project(data_dir, hoh / "iphone", ["b.jpg"])
+    _fake_project(data_dir, hoh, ["c.jpg"])
+    # A trip only ever run per device, under a year folder.
+    korea_canon = trips / "2024" / "2024_02_Korea" / "canon"
+    out = _fake_project(data_dir, korea_canon, ["d.jpg"])
+    # Not a trip: left alone.
+    demo = tmp_path / "demo_photos"
+    _fake_project(data_dir, demo, ["e.jpg"])
+
+    entries = {e["folder"]: e for e in projects.known_projects()}
+
+    korea = trips / "2024" / "2024_02_Korea"
+    assert set(entries) == {str(hoh), str(korea), str(demo)}
+    assert entries[str(hoh)]["image_count"] == 1
+    assert entries[str(korea)]["output_dir"] == str(data_dir / projects.project_output_dir_name(korea))
+    # The trip inherits when its device folder last ran.
+    run_time = projects._pipeline_run_time(out)
+    assert entries[str(korea)]["last_pipeline_run"] == run_time
+
+
+def test_trip_folder_is_the_outermost_dated_folder():
+    from pathlib import Path
+
+    assert projects.trip_folder(Path("/h0/Trips/2024/2024_03_Europe/2024_03_12_Paris/xt5")) == Path(
+        "/h0/Trips/2024/2024_03_Europe"
+    )
+    assert projects.trip_folder(Path("/h0/Trips/2026_07_Hawaii")) == Path("/h0/Trips/2026_07_Hawaii")
+    assert projects.trip_folder(Path("/h0/Trips/2022/2022_Summer")) is None
