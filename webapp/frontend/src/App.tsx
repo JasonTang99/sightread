@@ -251,10 +251,10 @@ export default function App() {
         {state.folder && (
           <span
             className="text-sm text-gray-900 font-semibold truncate max-w-[16rem]"
-            title={state.folder}
+            title={state.display_name ? `${state.display_name}\n${state.folder}` : state.folder}
             data-testid="project-name"
           >
-            {state.folder.split("/").filter(Boolean).pop()}
+            {state.display_name || state.folder.split("/").filter(Boolean).pop()}
           </span>
         )}
 
@@ -421,7 +421,7 @@ export default function App() {
             <p className="text-gray-700 font-medium">All done!</p>
             <p className="text-sm text-gray-500 mt-1">
               {state.pending_delete_count > 0 || favorites.length > 0
-                ? "Open the Finish tab to apply deletes, export favourites, and clear caches."
+                ? "Open the Finish tab to apply deletes, export the trip, and clear caches."
                 : "Nothing pending."}
             </p>
             <button

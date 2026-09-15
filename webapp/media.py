@@ -25,6 +25,7 @@ Photo", so the failure mode is a stray clip in the Videos tab, never a video
 deleted with a still.
 """
 import os
+import re
 import struct
 import threading
 from pathlib import Path
@@ -37,27 +38,67 @@ from typing import Iterable
 # on a single camera folder has one beside it.
 TRIP_EXPORTS_DIR = "_exports"
 
+# Device folders that hold other people's cameras, not Jason's. `xt5/`,
+# `iphone/`, `canon/` are his; a shared album is not a third device of his.
+# Cross-camera merge may join those cameras to each other, but must not pull
+# his shots into the group — keep-best would then queue *his* frames as the
+# extras in someone else's lava-field burst.
+OTHER_PEOPLE_DEVICES = frozenset({"google photos", "shared"})
+
 HEIF_EXTENSIONS = {".heic", ".heif"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"} | HEIF_EXTENSIONS
 # No ".ts": MPEG-TS shares the extension with TypeScript sources, so any code
 # folder would show up full of bogus "videos". AVCHD cameras use .mts/.m2ts.
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
 
+# Numbered city folders under a camera: `01_Hakodate`, `00_Tokyo`. Date
+# folders (`02-06`) and dated-city folders (`2024_02_Amsterdam`) do not match.
+CITY_DIR_RE = re.compile(r"^\d{2}_")
+
 # Apple records 1.5s either side of the shutter. Measured 2.48–3.03s across
 # 161 motion files; the margin covers trimmed and re-encoded exports.
 LIVE_PHOTO_MAX_S = 4.0
 
 
-def walk_media(root: Path | str):
+def walk_media(root: Path | str, subtrip: str | None = None,
+               extra_paths: Iterable[str] | None = None):
     """os.walk over a project, minus the directories that are not source media.
 
     Skips `_exports` and dot-directories in place, so a trip folder can be
     opened as one project — camera folders and all — without the export tree
     reading back as hundreds of extra photos.
+
+    `subtrip` is a numbered city folder (`01_Hakodate`). Under each camera
+    directory only that city is walked, so Japan 2024 can be reviewed city
+    by city instead of as 1,200 clusters.
+
+    `extra_paths` are files that belong to this subtrip but do not sit in a
+    matching city folder — typically iPhone shots assigned by EXIF time.
+    Yielded after the walk, grouped by parent directory.
     """
+    root = Path(root)
     for dirpath, dirs, names in os.walk(root):
         dirs[:] = sorted(d for d in dirs if d != TRIP_EXPORTS_DIR and not d.startswith("."))
+        if subtrip:
+            try:
+                rel = Path(dirpath).relative_to(root).parts
+            except ValueError:
+                rel = ()
+            if len(rel) == 1:
+                # Camera folder: only descend into the named city.
+                dirs[:] = [d for d in dirs if d == subtrip]
+                names = []
+            elif len(rel) >= 2 and rel[1] != subtrip:
+                dirs[:] = []
+                continue
         yield dirpath, names
+    if extra_paths:
+        extra: dict[str, list[str]] = {}
+        for p in extra_paths:
+            parent, name = os.path.split(p)
+            extra.setdefault(parent, []).append(name)
+        for dirpath, names in extra.items():
+            yield dirpath, names
 
 
 def device_of(path: Path | str, root: Path | str) -> str:

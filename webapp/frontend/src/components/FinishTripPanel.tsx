@@ -189,7 +189,7 @@ export function FinishTripPanel({
       <div className="bg-white rounded-lg border border-gray-200 px-4 py-3">
         <h2 className="text-sm font-semibold text-gray-900">Finish trip</h2>
         <p className="text-xs text-gray-500 mt-1">
-          Three steps in order: delete reviewed shots from the primary drive, export favourites,
+          Three steps in order: delete reviewed shots from the primary drive, export the trip,
           then clear caches so you cannot accidentally re-review.
         </p>
       </div>

@@ -22,7 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 import thumbs
-from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names, walk_media
+from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names
 from utils import (
     DELETED,
     FAVORITE,
@@ -52,9 +52,12 @@ from projects import (
     known_projects,
     mark_done,
     pipeline_cache_inventory,
+    project_display_name,
     project_output_dir,
     project_status,
     upsert_recent,
+    walk_project,
+    write_project_meta,
 )
 from jobs import JobState, current_job, start_pipeline
 from video import (
@@ -297,7 +300,8 @@ def get_state():
     ctx = _active
     results_path = ctx.output_dir / "results.json"
     if not results_path.exists():
-        return {"no_project": False, "needs_pipeline": True, "folder": str(ctx.folder)}
+        return {"no_project": False, "needs_pipeline": True, "folder": str(ctx.folder),
+                "subtrip": ctx.subtrip, "display_name": project_display_name(ctx.folder, ctx.subtrip)}
     data = load_results(results_path)
     decisions = load_decisions(ctx.output_dir)
     clusters = sort_clusters_chronologically(
@@ -322,6 +326,8 @@ def get_state():
         # relative to this, so a trip opened as one project can say where
         # each shot came from.
         "folder": str(ctx.folder),
+        "subtrip": ctx.subtrip,
+        "display_name": project_display_name(ctx.folder, ctx.subtrip),
         "clusters": clusters,
         "singletons": singletons,
         "singleton_delete_threshold": SINGLETON_DELETE_THRESHOLD,
@@ -708,7 +714,7 @@ def _scan_videos(ctx: ProjectContext) -> list[str]:
     """
     folder = ctx.folder.resolve()
     found: list[str] = []
-    for root, files in walk_media(folder):
+    for root, files in walk_project(folder, ctx.subtrip):
         motion = motion_names(root, files)
         for name in files:
             if os.path.splitext(name)[1].lower() not in VIDEO_EXTENSIONS or name in motion:
@@ -728,7 +734,7 @@ def preview_trip_export():
     (costing nothing) before agreeing to anything.
     """
     ctx = _require_active()
-    return plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    return plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
 
 
 @app.post("/api/exports/trip")
@@ -745,7 +751,7 @@ def run_trip_export():
             f"Exports location unavailable: {anchor}. Check SIGHTREAD_EXPORTS_ROOT "
             f"and that the drive is mounted.",
         )
-    plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    plan = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
     free = plan["free_bytes"]
     # Hardlinks write no data, so free space is only a question when the exports
     # root is on another filesystem and the run has to copy — or when a HEIF
@@ -759,7 +765,7 @@ def run_trip_export():
         )
     # No curation lock: this only reads decisions and writes into the exports
     # tree, so it cannot race with a confirm the way apply-deletes can.
-    report = export_trip(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    report = export_trip(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
     return {"ok": True, **report.as_dict()}
 
 
@@ -967,8 +973,24 @@ def _read_shot_time(path: str) -> str | None:
 # on-disk cache is authoritative once warm. Holding it in memory too means the
 # common case — every path already known — costs nothing at all, where before
 # each /api/gallery and /api/videos call re-parsed the whole JSON.
+#
+# The file is versioned because the *reader* can change while the files do
+# not. `_read_shot_time` used to miss DateTimeOriginal; those entries would
+# have stayed wrong forever if an unversioned cache were kept. Bump this when
+# the IFD choice or fallback order changes.
+SHOT_TIMES_VERSION = 2
 _shot_times_lock = threading.Lock()
 _shot_times_mem: dict[Path, tuple[tuple[int, int] | None, dict[str, str | None]]] = {}
+
+
+def _parse_shot_times_file(loaded) -> dict[str, str | None]:
+    """Times dict from a cache file, or empty if this reader cannot use it."""
+    if not isinstance(loaded, dict):
+        return {}
+    if loaded.get("v") != SHOT_TIMES_VERSION:
+        return {}
+    times = loaded.get("times")
+    return times if isinstance(times, dict) else {}
 
 
 def _get_shot_times(
@@ -983,6 +1005,12 @@ def _get_shot_times(
     passes those in rather than making us reopen a few hundred files over the
     NAS to learn what is already on disk. They are still written to the cache,
     so a later /api/videos call over the same paths costs nothing either.
+
+    A cache written by an older `_read_shot_time` is discarded wholesale —
+    the entries look like timestamps, so there is no way to tell a wrong one
+    from a right one without re-reading EXIF. The on-disk shape is
+    ``{"v": SHOT_TIMES_VERSION, "times": {path: iso}}``; a flat ``{path: iso}``
+    file is the previous reader and does not count.
 
     Serialised: the gallery and the video list both extend the same file, and
     two unsynchronised read-modify-writes meant whichever finished last dropped
@@ -1005,8 +1033,7 @@ def _get_shot_times(
             if key is not None:
                 try:
                     loaded = json.loads(cache_path.read_text())
-                    if isinstance(loaded, dict):
-                        cache = loaded
+                    cache = _parse_shot_times_file(loaded)
                 except (OSError, json.JSONDecodeError):
                     pass  # rebuilt from EXIF below
 
@@ -1018,7 +1045,7 @@ def _get_shot_times(
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cache_path.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(cache))
+                tmp.write_text(json.dumps({"v": SHOT_TIMES_VERSION, "times": cache}))
                 tmp.replace(cache_path)
                 st = cache_path.stat()
                 key = (st.st_mtime_ns, st.st_size)
@@ -1375,6 +1402,7 @@ if os.getenv("SIGHTREAD_TEST"):
 
 class FolderRequest(BaseModel):
     folder: str
+    subtrip: str | None = None
 
 
 @app.get("/api/projects")
@@ -1384,20 +1412,23 @@ def list_projects():
     for e in entries:
         folder = Path(e["folder"])
         out_dir = Path(e["output_dir"])
+        subtrip = e.get("subtrip") or None
         if folder.exists():
-            status = project_status(folder, out_dir)
+            status = project_status(folder, out_dir, subtrip)
         else:
             status = "never_run"
         job = current_job()
-        if job and job.running and job.folder == e["folder"]:
+        if (job and job.running and job.folder == e["folder"]
+                and (job.subtrip or None) == subtrip):
             status = "running"
         estimate = (
-            estimate_pipeline(folder, out_dir)
+            estimate_pipeline(folder, out_dir, subtrip=subtrip)
             if folder.exists() and status != "running" else None
         )
         result.append({
             "folder": e["folder"],
-            "display_name": folder.name,
+            "subtrip": subtrip,
+            "display_name": project_display_name(folder, subtrip),
             "last_opened": e.get("last_opened"),
             "last_pipeline_run": e.get("last_pipeline_run"),
             "image_count": e.get("image_count", 0),
@@ -1415,8 +1446,10 @@ def open_project(req: FolderRequest):
     folder = Path(req.folder).resolve()
     if not folder.exists() or not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {folder}")
-    out_dir = project_output_dir(folder)
+    subtrip = req.subtrip or None
+    out_dir = project_output_dir(folder, subtrip)
     out_dir.mkdir(parents=True, exist_ok=True)
+    write_project_meta(out_dir, folder, subtrip)
     # Opening a project is the only way it becomes active, so it is the one
     # place legacy curation state has to be folded into decisions.json.
     with _curation_lock:
@@ -1424,7 +1457,7 @@ def open_project(req: FolderRequest):
         # A trip whose xt5/ folder was reviewed on its own starts here with no
         # opinion about any of those photos, and would walk the user back
         # through every keeper. The child project's decisions are on disk.
-        adopted = adopt_subfolder_reviews(folder, out_dir)
+        adopted = adopt_subfolder_reviews(folder, out_dir, subtrip)
     if adopted["photos"] or adopted["video_tags"] or adopted["clips"]:
         log.info(
             "Adopted %d decision(s), %d video tag(s), %d clip(s) from %d device "
@@ -1432,7 +1465,7 @@ def open_project(req: FolderRequest):
             adopted["photos"], adopted["video_tags"], adopted["clips"],
             adopted["folders"], folder,
         )
-    _active = ProjectContext(folder=folder, output_dir=out_dir)
+    _active = ProjectContext(folder=folder, output_dir=out_dir, subtrip=subtrip)
     # Undo survives a restart now, so reopening a project picks its stack back
     # up rather than starting blank.
     _load_undo(_active)
@@ -1441,10 +1474,11 @@ def open_project(req: FolderRequest):
         _prewarm_started.discard(str(out_dir))
         _prewarm_started.discard(f"posters:{out_dir}")
         _prewarm_started.discard(f"motion:{out_dir}")
-    upsert_recent(folder, out_dir)
-    status = project_status(folder, out_dir)
+    upsert_recent(folder, out_dir, subtrip=subtrip)
+    status = project_status(folder, out_dir, subtrip)
     return {
         "folder": str(folder),
+        "subtrip": subtrip,
         "output_dir": str(out_dir),
         "status": status,
         "done_at": is_done(out_dir),
@@ -1457,13 +1491,15 @@ def run_pipeline_endpoint(req: FolderRequest):
     folder = Path(req.folder).resolve()
     if not folder.exists() or not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {folder}")
+    subtrip = req.subtrip or None
     job = current_job()
     if job and job.running:
         raise HTTPException(409, "Pipeline already running")
-    out_dir = project_output_dir(folder)
+    out_dir = project_output_dir(folder, subtrip)
+    write_project_meta(out_dir, folder, subtrip)
     with _curation_lock:
         migrate_project_state(out_dir)
-    _active = ProjectContext(folder=folder, output_dir=out_dir)
+    _active = ProjectContext(folder=folder, output_dir=out_dir, subtrip=subtrip)
     # A re-run renumbers clusters but decisions and undo are keyed by photo
     # path, so the stack stays meaningful across it.
     _load_undo(_active)
@@ -1471,10 +1507,11 @@ def run_pipeline_endpoint(req: FolderRequest):
     clear_done(out_dir)  # new output to review; the project is no longer finished
     start_pipeline(
         folder, out_dir, PROJECT_ROOT,
-        on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True),
+        on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True, subtrip=subtrip),
+        subtrip=subtrip,
     )
-    upsert_recent(folder, out_dir)
-    return {"ok": True, "folder": str(folder)}
+    upsert_recent(folder, out_dir, subtrip=subtrip)
+    return {"ok": True, "folder": str(folder), "subtrip": subtrip}
 
 
 class DoneRequest(BaseModel):
@@ -1488,7 +1525,7 @@ def finish_trip_preview():
     decisions = load_decisions(ctx.output_dir)
     pending = len(paths_with_status(decisions, TO_DELETE))
     favorites = paths_with_status(decisions, FAVORITE)
-    export = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT)
+    export = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
     pipeline = pipeline_cache_inventory(ctx.output_dir)
     derived_bytes = 0
     for name in ("thumb_cache", "poster_cache", "video_cache"):
@@ -1561,7 +1598,7 @@ def job_status():
     if job is None:
         return {
             "running": False, "done": False, "error": None,
-            "last_line": None, "lines": [], "folder": None,
+            "last_line": None, "lines": [], "folder": None, "subtrip": None,
         }
     return {
         "running": job.running,
@@ -1570,6 +1607,7 @@ def job_status():
         "last_line": job.last_line,
         "lines": job.tail,
         "folder": job.folder,
+        "subtrip": job.subtrip,
     }
 
 

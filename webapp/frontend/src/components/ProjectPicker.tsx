@@ -56,12 +56,16 @@ function byTripDate(a: ProjectEntry, b: ProjectEntry): number {
   return a.folder.localeCompare(b.folder);
 }
 
+function projectKey(p: { folder: string; subtrip?: string | null }): string {
+  return p.subtrip ? `${p.folder}#${p.subtrip}` : p.folder;
+}
+
 interface ProjectListProps {
   title: string;
   testId: string;
   projects: ProjectEntry[];
   selected: string | null;
-  onSelect: (folder: string) => void;
+  onSelect: (key: string) => void;
 }
 
 function ProjectList({ title, testId, projects, selected, onSelect }: ProjectListProps) {
@@ -78,11 +82,12 @@ function ProjectList({ title, testId, projects, selected, onSelect }: ProjectLis
             const badge = p.done_at
               ? { label: "Done", cls: "bg-green-100 text-green-700" }
               : STATUS_BADGE[p.status];
-            const isSelected = selected === p.folder;
+            const key = projectKey(p);
+            const isSelected = selected === key;
             return (
-              <li key={p.folder}>
+              <li key={key}>
                 <button
-                  onClick={() => onSelect(p.folder)}
+                  onClick={() => onSelect(key)}
                   className={`w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
                     isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
                   }`}
@@ -155,7 +160,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           await fetch("/api/projects/open", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ folder: status.folder }),
+            body: JSON.stringify({ folder: status.folder, subtrip: status.subtrip ?? null }),
           });
           onProjectOpened();
         }
@@ -164,14 +169,14 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     return () => clearInterval(id);
   }, [job?.running, onProjectOpened]);
 
-  const openProject = async (folder: string) => {
+  const openProject = async (p: ProjectEntry) => {
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/projects/open", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder }),
+        body: JSON.stringify({ folder: p.folder, subtrip: p.subtrip ?? null }),
       });
       if (!res.ok) {
         const e = await res.json();
@@ -185,20 +190,20 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     }
   };
 
-  const runPipeline = async (folder: string) => {
+  const runPipeline = async (folder: string, subtrip?: string | null) => {
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/projects/run-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder }),
+        body: JSON.stringify({ folder, subtrip: subtrip ?? null }),
       });
       if (!res.ok) {
         const e = await res.json();
         throw new Error(e.detail ?? "Failed to start pipeline");
       }
-      setJob({ running: true, done: false, error: null, last_line: null, lines: [], folder });
+      setJob({ running: true, done: false, error: null, last_line: null, lines: [], folder, subtrip: subtrip ?? null });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -245,8 +250,8 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     );
   }
 
-  const selectedIsNew = selected && !recents.find((r) => r.folder === selected);
-  const selectedRecent = selected ? recents.find((r) => r.folder === selected) : null;
+  const selectedIsNew = selected && !recents.find((r) => projectKey(r) === selected);
+  const selectedRecent = selected ? recents.find((r) => projectKey(r) === selected) : null;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -355,7 +360,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
             <div className="bg-white border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
               <div className="flex-1 min-w-0">
                 <p className="text-xs text-gray-500">Selected</p>
-                <p className="text-sm font-medium text-gray-800 truncate font-mono">{selected}</p>
+                <p className="text-sm font-medium text-gray-800 truncate font-mono">
+                  {selectedRecent?.display_name ?? selected}
+                </p>
               </div>
 
               {error && (
@@ -366,7 +373,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
                 <>
                   {(selectedRecent.status === "ready" || selectedRecent.status === "stale") && (
                     <button
-                      onClick={() => openProject(selected)}
+                      onClick={() => selectedRecent && openProject(selectedRecent)}
                       disabled={busy}
                       className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
                     >
@@ -374,7 +381,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
                     </button>
                   )}
                   <button
-                    onClick={() => runPipeline(selected)}
+                    onClick={() => selectedRecent && runPipeline(selectedRecent.folder, selectedRecent.subtrip)}
                     disabled={busy}
                     className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50 shrink-0"
                   >
@@ -383,7 +390,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
                 </>
               ) : (
                 <button
-                  onClick={() => runPipeline(selected)}
+                  onClick={() => selected && runPipeline(selected)}
                   disabled={busy}
                   className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
                 >

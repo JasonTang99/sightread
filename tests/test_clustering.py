@@ -179,6 +179,48 @@ class TestOrientationMerge:
 
 
 # ---------------------------------------------------------------------------
+# Exposure-bracket merge (same camera, AE moved the embedding past tight)
+# ---------------------------------------------------------------------------
+class TestExposureBracket:
+    """Canon AE hunting: same stairs 6s later, ISO 800 vs 400, dist 0.093.
+
+    Tight is 0.08 and the 3s burst misses the gap. Widening burst with no
+    embedding check chains a 20-minute Koyasan walk into one cluster.
+    """
+
+    def _pair(self, gap_s=6.0, dist=0.093):
+        a = [1.0, 0.0, 0.0]
+        theta = np.arccos(1.0 - dist)
+        b = [float(np.cos(theta)), float(np.sin(theta)), 0.0]
+        embeddings = _embeddings([a, a, b, b])
+        # 1s inside each pair, `gap_s` between the last of A and first of B.
+        timestamps = [0.0, 1.0, 1.0 + gap_s, 2.0 + gap_s]
+        return embeddings, timestamps
+
+    def _cluster(self, fixture, **kw):
+        embeddings, timestamps = fixture
+        opts = dict(tight=0.08, loose=0.22, burst_window_s=3.0, orient_window_s=0.0)
+        opts.update(kw)
+        return pipeline.cluster_embeddings(embeddings, timestamps, None, **opts)
+
+    def test_joins_a_darker_reshoot_a_few_seconds_later(self):
+        clusters = self._cluster(self._pair())
+        assert len(clusters) == 1
+
+    def test_does_not_join_a_different_subject_in_the_same_gap(self):
+        clusters = self._cluster(self._pair(dist=0.5))
+        assert len(clusters) == 2
+
+    def test_stops_at_the_bracket_window(self):
+        clusters = self._cluster(self._pair(gap_s=20.0))
+        assert len(clusters) == 2
+
+    def test_off_when_bracket_window_is_zero(self):
+        clusters = self._cluster(self._pair(), bracket_window_s=0.0)
+        assert len(clusters) == 2
+
+
+# ---------------------------------------------------------------------------
 # Cross-camera re-shoot merge
 # ---------------------------------------------------------------------------
 class TestCrossCameraMerge:
@@ -270,6 +312,90 @@ class TestCrossCameraMerge:
             models=models, cross_window_s=300.0, cross_threshold=0.22,
         )
         assert len(set(out.tolist())) == 2
+
+
+# ---------------------------------------------------------------------------
+# Own folders vs other people's cameras
+# ---------------------------------------------------------------------------
+class TestOwnVsGuestMerge:
+    """Other people's cameras may join each other. Jason's stay out.
+
+    Folder, not EXIF model: `google photos/` holds six cameras, and a handful
+    of his own iPhone frames live in there too.
+    """
+
+    def _pair(self, models=("Galaxy Z Fold6", "Xiaomi 17 Pro Max"),
+              kinds=("portrait", "portrait"), dist=0.1, gap_s=200.0):
+        a = [1.0, 0.0, 0.0]
+        theta = np.arccos(1.0 - dist)
+        b = [float(np.cos(theta)), float(np.sin(theta)), 0.0]
+        embeddings = _embeddings([a, a, b, b])
+        timestamps = [0.0, 1.0, gap_s, gap_s + 1.0]
+        orientations = [kinds[0], kinds[0], kinds[1], kinds[1]]
+        labels = np.array([0, 0, 1, 1], dtype=np.int64)
+        model_list = [models[0], models[0], models[1], models[1]]
+        return embeddings, timestamps, orientations, labels, model_list
+
+    def _merge(self, fixture, devices, **kw):
+        embeddings, timestamps, orientations, labels, models = fixture
+        opts = dict(window_s=120.0, threshold=0.38, max_span_s=3600.0,
+                    models=models, cross_window_s=300.0, cross_threshold=0.22,
+                    devices=devices)
+        opts.update(kw)
+        return pipeline._merge_reshoot_pairs(
+            embeddings, timestamps, orientations, labels, **opts)
+
+    def test_other_people_cameras_still_merge(self):
+        out = self._merge(self._pair(), devices=["google photos"] * 4)
+        assert len(set(out.tolist())) == 1
+
+    def test_own_camera_does_not_join_other_people(self):
+        out = self._merge(
+            self._pair(models=("X-T5", "Galaxy Z Fold6")),
+            devices=["xt5", "xt5", "google photos", "google photos"],
+        )
+        assert len(set(out.tolist())) == 2
+
+    def test_own_phone_and_camera_still_merge(self):
+        out = self._merge(
+            self._pair(models=("iPhone 14", "X-T5")),
+            devices=["iphone", "iphone", "xt5", "xt5"],
+        )
+        assert len(set(out.tolist())) == 1
+
+    def test_shared_folder_counts_as_other_people(self):
+        out = self._merge(
+            self._pair(models=("X-T5", "iPhone 17 Pro")),
+            devices=["xt5", "xt5", "shared", "shared"],
+        )
+        assert len(set(out.tolist())) == 2
+
+    def test_unidentified_folder_is_treated_as_own(self):
+        out = self._merge(
+            self._pair(models=("X-T5", "Galaxy Z Fold6")),
+            devices=["", "", "google photos", "google photos"],
+        )
+        assert len(set(out.tolist())) == 2
+
+    def test_rotation_merge_also_refuses_own_into_guest(self):
+        out = self._merge(
+            self._pair(models=("X-T5", "Galaxy Z Fold6"),
+                       kinds=("portrait", "landscape"), dist=0.3),
+            devices=["xt5", "xt5", "google photos", "google photos"],
+        )
+        assert len(set(out.tolist())) == 2
+
+    def test_cluster_embeddings_keeps_own_out_of_guest_group(self):
+        embeddings, timestamps, orientations, _labels, models = self._pair(
+            models=("X-T5", "Galaxy Z Fold6"),
+        )
+        devices = ["xt5", "xt5", "google photos", "google photos"]
+        clusters = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+            models=models, cross_window_s=300.0, cross_threshold=0.22,
+            devices=devices,
+        )
+        assert len(clusters) == 2
 
 
 # ---------------------------------------------------------------------------

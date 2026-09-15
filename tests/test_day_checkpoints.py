@@ -178,3 +178,21 @@ def test_a_metric_that_stops_loading_rescores_everything(trip, tmp_path, scorer,
 
     assert sorted(p for c in scorer["calls"] for p in c) == sorted(paths)
     assert "musiq" not in components and "nima" in components
+
+
+def test_a_larger_cache_still_serves_a_city_subset(trip, tmp_path, embedder):
+    """A whole-trip cache has extra paths; a city run must not re-embed."""
+    paths, timestamps = trip
+    cache = tmp_path / "emb.npy"
+    pipeline.compute_embeddings(paths, cache, timestamps=timestamps)
+    embedder.update(loads=0, calls=[])
+
+    subset = paths[:2]
+    result = pipeline.compute_embeddings(
+        subset, tmp_path / "city.npy", timestamps=timestamps[:2],
+        extra_cache_paths=[cache],
+    )
+
+    assert embedder["loads"] == 0
+    assert embedder["calls"] == []
+    np.testing.assert_allclose(result, np.stack([_vec(p) for p in subset]))

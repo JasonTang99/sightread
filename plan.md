@@ -250,10 +250,9 @@ Still open:
   place* would change the import copy too. Most write-new-then-rename, which breaks the
   link harmlessly. Worth knowing before pointing anything at the exports tree that writes;
   if that ever happens, the fix is `--copy` on the export, not a symlink.
-- **The 📤 button lives on the Favourites tab but exports the whole trip.** It was the
-  favourites-export button and its placement outlived that meaning. Move it to the Finish
-  tab, or leave it and rename the tab; either way the current pairing invites the wrong
-  expectation. `webapp/frontend/src/components/FavoritesView.tsx`.
+- ~~**The 📤 button lives on the Favourites tab but exports the whole trip.**~~
+  **Done 2026-09-14.** Button removed from Favourites. Finish step 2 is the
+  export. `webapp/frontend/src/components/FavoritesView.tsx`.
 - ~~**Re-arming on reload.**~~ **Done 2026-08-31.** `plan_export` splits the set into
   `delivered` / `pending` using the same size check the delivery makes, so a reload after
   a successful export leaves step 2 ticked instead of demanding a no-op click before step
