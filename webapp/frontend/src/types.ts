@@ -33,6 +33,8 @@ export interface AppState {
   // The project folder. A photo's camera folder is its path relative to this,
   // which is what the device badges show.
   folder?: string;
+  subtrip?: string | null;
+  display_name?: string;
   clusters: Cluster[];
   singletons: Cluster[];
   singleton_delete_threshold: number;
@@ -66,6 +68,7 @@ export type ProjectStatus = "ready" | "stale" | "never_run" | "running";
 
 export interface ProjectEntry {
   folder: string;
+  subtrip?: string | null;
   display_name: string;
   last_opened: string | null;
   last_pipeline_run: string | null;
@@ -126,4 +129,5 @@ export interface JobStatus {
   last_line: string | null;
   lines: string[];
   folder: string | null;
+  subtrip?: string | null;
 }

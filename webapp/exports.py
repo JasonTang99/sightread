@@ -234,7 +234,8 @@ def _is_exported_clip(path: Path, folder: Path) -> bool:
     return rel.parts[:1] == (EXPORT_DIR_NAME,)
 
 
-def deliverables(output_dir: Path, folder: Path) -> list[Deliverable]:
+def deliverables(output_dir: Path, folder: Path,
+                 subtrip: str | None = None) -> list[Deliverable]:
     """Everything the trip delivers: every surviving photo, plus starred videos.
 
     Walks the folder rather than the decision record, because an undecided
@@ -249,8 +250,12 @@ def deliverables(output_dir: Path, folder: Path) -> list[Deliverable]:
     """
     decisions = load_decisions(output_dir)
     folder = folder.resolve()
+    extra = None
+    if subtrip:
+        from projects import unfiled_paths_for_subtrip
+        extra = unfiled_paths_for_subtrip(folder, subtrip)
     out: list[Deliverable] = []
-    for root, files in walk_media(folder):
+    for root, files in walk_media(folder, subtrip, extra_paths=extra):
         motion = motion_names(root, files)
         motion_by_stem = {os.path.splitext(n)[0]: n for n in motion}
         for name in files:
@@ -276,9 +281,9 @@ def deliverables(output_dir: Path, folder: Path) -> list[Deliverable]:
     return sorted(out, key=lambda d: d.src)
 
 
-def export_shots(output_dir: Path, folder: Path) -> list[Path]:
+def export_shots(output_dir: Path, folder: Path, subtrip: str | None = None) -> list[Path]:
     """The source files `deliverables` would export."""
-    return [d.src for d in deliverables(output_dir, folder)]
+    return [d.src for d in deliverables(output_dir, folder, subtrip)]
 
 
 def missing_favorites(output_dir: Path) -> list[str]:
@@ -312,7 +317,8 @@ def _link_capable(folder: Path, dest: Path) -> bool:
         return False
 
 
-def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dict:
+def plan_export(output_dir: Path, folder: Path, root: Path | None = None,
+                subtrip: str | None = None) -> dict:
     """What an export would deliver, without delivering anything.
 
     Feeds the confirmation dialog: `mode` says whether the run costs disk space
@@ -329,7 +335,7 @@ def plan_export(output_dir: Path, folder: Path, root: Path | None = None) -> dic
     """
     assignments = load_video_tags(output_dir)["videos"]
     dest = export_dir_for(folder, root)
-    items = deliverables(output_dir, folder)
+    items = deliverables(output_dir, folder, subtrip)
     total = 0
     delivered = 0
     pending = 0
@@ -495,7 +501,8 @@ def _place(src: Path, target: Path) -> bool:
 
 
 def export_trip(
-    output_dir: Path, folder: Path, root: Path | None = None
+    output_dir: Path, folder: Path, root: Path | None = None,
+    subtrip: str | None = None,
 ) -> ExportReport:
     """Deliver every surviving photo and starred video into the trip's export dir.
 
@@ -507,7 +514,7 @@ def export_trip(
     dest = export_dir_for(folder, root)
     report = ExportReport(dest=dest)
 
-    for item in deliverables(output_dir, folder):
+    for item in deliverables(output_dir, folder, subtrip):
         shot = item.src
         tag = assignments.get(item.tag_of)
         shot_dest = _dest_for_shot(folder, root, shot, tag)

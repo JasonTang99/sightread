@@ -23,18 +23,9 @@ function videoUrl(path: string) {
   return `/api/video?path=${encodeURIComponent(path)}`;
 }
 
-function formatBytes(n: number) {
-  if (!n) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
-  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
 export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [focus, setFocus] = useState(0);
-  const [exporting, setExporting] = useState(false);
-  const [exportResult, setExportResult] = useState<string | null>(null);
   const focusedRef = useRef<HTMLDivElement | null>(null);
 
   // Keep focus index in range as the list shrinks.
@@ -45,61 +36,6 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
   useEffect(() => {
     focusedRef.current?.scrollIntoView({ block: "nearest" });
   }, [focus]);
-
-  // Export is two round trips on purpose: the preview prices the run before the
-  // user agrees to it, since the exports root can sit on the same drive
-  // applying deletes just freed. It delivers the whole trip, not only what is
-  // shown here — this button is just the nearest place to reach it.
-  const handleExport = async () => {
-    setExporting(true);
-    try {
-      const pres = await fetch("/api/exports/preview");
-      if (!pres.ok) throw new Error(`Preview failed: ${pres.status}`);
-      const plan = await pres.json();
-      if (plan.files === 0) {
-        setExportResult("Nothing to export — no photo or starred video is on disk.");
-        return;
-      }
-      const free = plan.free_bytes == null ? "" : ` (${formatBytes(plan.free_bytes)} free)`;
-      const reencode =
-        plan.convert > 0
-          ? `; ${plan.convert} HEIC re-encoded as JPEG, up to ${formatBytes(plan.convert_bytes)}`
-          : "";
-      const cost =
-        (plan.mode === "link"
-          ? `${plan.files} file(s), ${formatBytes(plan.bytes)} — hardlinked` +
-            (plan.convert > 0 ? "" : ", so no extra space is used")
-          : `${plan.files} file(s), ${formatBytes(plan.bytes)} to copy`) + reencode;
-      const ok = window.confirm(
-        `Export this trip — ${cost} — ` +
-          `to\n\n${plan.dest}${free}\n\n` +
-          `Every photo that survived curation, as a JPEG — no raws or sidecars, and never a ` +
-          `derived cache — plus starred videos in their tag folders. ` +
-          `Nothing already there is overwritten.`
-      );
-      if (!ok) return;
-
-      const res = await fetch("/api/exports/trip", { method: "POST" });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail ?? `Export failed: ${res.status}`);
-      }
-      const data = await res.json();
-      const reencoded = data.converted ? `, ${data.converted} re-encoded from HEIC` : "";
-      const written =
-        data.copied > 0 || data.converted
-          ? ` (${data.linked} linked, ${formatBytes(data.copied_bytes)} copied${reencoded})`
-          : " (hardlinked)";
-      const parts = [`Exported ${data.delivered} file(s)${written} to ${data.dest}`];
-      if (data.skipped) parts.push(`${data.skipped} already there`);
-      if (data.failed?.length) parts.push(`${data.failed.length} failed`);
-      setExportResult(`${parts.join(" · ")}.`);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setExporting(false);
-    }
-  };
 
   const handleUnfavorite = async (path: string) => {
     setBusy(path);
@@ -196,18 +132,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         <span className="text-xs text-gray-400">
           h/j/k/l move · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">space</kbd> unfavorite + mark delete · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> unfavorite
         </span>
-        <button
-          onClick={handleExport}
-          disabled={exporting}
-          data-testid="export-trip"
-          className="ml-auto px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
-        >
-          {exporting ? "Exporting…" : "📤 Export trip"}
-        </button>
       </div>
-      {exportResult && (
-        <p className="text-xs text-gray-500 px-3">{exportResult}</p>
-      )}
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` }}>
         {favorites.map((path, i) => (
           <div

@@ -216,7 +216,8 @@ class TestShotTimeCache:
 
         assert result == {str(a): f"t:{a}", str(b): f"t:{b}"}
         on_disk = json.loads((output_dir / "shot_times.json").read_text())
-        assert set(on_disk) == {str(a), str(b)}
+        assert on_disk["v"] == server.SHOT_TIMES_VERSION
+        assert set(on_disk["times"]) == {str(a), str(b)}
 
     def test_cache_written_by_another_process_is_picked_up(self, api, monkeypatch):
         client, folder, output_dir = api
@@ -224,10 +225,40 @@ class TestShotTimeCache:
         monkeypatch.setattr(
             server, "_read_shot_time", lambda p: pytest.fail("should not re-read EXIF")
         )
-        (output_dir / "shot_times.json").write_text(json.dumps({str(img): "2020-05-05T05:05:05"}))
+        (output_dir / "shot_times.json").write_text(json.dumps({
+            "v": server.SHOT_TIMES_VERSION,
+            "times": {str(img): "2020-05-05T05:05:05"},
+        }))
         ctx = server._active
 
         assert server._get_shot_times(ctx, [str(img)]) == {str(img): "2020-05-05T05:05:05"}
+
+    def test_unversioned_cache_is_reread(self, api, monkeypatch):
+        """The previous reader wrote a flat {path: iso} file. Those entries
+        cannot be trusted after the IFD fix — a DateTime that disagreed with
+        DateTimeOriginal would sit there forever."""
+        client, folder, output_dir = api
+        img = _jpeg(folder)
+        (output_dir / "shot_times.json").write_text(json.dumps({str(img): "wrong"}))
+        monkeypatch.setattr(server, "_read_shot_time", lambda p: "2026-09-06T13:48:52")
+        ctx = server._active
+
+        assert server._get_shot_times(ctx, [str(img)]) == {str(img): "2026-09-06T13:48:52"}
+        on_disk = json.loads((output_dir / "shot_times.json").read_text())
+        assert on_disk["v"] == server.SHOT_TIMES_VERSION
+        assert on_disk["times"][str(img)] == "2026-09-06T13:48:52"
+
+    def test_older_version_is_reread(self, api, monkeypatch):
+        client, folder, output_dir = api
+        img = _jpeg(folder)
+        (output_dir / "shot_times.json").write_text(json.dumps({
+            "v": server.SHOT_TIMES_VERSION - 1,
+            "times": {str(img): "wrong"},
+        }))
+        monkeypatch.setattr(server, "_read_shot_time", lambda p: "2026-09-06T13:48:52")
+        ctx = server._active
+
+        assert server._get_shot_times(ctx, [str(img)]) == {str(img): "2026-09-06T13:48:52"}
 
     def test_unparseable_cache_is_rebuilt_not_fatal(self, api, monkeypatch):
         client, folder, output_dir = api

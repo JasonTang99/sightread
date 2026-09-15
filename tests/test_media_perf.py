@@ -65,7 +65,7 @@ def test_gallery_uses_pipeline_timestamps_without_reopening_photos(api, monkeypa
     ]
     # and they land in the shared cache, so /api/videos' pass is free too
     cached = json.loads((output_dir / "shot_times.json").read_text())
-    assert cached[str(a)] == datetime.fromtimestamp(stamps[str(a)]).isoformat()
+    assert cached["times"][str(a)] == datetime.fromtimestamp(stamps[str(a)]).isoformat()
 
 
 def test_gallery_still_reads_exif_when_pipeline_recorded_none(api):

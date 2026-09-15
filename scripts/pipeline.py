@@ -46,6 +46,13 @@ NUM_WORKERS = 4
 TIGHT_THRESHOLD = 0.08   # near-duplicate / burst
 LOOSE_THRESHOLD = 0.22   # same-scene
 BURST_WINDOW_S = 3.0     # EXIF timestamp delta to pre-group
+# Same subject a few seconds later, AE moved the embedding just past tight.
+# Measured on 2024_01_Japan Canon SL3: IMG_1939/1940 are the same Hakodate
+# stairs, ISO 800 vs 400, 6s apart, cosine 0.093. Ungated burst at this width
+# chains a 20-minute Koyasan walk into one cluster (49 → 61 photos); the
+# embedding ceiling is what stops that.
+BRACKET_WINDOW_S = 12.0
+BRACKET_THRESHOLD = 0.12
 MAX_CLUSTER_GAP_S = 3600.0  # max EXIF gap within a cluster (1 hr)
 
 # Re-shoot merge: same subject framed portrait *and* landscape lands in two
@@ -64,6 +71,12 @@ ORIENT_MERGE_THRESHOLD = 0.38  # cosine dist between cluster centroids
 # than two devices pointed at it, and at 0.38 same-framing merges started
 # swallowing neighbouring compositions (a 12-photo riverbed group on the Hoh
 # trip that held three different subjects).
+#
+# Other people's cameras may join each other that way. Jason's folders must
+# not: a group trip's `google photos/` is many people shooting one place, and
+# chaining them with his `iphone/` / `xt5/` is how Hawaii cluster 443 became
+# 23 photos of five subjects with his frames in the delete queue. His own
+# two cameras of one subject still merge — that is the Japan case.
 CROSS_DEVICE_WINDOW_S = 300.0
 CROSS_DEVICE_THRESHOLD = LOOSE_THRESHOLD
 
@@ -94,13 +107,17 @@ _EXIF_MODEL_TAG = 0x0110
 # ---------------------------------------------------------------------------
 # Scanning
 # ---------------------------------------------------------------------------
-def _scan_image_paths(image_dir: str) -> list[str]:
+def _scan_image_paths(image_dir: str, subtrip: str | None = None) -> list[str]:
     root = Path(image_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Image directory not found: {root}")
+    extra = None
+    if subtrip:
+        from projects import unfiled_paths_for_subtrip
+        extra = unfiled_paths_for_subtrip(root, subtrip)
     return sorted(
         str(Path(dirpath, name))
-        for dirpath, names in media.walk_media(root)
+        for dirpath, names in media.walk_media(root, subtrip, extra_paths=extra)
         for name in names
         if media.is_image(name)
     )
@@ -160,8 +177,9 @@ def _read_exif_meta(path: str) -> ShotMeta:
 
 def load_paths_and_meta(
     image_dir: str,
+    subtrip: str | None = None,
 ) -> tuple[list[str], list[float | None], list[str], list[str | None]]:
-    paths = _scan_image_paths(image_dir)
+    paths = _scan_image_paths(image_dir, subtrip)
     if not paths:
         raise RuntimeError(f"No images found in {image_dir}")
     meta = [_read_exif_meta(p) for p in tqdm(paths, desc="Reading EXIF")]
@@ -203,11 +221,12 @@ def _day_chunks(
 def _load_path_cache(cache_path: Path, paths: list[str], load) -> dict | None:
     """Rows of a path-keyed cache, or None when it cannot be used incrementally.
 
-    Unusable means absent, unreadable, holding photos no longer in the folder
-    (the pre-existing rule: that triggers a full recompute), or — new with
-    checkpointing, which rewrites the pair many times a run — a data file whose
-    row count disagrees with its sidecar, which would map rows to the wrong
-    photos.
+    Unusable means absent, unreadable, or — with checkpointing, which rewrites
+    the pair many times a run — a data file whose row count disagrees with its
+    sidecar, which would map rows to the wrong photos.
+
+    Extra cached paths (a whole-trip cache loaded for one city) are ignored.
+    Missing paths stay out of the result so the caller can embed just those.
     """
     sidecar = cache_path.with_suffix(".paths.json")
     if not (cache_path.exists() and sidecar.exists()):
@@ -217,12 +236,14 @@ def _load_path_cache(cache_path: Path, paths: list[str], load) -> dict | None:
         rows = load(cache_path)
     except Exception:
         return None
-    if not set(cached_paths) <= set(paths):
-        return None
     if any(len(v) != len(cached_paths) for v in rows.values()):
         warnings.warn(f"{cache_path.name} does not match its sidecar — recomputing")
         return None
-    return {k: dict(zip(cached_paths, v)) for k, v in rows.items()}
+    wanted = set(paths)
+    return {
+        k: {p: v[i] for i, p in enumerate(cached_paths) if p in wanted}
+        for k, v in rows.items()
+    }
 
 
 def _write_path_cache(cache_path: Path, paths: list[str], write) -> None:
@@ -334,6 +355,7 @@ def compute_embeddings(
     num_workers: int = NUM_WORKERS,
     flip_tta: bool = False,
     timestamps: list[float | None] | None = None,
+    extra_cache_paths: list[Path] | None = None,
 ) -> np.ndarray:
     """Compute or load cached embeddings.
 
@@ -341,7 +363,12 @@ def compute_embeddings(
     day at a time, and the cache is written after every day.
     """
     cached = _load_path_cache(cache_path, paths, lambda f: {"emb": np.load(str(f))})
-    done: dict[str, np.ndarray] = cached["emb"] if cached else {}
+    done: dict[str, np.ndarray] = dict(cached["emb"]) if cached else {}
+    for extra in extra_cache_paths or []:
+        more = _load_path_cache(extra, paths, lambda f: {"emb": np.load(str(f))})
+        if more:
+            for p, v in more["emb"].items():
+                done.setdefault(p, v)
     todo = [i for i, p in enumerate(paths) if p not in done]
 
     if not todo:
@@ -464,6 +491,18 @@ def calibrate_threshold(embeddings: np.ndarray, fallback: float) -> float:
     return chosen
 
 
+def _is_own_cluster(devices: set[str]) -> bool:
+    """True when any photo in the cluster came from one of Jason's folders.
+
+    Folder, not EXIF model: `google photos/` holds six cameras, and a handful
+    of his own iPhone frames live in there too (missing numbers from `iphone/`,
+    not duplicates). An empty device name — file in the trip root, or a project
+    opened on a single camera folder — counts as his, so unidentified shots
+    are not absorbed into a guest group.
+    """
+    return any(d not in media.OTHER_PEOPLE_DEVICES for d in devices)
+
+
 def _merge_reshoot_pairs(
     embeddings: np.ndarray,
     timestamps: list[float | None],
@@ -475,6 +514,7 @@ def _merge_reshoot_pairs(
     models: list[str | None] | None = None,
     cross_window_s: float = 0.0,
     cross_threshold: float = CROSS_DEVICE_THRESHOLD,
+    devices: list[str] | None = None,
 ) -> np.ndarray:
     """Merge clusters holding one subject shot twice — rotated, or on a second camera.
 
@@ -490,6 +530,12 @@ def _merge_reshoot_pairs(
     `cross_window_s` if its centroids are within the tighter `cross_threshold`.
     Passing no `models` (or leaving `cross_window_s` at 0) keeps the old
     framing-only behaviour.
+
+    Other people's cameras may join each other that way. Jason's folders
+    (`iphone/`, `xt5/`, …) never join a guest cluster, even on a rotation:
+    keep-best would then queue his shots as extras in someone else's burst.
+    His own two cameras of one subject still merge. Passing no `devices`
+    skips the split (unit tests, and a project with no device folders).
 
     `threshold` is the loosest distance anywhere in the pipeline, so what a
     merged group is allowed to span matters as much as the pairing rule. Merges
@@ -521,6 +567,7 @@ def _merge_reshoot_pairs(
             "t_max": max(ts),
             "kinds": kinds,
             "models": {models[i] for i in idxs if models[i]} if models else set(),
+            "devices": {devices[i] for i in idxs} if devices is not None else None,
             "centroid": centroid,
         }
 
@@ -536,6 +583,15 @@ def _merge_reshoot_pairs(
             gap = right["t_min"] - left["t_max"]
             if gap > widest:
                 break
+            # Jason's folders never join a guest cluster. Other people's
+            # cameras may still join each other; his phone and camera may
+            # still join each other. The split is by folder, not model.
+            if (
+                left["devices"] is not None
+                and right["devices"] is not None
+                and _is_own_cluster(left["devices"]) != _is_own_cluster(right["devices"])
+            ):
+                continue
             # Two clusters count as different cameras only when both name one
             # and the names don't overlap: an unknown model could be either.
             cross = bool(
@@ -593,6 +649,8 @@ def cluster_embeddings(
     tight: float = TIGHT_THRESHOLD,
     loose: float = LOOSE_THRESHOLD,
     burst_window_s: float = BURST_WINDOW_S,
+    bracket_window_s: float = BRACKET_WINDOW_S,
+    bracket_threshold: float = BRACKET_THRESHOLD,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
     orient_window_s: float = ORIENT_MERGE_WINDOW_S,
     orient_threshold: float = ORIENT_MERGE_THRESHOLD,
@@ -600,6 +658,7 @@ def cluster_embeddings(
     models: list[str | None] | None = None,
     cross_window_s: float = CROSS_DEVICE_WINDOW_S,
     cross_threshold: float = CROSS_DEVICE_THRESHOLD,
+    devices: list[str] | None = None,
 ) -> dict[int, list[int]]:
     """Two-stage clustering: burst pre-group, tight dedup inside parent groups."""
     n = len(embeddings)
@@ -622,21 +681,37 @@ def cluster_embeddings(
         sub_embs = embeddings[members]
         sub_labels = _agglomerative(sub_embs, tight)
 
-        # Fuse timestamp bursts: images within burst_window_s sharing parent get merged
+        # Fuse timestamp bursts: images within burst_window_s sharing parent
+        # get merged with no embedding check — that's a held shutter. A darker
+        # reshoot a few seconds later sits past tight and past that window, so
+        # a second, distance-gated pass covers it. Time-only at 6–12s chains
+        # a walk; the ceiling does not.
         if any(timestamps[i] is not None for i in members):
             ts = np.array([timestamps[i] if timestamps[i] is not None else np.nan for i in members])
             order = np.argsort(np.where(np.isnan(ts), np.inf, ts))
             current = None
             prev_t = None
+            prev_pos = None
             for pos in order:
                 t = ts[pos]
                 if np.isnan(t):
                     break
-                if current is None or (t - prev_t) > burst_window_s:
+                if current is None:
                     current = sub_labels[pos]
                 else:
-                    sub_labels[sub_labels == sub_labels[pos]] = current
+                    gap = float(t - prev_t)
+                    if gap <= burst_window_s:
+                        sub_labels[sub_labels == sub_labels[pos]] = current
+                    elif (
+                        bracket_window_s > 0
+                        and gap <= bracket_window_s
+                        and (1.0 - float(sub_embs[pos] @ sub_embs[prev_pos])) <= bracket_threshold
+                    ):
+                        sub_labels[sub_labels == sub_labels[pos]] = current
+                    else:
+                        current = sub_labels[pos]
                 prev_t = t
+                prev_pos = pos
 
         for sub in np.unique(sub_labels):
             idxs = members[sub_labels == sub]
@@ -687,6 +762,7 @@ def cluster_embeddings(
             models=models,
             cross_window_s=cross_window_s,
             cross_threshold=cross_threshold,
+            devices=devices,
         )
 
     clusters: dict[int, list[int]] = {}
@@ -931,6 +1007,7 @@ def score_images(
     device: str = DEVICE,
     thumb_dir: Path | None = None,
     timestamps: list[float | None] | None = None,
+    extra_cache_paths: list[Path] | None = None,
 ) -> tuple[list[float], dict]:
     """Compute or load cached scores.
 
@@ -944,6 +1021,17 @@ def score_images(
         return {k: data[k] for k in data.files}
 
     cached = _load_path_cache(cache_path, paths, _load)
+    for extra in extra_cache_paths or []:
+        more = _load_path_cache(extra, paths, _load)
+        if not more:
+            continue
+        if cached is None:
+            cached = more
+        else:
+            for k, mapping in more.items():
+                dest = cached.setdefault(k, {})
+                for p, v in mapping.items():
+                    dest.setdefault(p, v)
     have_all = cached is not None and all(p in next(iter(cached.values()), {}) for p in paths)
     if have_all:
         print(f"Loading cached scores ({len(paths)} paths)")
@@ -1073,13 +1161,17 @@ def rank_and_save(
 # ---------------------------------------------------------------------------
 # Step 5: Video highlights (clipfarm suggest_clips over DINOv3 frame embeddings)
 # ---------------------------------------------------------------------------
-def _scan_video_paths(image_dir: str) -> list[str]:
+def _scan_video_paths(image_dir: str, subtrip: str | None = None) -> list[str]:
     root = Path(image_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Image directory not found: {root}")
+    extra = None
+    if subtrip:
+        from projects import unfiled_paths_for_subtrip
+        extra = unfiled_paths_for_subtrip(root, subtrip)
     root_resolved = root.resolve()
     paths = []
-    for dirpath, names in media.walk_media(root):
+    for dirpath, names in media.walk_media(root, subtrip, extra_paths=extra):
         # A Live Photo's motion file belongs to its still, not to video review.
         motion = media.motion_names(dirpath, names)
         for name in names:
@@ -1139,7 +1231,8 @@ def _make_video_frame_embedder(
     return embed_frames, release
 
 
-def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = False) -> None:
+def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = False,
+                             subtrip: str | None = None) -> None:
     """Compute suggested highlight clips for each video under image_dir.
 
     Writes output_dir/video_highlights.json:
@@ -1151,7 +1244,7 @@ def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = Fal
     rewritten atomically after each video so an interrupted run keeps progress.
     Requires clipfarm; if not installed the step is skipped.
     """
-    videos = _scan_video_paths(image_dir)
+    videos = _scan_video_paths(image_dir, subtrip)
 
     try:
         from clipfarm.lib import suggest_clips
@@ -1248,12 +1341,23 @@ def run_pipeline(
     cross_threshold: float = CROSS_DEVICE_THRESHOLD,
     video_highlights: bool = False,
     force_video_highlights: bool = False,
+    subtrip: str | None = None,
 ) -> dict:
     out = Path(output_dir)
     emb_cache = out / "embeddings_dinov3_mpcls_tta.npy"
     score_cache = out / "scores_ensemble.npz"
 
-    paths, timestamps, orientations, models = load_paths_and_meta(image_dir)
+    extra_emb: list[Path] = []
+    extra_score: list[Path] = []
+    if subtrip:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+        from projects import project_output_dir, write_project_meta
+        parent = project_output_dir(Path(image_dir))
+        extra_emb = [parent / "embeddings_dinov3_mpcls_tta.npy"]
+        extra_score = [parent / "scores_ensemble.npz"]
+        write_project_meta(out, Path(image_dir), subtrip)
+
+    paths, timestamps, orientations, models = load_paths_and_meta(image_dir, subtrip)
 
     embeddings = compute_embeddings(
         paths,
@@ -1261,6 +1365,7 @@ def run_pipeline(
         batch_size=batch_size,
         flip_tta=flip_tta,
         timestamps=timestamps,
+        extra_cache_paths=extra_emb or None,
     )
 
     clusters = cluster_embeddings(
@@ -1276,10 +1381,12 @@ def run_pipeline(
         models=models,
         cross_window_s=cross_window_s,
         cross_threshold=cross_threshold,
+        devices=[media.device_of(p, image_dir) for p in paths],
     )
 
     scores, components = score_images(
         paths, cache_path=score_cache, thumb_dir=out, timestamps=timestamps,
+        extra_cache_paths=extra_score or None,
     )
     motions = media.motion_map(paths)
     if motions:
@@ -1290,7 +1397,8 @@ def run_pipeline(
     )
 
     if video_highlights:
-        compute_video_highlights(image_dir, out, force=force_video_highlights)
+        compute_video_highlights(image_dir, out, force=force_video_highlights,
+                                 subtrip=subtrip)
 
     return results
 
@@ -1336,6 +1444,9 @@ def main():
     parser.add_argument("--no-video-highlights", action="store_true",
                         help="Skip the clipfarm video-highlights step (the default; "
                              "kept so existing invocations stay valid)")
+    parser.add_argument("--subtrip", default=None,
+                        help="Numbered city folder (01_Hakodate) to scan under "
+                             "each camera, instead of the whole trip")
     parser.add_argument("--force-video-highlights", action="store_true",
                         help="Recompute video highlights even for unchanged videos "
                              "(implies --video-highlights)")
@@ -1344,7 +1455,7 @@ def main():
     if args.output_dir is None:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
         from projects import project_output_dir
-        args.output_dir = str(project_output_dir(Path(args.image_dir)))
+        args.output_dir = str(project_output_dir(Path(args.image_dir), args.subtrip))
         print(f"Output dir: {args.output_dir}")
 
     import random
@@ -1367,6 +1478,7 @@ def main():
         video_highlights=((args.video_highlights or args.force_video_highlights)
                           and not args.no_video_highlights),
         force_video_highlights=args.force_video_highlights,
+        subtrip=args.subtrip,
     )
     print("Pipeline complete")
 
