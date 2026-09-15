@@ -1,6 +1,6 @@
 # sightread — next steps
 
-_Last updated: 2026-09-13 (evening)._
+_Last updated: 2026-09-15 (night)._
 
 ## Done since the last update
 
@@ -43,6 +43,24 @@ _Last updated: 2026-09-13 (evening)._
   lynx because its default `/mnt/h0/Editing/imports` does not exist.
 - **Shift+Space keeps only the focused photo** (`bb02680`), was §7. Starred
   photos stay kept.
+- **Shot-time cache is versioned** so a reader change cannot keep serving
+  DateTime (306) as if it were DateTimeOriginal. Old flat `shot_times.json`
+  files rebuild on the next gallery load. Was §6.
+- **Export the trip lives only on Finish.** The Favourites 📤 was leftover from
+  when that tab *was* the export; it still shipped the whole trip. Finish step 2
+  already did the job.
+- **Own-folder vs guest-folder merge** (working tree, not committed). Stage 4
+  will not join a cluster that has Jason's folders (`iphone/`, `xt5/`, `canon/`)
+  to a `google photos/` or `shared/` cluster. Guest–guest still merges; his
+  phone and camera of one subject still merge. Split is by folder, not EXIF
+  model. Hawaii / Hoh / Yellowstone need a recluster to pick this up.
+- **Exposure-bracket merge** after the 3 s burst (working tree). Consecutive
+  same-parent photos 3–12 s apart at cosine ≤ 0.12 join. Japan clusters 22/23
+  (Hakodate icy stairs, 6 s, ISO 800→400, cosine 0.093) were the prompt; an
+  ungated 6 s burst would have chained a 20-minute Koyasan walk.
+- **City subtrips** (working tree). A trip whose cameras use `NN_City` folders
+  (`01_Hakodate`) becomes one picker row per city instead of one 1,200-cluster
+  pile. See §7.
 
 ## 1. Where the seven 2026 trips landed
 
@@ -97,6 +115,12 @@ to 2020 — about 50 small trips, 2022's LA, Stratford and Greece the only ones 
 five minutes. The runner and per-trip logs are in the session scratchpad, not the
 repo; the picker's estimate tag is the source of truth for what is left.
 
+**2026-09-15:** `2024_01_Japan` did run as one project (6,324 stills, 1,275
+clusters). That pile is now being split into city subtrips — §7. Do not re-GPU
+it. The whole-trip output dir
+`~/.local/share/sightread/projects/2870dc083f7ebafa993fd9f975258fad/` stays on
+disk; the picker will hide it once the city rows exist.
+
 ## 3. Adoption covers trips, not the other direction
 
 `adopt_subfolder_reviews` runs when a trip is opened and pulls in the decisions,
@@ -112,11 +136,12 @@ have not been opened since it shipped and will adopt on their next open:
 
 The gap: adoption is one-directional. Opening `<trip>/xt5` on its own still knows
 nothing of review done at the trip level, so a decision made in the trip and then
-revisited in the camera folder will be offered again. Nobody has hit this yet —
-it needs someone to open a camera folder after reviewing its trip — so it is
-recorded rather than fixed. Since `e83d51c` the picker no longer lists device
-folders at all, so reaching one takes "Other folder…"; that makes this gap even
-less likely to bite.
+revisited in the camera folder will be offered again.
+
+~~Nobody has hit this yet — it needs someone to open a camera folder after
+reviewing its trip — so it is recorded rather than fixed.~~ **Decided 2026-09-14:
+won't fix.** Since `e83d51c` the picker no longer lists device folders; reaching
+one takes "Other folder…".
 
 ## 4. Open questions on the cross-camera merge
 
@@ -146,16 +171,19 @@ less likely to bite.
   one cluster per camera helps partly (443 → 10/7/3/3, Yellowstone 264 28 → 18)
   and leaves Japan, the trip the rule was fitted to, at 8 cross clusters.
 
-  **First action:** decide what a cross-camera merge is for. If it is "Jason's
-  phone and Jason's camera on the same subject", the simplest fix is to allow it
-  only between the trip's own device folders and never into `google photos/`.
-  The one-cluster-per-camera cap is the model-agnostic alternative. Either
-  changes clusters on already-reviewed trips; decisions are keyed by path, so
-  review survives a re-cluster.
+  **Decided 2026-09-14:** other people's cameras may still merge with each
+  other; Jason's folders never join those groups. His own phone and camera of
+  one subject still merge (the Japan case). The split is by folder
+  (`google photos/`, `shared/` vs `iphone/` / `xt5/` / `canon/`), not EXIF
+  model — `google photos/` holds six cameras, and a handful of his iPhone
+  frames live in there too. Re-cluster to take effect; decisions are keyed by
+  path, so review survives.
 - A subject revisited hours later — Portugal's 0.089 pair, four hours apart — is
   deliberately left in separate clusters, since `MAX_CLUSTER_GAP_S` is an hour.
-  Whether trip review wants a looser "same place, another day" grouping is a
-  product question, not a threshold one, and nothing in the UI expresses it yet.
+  ~~Whether trip review wants a looser "same place, another day" grouping is a
+  product question, not a threshold one, and nothing in the UI expresses it yet.~~
+  **Decided 2026-09-14:** keep them apart. Same place on another pass is a new
+  cluster, not a re-shoot. No threshold change.
 - The X-T5 shoots portrait more than expected (64 of 101 stills on Japan). That is
   what makes the framing-only rule miss so much, and it is worth confirming it
   holds on the next trip rather than being a Japan habit.
@@ -174,19 +202,96 @@ Yellowstone has more video files than stills, and Rattlesnake's single `iphone/`
 file is a video. Live Photo pairing handles the motion files (186 paired on Japan,
 against 33 on the trip the feature was built against), but the standalone clips —
 34 on Japan's phone, 52 on its camera — get no clustering, no scoring and no
-review flow. `--video-highlights` has been off by default since 2026-09-10 because
-the clipfarm step costs more than it returned.
+gallery row. They already have a review flow: the Videos tab. `--video-highlights`
+has been off by default since 2026-09-10 because the clipfarm step costs more
+than it returned.
 
-**First action:** decide what a trip project should say about a standalone clip at
-all. Even shot time and a device badge in the gallery would beat the current
-silence, and that needs no model.
+~~**First action:** decide what a trip project should say about a standalone clip
+at all. Even shot time and a device badge in the gallery would beat the current
+silence, and that needs no model.~~
+
+**Decided 2026-09-14:** Videos tab is enough. No gallery row, no pipeline
+scoring. Clipfarm highlights stay off.
 
 ## 6. Cached shot times predate the EXIF fix
 
-`shot_times.json` in each project dir was written by the old reader, and nothing
+~~`shot_times.json` in each project dir was written by the old reader, and nothing
 invalidates it on a code change. Every value happens to be identical under the new
 reader — every source in the archive writes 306 and `DateTimeOriginal` the same —
 so there is nothing to repair today. A file that arrives with the two disagreeing
 would be read correctly but then served from a stale cache entry, so if such a
 file ever shows up, delete the project's `shot_times.json` rather than debugging
-the reader.
+the reader.~~
+
+**Done 2026-09-14.** Cache is `{"v": 2, "times": {…}}`. A flat file, or a
+different `v`, is discarded and rebuilt from EXIF. Bump `SHOT_TIMES_VERSION`
+when the reader changes again.
+
+## 7. City subtrips — Japan 2024 is the first one
+
+The picker used to open `2024_01_Japan` as 1,275 clusters. The imports are
+already `canon/01_Hakodate`, `iphone/01_Hakodate`, … so the unit of review is
+now one city: both cameras, one project, hashed
+`md5("{trip}#{city}")`. Folder names win when they match; iPhone files that
+are *not* in a city folder (a dump next to city-split Canon) join by EXIF
+time against the city's min/max from the filed photos.
+
+Korea (`02-06` date folders) and Hoh (`xt5/` / `iphone/` only) do not split.
+Europe *will*: iPhone is `01_Iceland`, `02_Amsterdam`, … which matches
+`NN_City`, so the first picker load after restart will try to slice Europe
+the same way and time-assign Canon's `2024_02_Amsterdam` folders. That is
+probably right, but it has not been looked at.
+
+**Caches were sliced, not recomputed.** Parent embeddings 51.8 MB, scores,
+285 decisions, shot times, and existing thumbs were copied/hardlinked into
+13 city dirs. `pending=0` on every city. `results.json` is *not* copied —
+each city reclusters from the sliced embeddings (CPU, no GPU) so the
+bracket merge and own-vs-guest rule actually apply.
+
+| City | stills | clusters (done) | decisions carried |
+|---|---:|---:|---:|
+| `00_Tokyo` | 3 | 2 | 2 |
+| `01_Hakodate` | 781 | 222 | 283 |
+| `02_Sapporo` | 457 | 110 | 0 |
+| `03_Niseko` | 70 | 17 | 0 |
+| `04_Lake_Toya` | 281 | 75 | 0 |
+| `05_Noboribetsu` | 103 | 25 | 0 |
+| `06_Fukuoka` | 1,949 | *running overnight* | 0 |
+| `07_Kagoshima` | 151 | | 0 |
+| `08_Yufuin` | 311 | | 0 |
+| `09_Hiroshima` | 457 | | 0 |
+| `10_Osaka` | 924 | | 0 |
+| `11_Koyasan` | 424 | | 0 |
+| `12_Wakayama` | 413 | | 0 |
+
+Review so far was Tokyo then Hakodate, which is why 283 of 285 decisions
+landed in Hakodate. Path-keyed, so they survive the recluster.
+
+**Overnight job:** a Python loop calling `pipeline.run_pipeline(..., subtrip=city)`
+for the remaining cities with `CUDA_VISIBLE_DEVICES=""`. Tokyo–Noboribetsu
+already wrote `results.json` from cache (`Loading cached embeddings`). Leave
+it. If it died, rerun from Fukuoka onward the same way — embeddings are
+already in each city dir.
+
+**Blocked on a restart.** Sightread on http://127.0.0.1:8765/ is still the
+old process (whole-trip Japan, transcoding `canon/` video into the parent
+`video_cache`). Do not kill it to pick up this code; restart when that
+ffmpeg is idle. Frontend `dist/` is already rebuilt. Hard-refresh after
+restart. Then open `2024_01_Japan / 01_Hakodate` — confirm the icy stairs
+are one cluster, and that hide-reviewed skips the 283 already decided.
+
+**First action next session:**
+
+1. Check the overnight job finished (`ALL DONE` in that terminal, or
+   `results.json` in each city dir under
+   `~/.local/share/sightread/projects/`).
+2. Commit the working tree (city split + bracket merge + own-vs-guest +
+   shot-time versioning + Favourites export removed). Nothing of this is
+   on HEAD yet.
+3. Restart sightread when ffmpeg is idle.
+4. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
+   on picker load, and whether Canon photos showed up via time assignment.
+
+The X-T5 portrait mix (§4) is still observational, on the next trip.
+Hoh and Portugal still adopt on first open (§3). Remote curation stays
+gated on auth (`plan.md`). Clipfarm highlights stay off.
