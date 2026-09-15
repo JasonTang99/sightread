@@ -248,7 +248,7 @@ probably right, but it has not been looked at.
 each city reclusters from the sliced embeddings (CPU, no GPU) so the
 bracket merge and own-vs-guest rule actually apply.
 
-| City | stills | clusters (done) | decisions carried |
+| City | stills | clusters | decisions carried |
 |---|---:|---:|---:|
 | `00_Tokyo` | 3 | 2 | 2 |
 | `01_Hakodate` | 781 | 222 | 283 |
@@ -256,22 +256,24 @@ bracket merge and own-vs-guest rule actually apply.
 | `03_Niseko` | 70 | 17 | 0 |
 | `04_Lake_Toya` | 281 | 75 | 0 |
 | `05_Noboribetsu` | 103 | 25 | 0 |
-| `06_Fukuoka` | 1,949 | *running overnight* | 0 |
-| `07_Kagoshima` | 151 | | 0 |
-| `08_Yufuin` | 311 | | 0 |
-| `09_Hiroshima` | 457 | | 0 |
-| `10_Osaka` | 924 | | 0 |
-| `11_Koyasan` | 424 | | 0 |
-| `12_Wakayama` | 413 | | 0 |
+| `06_Fukuoka` | 1,949 | 587 | 0 |
+| `07_Kagoshima` | 151 | 40 | 0 |
+| `08_Yufuin` | 311 | 95 | 0 |
+| `09_Hiroshima` | 457 | 95 | 0 |
+| `10_Osaka` | 924 | 295 | 0 |
+| `11_Koyasan` | 424 | 102 | 0 |
+| `12_Wakayama` | 413 | 103 | 0 |
+
+1,768 clusters across 13 cities, down from 1,275 in one pile only because
+cities no longer share a cluster id space — the review queues are the
+point. All 13 wrote `results.json` from cached embeddings (no GPU).
 
 Review so far was Tokyo then Hakodate, which is why 283 of 285 decisions
 landed in Hakodate. Path-keyed, so they survive the recluster.
 
-**Overnight job:** a Python loop calling `pipeline.run_pipeline(..., subtrip=city)`
-for the remaining cities with `CUDA_VISIBLE_DEVICES=""`. Tokyo–Noboribetsu
-already wrote `results.json` from cache (`Loading cached embeddings`). Leave
-it. If it died, rerun from Fukuoka onward the same way — embeddings are
-already in each city dir.
+**Recluster finished 2026-09-15 ~01:00.** Tokyo–Wakayama all have
+`results.json` from cache (`Loading cached embeddings`). If a city looks
+stale after restart, do not re-GPU — embeddings are already in that dir.
 
 **Blocked on a restart.** Sightread on http://127.0.0.1:8765/ is still the
 old process (whole-trip Japan, transcoding `canon/` video into the parent
@@ -282,14 +284,11 @@ are one cluster, and that hide-reviewed skips the 283 already decided.
 
 **First action next session:**
 
-1. Check the overnight job finished (`ALL DONE` in that terminal, or
-   `results.json` in each city dir under
-   `~/.local/share/sightread/projects/`).
-2. Commit the working tree (city split + bracket merge + own-vs-guest +
+1. Commit the working tree (city split + bracket merge + own-vs-guest +
    shot-time versioning + Favourites export removed). Nothing of this is
    on HEAD yet.
-3. Restart sightread when ffmpeg is idle.
-4. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
+2. Restart sightread when ffmpeg is idle.
+3. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
    on picker load, and whether Canon photos showed up via time assignment.
 
 The X-T5 portrait mix (§4) is still observational, on the next trip.
