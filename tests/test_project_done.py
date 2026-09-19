@@ -113,7 +113,7 @@ def test_rerunning_the_pipeline_unfinishes_the_project(api, monkeypatch):
     """New output means there is something to review again."""
     client, folder, out = api
     monkeypatch.setattr(projects, "DATA_DIR", out.parent)
-    monkeypatch.setattr(server, "project_output_dir", lambda f: out)
+    monkeypatch.setattr(server, "project_output_dir", lambda f, subtrip=None: out)
     monkeypatch.setattr(server, "start_pipeline", lambda *a, **k: None)
     monkeypatch.setattr(server, "upsert_recent", lambda *a, **k: None)
     projects.mark_done(out)
