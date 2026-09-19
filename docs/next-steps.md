@@ -1,6 +1,6 @@
 # sightread — next steps
 
-_Last updated: 2026-09-15 (night)._
+_Last updated: 2026-09-19._
 
 ## Done since the last update
 
@@ -49,18 +49,26 @@ _Last updated: 2026-09-15 (night)._
 - **Export the trip lives only on Finish.** The Favourites 📤 was leftover from
   when that tab *was* the export; it still shipped the whole trip. Finish step 2
   already did the job.
-- **Own-folder vs guest-folder merge** (working tree, not committed). Stage 4
+- **Own-folder vs guest-folder merge** (`02e6c38`). Stage 4
   will not join a cluster that has Jason's folders (`iphone/`, `xt5/`, `canon/`)
   to a `google photos/` or `shared/` cluster. Guest–guest still merges; his
   phone and camera of one subject still merge. Split is by folder, not EXIF
-  model. Hawaii / Hoh / Yellowstone need a recluster to pick this up.
-- **Exposure-bracket merge** after the 3 s burst (working tree). Consecutive
+  model. **Hawaii, Hoh and Yellowstone still need a recluster to pick the
+  folder split up** — their `results.json` predates it, so their cross-camera
+  clusters still mix `google photos/` with `iphone/`. Long runs; not done here.
+- **Exposure-bracket merge** after the 3 s burst (`02e6c38`). Consecutive
   same-parent photos 3–12 s apart at cosine ≤ 0.12 join. Japan clusters 22/23
   (Hakodate icy stairs, 6 s, ISO 800→400, cosine 0.093) were the prompt; an
   ungated 6 s burst would have chained a 20-minute Koyasan walk.
-- **City subtrips** (working tree). A trip whose cameras use `NN_City` folders
+- **City subtrips** (`02e6c38`). A trip whose cameras use `NN_City` folders
   (`01_Hakodate`) becomes one picker row per city instead of one 1,200-cluster
   pile. See §7.
+- **The two tests `02e6c38` left stale now pass** (`18bdedd`). That commit gave
+  `project_output_dir` a `subtrip` argument and `/api/state` a `display_name`,
+  but left `test_project_done` stubbing the first with a one-argument lambda
+  (TypeError on the re-run test) and `test_header_names_the_open_project`
+  expecting the old bare-path tooltip instead of `name\npath`. Suites are
+  372 Python and 107 Playwright, all passing.
 
 ## 1. Where the seven 2026 trips landed
 
@@ -282,14 +290,55 @@ ffmpeg is idle. Frontend `dist/` is already rebuilt. Hard-refresh after
 restart. Then open `2024_01_Japan / 01_Hakodate` — confirm the icy stairs
 are one cluster, and that hide-reviewed skips the 283 already decided.
 
+**All of that landed in `02e6c38`** — city split, bracket merge,
+own-vs-guest, shot-time versioning and the Favourites export removal went in
+as one commit on the morning of the 15th, after the notes above were written.
+The "working tree, not committed" wording those notes carried was stale, not
+a description of HEAD.
+
 **First action next session:**
 
-1. Commit the working tree (city split + bracket merge + own-vs-guest +
-   shot-time versioning + Favourites export removed). Nothing of this is
-   on HEAD yet.
-2. Restart sightread when ffmpeg is idle.
-3. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
+1. Restart sightread when ffmpeg is idle.
+2. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
    on picker load, and whether Canon photos showed up via time assignment.
+3. Recluster Hawaii, Hoh and Yellowstone so the own-vs-guest split reaches
+   them (§4). Long runs — their current `results.json` still mixes
+   `google photos/` into Jason's clusters.
+
+## 8. The working tree holds a separate, unreviewed body of work
+
+Not the three features above — those are on HEAD. What is uncommitted on
+`mirror-aware-deletes` as of 2026-09-19 is three entangled threads, sharing
+`App.tsx`, `server.py` and `test_ui.py` between them:
+
+- **Picker fast-load.** `/api/projects` drops to names and whatever
+  `recents.json` already held — no photo-tree walk, no `paths.json` parse, no
+  `ensure_city_caches` — and a new `/api/projects/details` fills counts, stale
+  vs ready and ETA, memoised in `_picker_details` and invalidated on open, run,
+  clean and done. `tests/test_picker_list.py` is new and untracked;
+  `webapp/tests/test_picker_eta.py` and `tests/test_project_discovery.py` move
+  with it.
+- **Finish panel absorbs the trash panel.** `TrashPanel.tsx` is deleted,
+  `FinishTripPanel.tsx` rewritten around `finish-delete-count` /
+  `finish-remain-photos` / `finish-remain-videos`, and `/api/finish/preview`
+  grew `remaining_photos` and `remaining_videos` via `_remaining_media`. The
+  mirror-verify wording moves across; the mirror logic itself was already in
+  `scripts/delete_marked.py`. `test_ui.py`'s `TestTrashPanel` becomes
+  `TestFinishTrip`.
+- **Confirm advances off the end of a list.** `nextAfterConfirm` in
+  `decisions.ts` returns `"advance"` when the hop has nowhere to land, so the
+  view opens the next tab rather than sitting on the row just confirmed;
+  `ClusterView`, `SingletonsView` and `VideoView` use it, covered by
+  `TestEnterAdvancesTab`.
+
+Plus `run.sh` launching `google-chrome` before `xdg-open` for GPU accel, and
+small `HelpOverlay` / `FavoritesView` edits.
+
+Both suites pass with all of it in place (372 Python, 107 Playwright), so it
+is not broken — but none of it was reviewed here and the three threads want a
+commit each, which means hunk-level splitting of the three shared files.
+`dist/` was built on the 17th and matches this tree, so the running UI already
+reflects it.
 
 The X-T5 portrait mix (§4) is still observational, on the next trip.
 Hoh and Portugal still adopt on first open (§3). Remote curation stays
