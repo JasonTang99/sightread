@@ -41,8 +41,11 @@ class TestPageLoad:
         with several trips half reviewed nothing said where you were."""
         name = page_loaded.get_by_test_id("project-name")
         expect(name).to_have_text(project_folder.name)
-        # Trips on different drives share names, so the path is the tooltip.
-        expect(name).to_have_attribute("title", str(project_folder))
+        # Trips on different drives share names, so the tooltip carries the
+        # display name and the full path underneath it.
+        expect(name).to_have_attribute(
+            "title", f"{project_folder.name}\n{project_folder}"
+        )
 
     def test_the_project_name_survives_a_tab_change(self, page_loaded: Page, project_folder):
         page_loaded.get_by_role("button", name="Timeline").click()
