@@ -6,6 +6,8 @@ import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
+import { ShortcutBar } from "./ui";
+import { CLUSTER_KEYS, brief } from "../shortcuts";
 
 type ClusterFilter = "all" | "wiped";
 
@@ -430,7 +432,7 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
           {undecidedCount} of {allClusters.length} left
         </span>
 
-        <span className="text-xs text-gray-300">hjkl · space · 1–9 rank · K best · enter · ←/→ clusters · n next unreviewed · b skip · s star · t tag · u undo · ? help</span>
+        <ShortcutBar items={brief(CLUSTER_KEYS)} />
         {focused && (
           <TagBar
             tags={videoTags.tags}

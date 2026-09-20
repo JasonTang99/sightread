@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { Kbd, ShortcutBar } from "./ui";
+import { FAVORITES_KEYS, brief } from "../shortcuts";
 
 interface Props {
   favorites: string[];
@@ -117,7 +119,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         <p className="text-2xl mb-2">★</p>
         <p className="text-gray-700 font-medium">No favorites yet</p>
         <p className="text-sm text-gray-500 mt-1">
-          Press <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> on any photo or video to star it
+          Press <Kbd>s</Kbd> on any photo or video to star it
         </p>
       </div>
     );
@@ -131,9 +133,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         <span className="text-sm font-medium text-yellow-600">
           ★ {favorites.length} favorite{favorites.length !== 1 ? "s" : ""}
         </span>
-        <span className="text-xs text-gray-400">
-          h/j/k/l move · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">d</kbd> unfavorite + mark delete · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> unfavorite
-        </span>
+        <ShortcutBar items={brief(FAVORITES_KEYS)} />
       </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` }}>
         {favorites.map((path, i) => (

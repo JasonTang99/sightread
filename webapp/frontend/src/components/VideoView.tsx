@@ -4,6 +4,8 @@ import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { nextAfterConfirm } from "../decisions";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
+import { ShortcutBar } from "./ui";
+import { VIDEO_CLIP_KEYS, VIDEO_EDIT_KEYS, VIDEO_KEYS, brief } from "../shortcuts";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
 // still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
@@ -788,9 +790,16 @@ export function VideoView({
           }}
           onAdd={addTag}
         />
-        <span className="text-xs text-gray-300 truncate">
-          j/k · ←/→ ±10s · space toggle · l pause · s star · 1–9 tag · t cycle tag · enter confirm{clips.length > 0 ? " · n/p clips" : ""}{canEdit ? " · i/o in-out · x del · u undo" : ""}
-        </span>
+        {/* The clip-marker and in/out keys only exist when there is something
+            to step through or the clip can be edited, so the crib grows and
+            shrinks with the toolbar rather than naming keys that do nothing. */}
+        <ShortcutBar
+          items={brief(
+            VIDEO_KEYS,
+            clips.length > 0 ? VIDEO_CLIP_KEYS : [],
+            canEdit ? VIDEO_EDIT_KEYS : [],
+          )}
+        />
         <div className="ml-auto flex items-center gap-2 shrink-0">
           {exportNote && <span className="text-xs text-emerald-600">{exportNote}</span>}
           {canEdit && (

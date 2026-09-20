@@ -16,6 +16,7 @@
  * back through the front door.
  */
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { Shortcut } from "../shortcuts";
 
 /** The one accent. `tone` exists for the three places that carry meaning. */
 export type Tone = "accent" | "done" | "star";
@@ -129,6 +130,43 @@ export function Switch({
           }`}
         />
       </button>
+    </span>
+  );
+}
+
+/** A key, rendered the same way everywhere.
+ *
+ * There were two renderings before: a bordered chip in FavoritesView, and bare
+ * monospace text in the help overlay's table. */
+export function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="px-1 py-0.5 text-[11px] font-mono font-medium bg-gray-100 border border-gray-300 rounded text-gray-700 whitespace-nowrap">
+      {children}
+    </kbd>
+  );
+}
+
+/** The toolbar crib: the few keys worth having on screen while working.
+ *
+ * The bars this replaces were `text-gray-300` — around 1.5:1 on white, below
+ * any legibility threshold — and ran to thirteen run-together items separated
+ * by middots. They were simultaneously too faint to read and busy enough to be
+ * visual noise, which is the worst of both. Keys are chips now, at a contrast
+ * that can actually be read, and the long tail moved to `?`.
+ */
+export function ShortcutBar({ items }: { items: Shortcut[] }) {
+  return (
+    <span className="flex items-center gap-2 flex-wrap text-[11px] text-gray-500">
+      {items.map((s) => (
+        <span key={s.keys} className="flex items-center gap-1">
+          <Kbd>{s.keys}</Kbd>
+          <span>{s.short ?? s.what}</span>
+        </span>
+      ))}
+      <span className="flex items-center gap-1">
+        <Kbd>?</Kbd>
+        <span>all keys</span>
+      </span>
     </span>
   );
 }

@@ -7,6 +7,8 @@ import { DeviceBadge } from "./DeviceBadge";
 import { deviceOf } from "../device";
 import { nextAfterConfirm } from "../decisions";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
+import { ShortcutBar } from "./ui";
+import { SINGLES_KEYS, brief } from "../shortcuts";
 
 interface Props {
   // The project folder, so a tile can name the camera folder it came from.
@@ -246,7 +248,7 @@ export function SingletonsView({
           }}
           onAdd={addTag}
         />
-        <span className="text-xs text-gray-300">j/k · ←/→ move · space toggle · s star · 1–9 tag · t cycle · enter confirm+next</span>
+        <ShortcutBar items={brief(SINGLES_KEYS)} />
         <div className="ml-auto flex items-center gap-2">
           {nDelete > 0 && <span className="text-xs text-gray-400">{nDelete} → trash</span>}
           <button onClick={confirm} disabled={submitting}
