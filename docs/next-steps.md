@@ -63,10 +63,12 @@ _Last updated: 2026-09-20._
 - **City subtrips** (`02e6c38`). A trip whose cameras use `NN_City` folders
   (`01_Hakodate`) becomes one picker row per city instead of one 1,200-cluster
   pile. See §7.
-- **Hawaii, Hoh, Yellowstone and Vegas are reclustered, and the own-vs-guest
-  rule now holds in every stage** (`3ee68ab`). The four trips with a shared
-  album went through the pipeline from cached embeddings — no GPU, 5–23 s each
-  — and the rule turned out to be enforced only in stage 4. See §4.
+- **Hawaii, Hoh, Yellowstone and Vegas are reclustered, and a cluster now holds
+  exactly one photographer** (`3ee68ab`, `8db52cf`). The four trips with a
+  shared album went through the pipeline from cached embeddings — no GPU,
+  5–23 s each. The own-vs-guest rule turned out to be enforced only in stage 4,
+  and once deleting from the album was confirmed wanted, the split had to go
+  per photographer rather than per owner. See §4.
 - **The two tests `02e6c38` left stale now pass** (`18bdedd`). That commit gave
   `project_output_dir` a `subtrip` argument and `/api/state` a `display_name`,
   but left `test_project_done` stubbing the first with a one-argument lambda
@@ -191,7 +193,8 @@ one takes "Other folder…".
   one cluster per camera helps partly (443 → 10/7/3/3, Yellowstone 264 28 → 18)
   and leaves Japan, the trip the rule was fitted to, at 8 cross clusters.
 
-  **Decided 2026-09-14:** other people's cameras may still merge with each
+  **Decided 2026-09-14** (first half superseded 2026-09-20 — see the bullet
+  below on photographers)**:** other people's cameras may still merge with each
   other; Jason's folders never join those groups. His own phone and camera of
   one subject still merge (the Japan case). The split is by folder
   (`google photos/`, `shared/` vs `iphone/` / `xt5/` / `canon/`), not EXIF
@@ -261,16 +264,49 @@ one takes "Other folder…".
   people, several subjects, one place — and keep-best will rank one first and
   queue the other 37 for deletion.
 
-  It is not obvious this is worth fixing, which is why it is a question rather
+  ~~It is not obvious this is worth fixing, which is why it is a question rather
   than a task. These are copies of other people's photos in a shared album; if
   the local copy on h0 is disposable, an over-merged guest cluster costs
-  nothing, and per-camera capping (which the earlier replay measured at
-  443 → 10/7/3/3) would only add review. **First action: decide whether
-  deleting from `google photos/` is a thing that should happen at all.** If it
-  is not, say so here and consider closing the whole guest side of §4 — the
-  Finish tab could skip guest folders entirely instead. If it is, the
-  one-cluster-per-camera cap is the measured lever; `CROSS_DEVICE_THRESHOLD` is
-  not (at 0.12 cluster 443 still kept 19).
+  nothing.~~
+
+  **Answered and fixed 2026-09-20** (`8db52cf`). Deleting other people's photos
+  from h0 is wanted — h1 keeps every original, and `delete_marked.py` verifies
+  the mirror copy before it unlinks anything. So the album's frames need the
+  same protection his do, and **the 2026-09-14 decision that other people's
+  cameras may merge with each other is reversed.**
+
+  Stage 3b now splits by *photographer* rather than by his-vs-theirs: his
+  photos are one photographer whichever of his cameras took them, and each EXIF
+  model inside a guest folder is another. Blocking the cross-camera merge for
+  guests is not enough by itself — once a cluster already holds two models the
+  sets overlap, the pair stops counting as cross, and the rotation rule merges
+  it anyway — so both are in: the split draws the line and stage 4 no longer
+  reaches across it.
+
+  His side is untouched, which was the thing to protect: Hawaii still has 225
+  clusters of his, largest 47/16/15/12/9/6, and his phone and camera of one
+  subject still merge — the only thing the cross-camera window now does. The
+  album's largest cluster goes 38 → 26. Across the four trips no cluster holds
+  more than one photographer. Hawaii 535 → 578 clusters, Hoh 182 → 199,
+  Yellowstone 328 → 378, Vegas 116 → 128.
+
+  **Known limit:** two guests carrying the same model are indistinguishable
+  from EXIF and still merge. Nothing available here separates them.
+
+  **The h1 premise was checked, not assumed** (2026-09-20). h1 mirrors h0 at
+  `/mnt/h1/h0/`, and `delete_marked.py` only unlinks from h0 after the mirror
+  copy is present and size-matched, refusing to run at all if h1 is not
+  mounted. Comparing the two trees file by file: 67,593 files under
+  `h0/Trips`, 79,311 under `h1/h0/Trips`. Only 273 files exist on h0 and not
+  h1, and every one of them is under `2024_01_Japan/_exports/` — sightread's
+  own output, regenerable, 12G. The 11,991 files h1 has and h0 does not are
+  pre-cull originals and RAW/XMP (Japan `xt5/`: 101 JPG on h0, 448 on h1). The
+  guest folders match exactly, count for count: Hawaii 1,079, Yellowstone
+  1,141, Hoh 531, Vegas 334. So h1 is a superset, not a mirror of h0's current
+  organisation — behind on deletions, ahead on content, which is what a backup
+  should be. Re-run before any large delete:
+  `comm -23 <(cd /mnt/h0/Trips && find . -type f | LC_ALL=C sort) <(cd /mnt/h1/h0/Trips && find . -type f | LC_ALL=C sort)`
+  — the `LC_ALL=C` is load-bearing, `comm` silently misreports without it.
 
 ## 5. These trips are mostly video, and the pipeline barely looks at them
 
