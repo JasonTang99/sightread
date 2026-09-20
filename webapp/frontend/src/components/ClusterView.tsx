@@ -6,7 +6,7 @@ import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
-import { ShortcutBar } from "./ui";
+import { Divider, ShortcutBar } from "./ui";
 import { CLUSTER_KEYS, brief } from "../shortcuts";
 
 type ClusterFilter = "all" | "wiped";
@@ -420,7 +420,7 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
           →
         </button>
 
-        <div className="w-px h-4 bg-gray-200" />
+        <Divider />
 
         <span className="text-xs text-gray-500">
           {nDelete > 0
@@ -431,6 +431,8 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
         <span className="text-xs text-gray-500">
           {undecidedCount} of {allClusters.length} left
         </span>
+
+        {focused && <Divider />}
 
         <ShortcutBar items={brief(CLUSTER_KEYS)} />
         {focused && (
@@ -466,7 +468,7 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
               </button>
             ))}
           </div>
-          <div className="w-px h-4 bg-gray-200" />
+          <Divider />
           <button onClick={keepBest} className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50">
             🏆 Best
           </button>
