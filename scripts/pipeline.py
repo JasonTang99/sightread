@@ -491,16 +491,58 @@ def calibrate_threshold(embeddings: np.ndarray, fallback: float) -> float:
     return chosen
 
 
-def _is_own_cluster(devices: set[str]) -> bool:
-    """True when any photo in the cluster came from one of Jason's folders.
+def own_flags(devices: list[str], models: list[str | None] | None = None) -> list[bool]:
+    """Per photo: did Jason shoot it?
 
-    Folder, not EXIF model: `google photos/` holds six cameras, and a handful
-    of his own iPhone frames live in there too (missing numbers from `iphone/`,
-    not duplicates). An empty device name — file in the trip root, or a project
-    opened on a single camera folder — counts as his, so unidentified shots
-    are not absorbed into a guest group.
+    Folder first: `google photos/` and `shared/` are other people's, everything
+    else is his. An empty device name — file in the trip root, or a project
+    opened on a single camera folder — counts as his, so unidentified shots are
+    not absorbed into a guest group.
+
+    Then one rescue inside the guest folders. A handful of his own frames live
+    in `google photos/` too, filling numbering gaps in `iphone/` (7 on Hawaii,
+    15 on Vegas, 3 on Hoh) — missing frames, not duplicates. A frame there whose
+    EXIF model is one his *own* folders also carry is his. Only those models
+    qualify, so the six other cameras in that album stay guests; the folder is
+    still what decides, and the model only says which frames were misfiled.
     """
-    return any(d not in media.OTHER_PEOPLE_DEVICES for d in devices)
+    models = models or [None] * len(devices)
+    by_folder = [d not in media.OTHER_PEOPLE_DEVICES for d in devices]
+    own_models = {m for m, own in zip(models, by_folder) if own and m}
+    return [own or (m in own_models if m else False)
+            for own, m in zip(by_folder, models)]
+
+
+def _split_guest_mixes(labels: np.ndarray, own: list[bool]) -> np.ndarray:
+    """Split any cluster holding both his photos and other people's.
+
+    Stage 4 refuses to *merge* across that line, but the stages before it know
+    nothing about folders, and on a group trip two people photograph one view
+    from nearly the same spot: close enough for the tight pass to call them
+    near-duplicates. Hawaii came out of the first own-vs-guest recluster with
+    six such clusters (20 photos) — an X-T5 frame and five of a guest's iPhone
+    17 Pro among them, where keep-best would rank one shot first and queue the
+    rest, across owners, for deletion.
+
+    Splitting rather than re-thresholding keeps that judgement out of it: the
+    two halves are each still a cluster, reviewed by whoever owns them.
+    """
+    groups: dict[int, list[int]] = {}
+    for i, lab in enumerate(labels):
+        groups.setdefault(int(lab), []).append(i)
+    next_id = int(labels.max()) + 1 if len(labels) else 0
+    split = 0
+    for idxs in groups.values():
+        guests = [i for i in idxs if not own[i]]
+        if not guests or len(guests) == len(idxs):
+            continue
+        for i in guests:
+            labels[i] = next_id
+        next_id += 1
+        split += 1
+    if split:
+        print(f"Split {split} cluster(s) that mixed his photos with other people's")
+    return labels
 
 
 def _merge_reshoot_pairs(
@@ -514,7 +556,7 @@ def _merge_reshoot_pairs(
     models: list[str | None] | None = None,
     cross_window_s: float = 0.0,
     cross_threshold: float = CROSS_DEVICE_THRESHOLD,
-    devices: list[str] | None = None,
+    own: list[bool] | None = None,
 ) -> np.ndarray:
     """Merge clusters holding one subject shot twice — rotated, or on a second camera.
 
@@ -531,11 +573,11 @@ def _merge_reshoot_pairs(
     Passing no `models` (or leaving `cross_window_s` at 0) keeps the old
     framing-only behaviour.
 
-    Other people's cameras may join each other that way. Jason's folders
-    (`iphone/`, `xt5/`, …) never join a guest cluster, even on a rotation:
-    keep-best would then queue his shots as extras in someone else's burst.
-    His own two cameras of one subject still merge. Passing no `devices`
-    skips the split (unit tests, and a project with no device folders).
+    Other people's cameras may join each other that way. Jason's photos never
+    join a guest cluster, even on a rotation: keep-best would then queue his
+    shots as extras in someone else's burst. His own two cameras of one subject
+    still merge. `own` is `own_flags`' verdict per photo; passing none skips the
+    split (unit tests, and a project with no device folders).
 
     `threshold` is the loosest distance anywhere in the pipeline, so what a
     merged group is allowed to span matters as much as the pairing rule. Merges
@@ -567,7 +609,7 @@ def _merge_reshoot_pairs(
             "t_max": max(ts),
             "kinds": kinds,
             "models": {models[i] for i in idxs if models[i]} if models else set(),
-            "devices": {devices[i] for i in idxs} if devices is not None else None,
+            "own": any(own[i] for i in idxs) if own is not None else None,
             "centroid": centroid,
         }
 
@@ -583,13 +625,13 @@ def _merge_reshoot_pairs(
             gap = right["t_min"] - left["t_max"]
             if gap > widest:
                 break
-            # Jason's folders never join a guest cluster. Other people's
-            # cameras may still join each other; his phone and camera may
-            # still join each other. The split is by folder, not model.
+            # His photos never join a guest cluster. Other people's cameras may
+            # still join each other; his phone and camera may still join each
+            # other. The split is by folder, not model.
             if (
-                left["devices"] is not None
-                and right["devices"] is not None
-                and _is_own_cluster(left["devices"]) != _is_own_cluster(right["devices"])
+                left["own"] is not None
+                and right["own"] is not None
+                and left["own"] != right["own"]
             ):
                 continue
             # Two clusters count as different cameras only when both name one
@@ -658,7 +700,7 @@ def cluster_embeddings(
     models: list[str | None] | None = None,
     cross_window_s: float = CROSS_DEVICE_WINDOW_S,
     cross_threshold: float = CROSS_DEVICE_THRESHOLD,
-    devices: list[str] | None = None,
+    own: list[bool] | None = None,
 ) -> dict[int, list[int]]:
     """Two-stage clustering: burst pre-group, tight dedup inside parent groups."""
     n = len(embeddings)
@@ -746,6 +788,13 @@ def cluster_embeddings(
                     final_labels[i] = next_id
                 next_id += 1
 
+    # Stage 3b: his photos and other people's are never one cluster. Stage 4
+    # refuses to merge across that line; the stages above it do not know about
+    # folders at all, so on a group trip they still land a guest's frame in his
+    # cluster as a near-duplicate.
+    if own is not None:
+        final_labels = _split_guest_mixes(final_labels, own)
+
     # Stage 4: rejoin the same subject shot twice — rotated, or on the other camera
     if orientations is not None and orient_window_s > 0:
         widest = max(orient_window_s, cross_window_s if models else 0.0)
@@ -762,7 +811,7 @@ def cluster_embeddings(
             models=models,
             cross_window_s=cross_window_s,
             cross_threshold=cross_threshold,
-            devices=devices,
+            own=own,
         )
 
     clusters: dict[int, list[int]] = {}
@@ -1381,7 +1430,7 @@ def run_pipeline(
         models=models,
         cross_window_s=cross_window_s,
         cross_threshold=cross_threshold,
-        devices=[media.device_of(p, image_dir) for p in paths],
+        own=own_flags([media.device_of(p, image_dir) for p in paths], models),
     )
 
     scores, components = score_images(
