@@ -153,10 +153,16 @@ export function Kbd({ children }: { children: ReactNode }) {
  * by middots. They were simultaneously too faint to read and busy enough to be
  * visual noise, which is the worst of both. Keys are chips now, at a contrast
  * that can actually be read, and the long tail moved to `?`.
+ *
+ * `w-full order-last` puts it on its own line at the end of the toolbar rather
+ * than inline among the controls. Reference material wedged between a pager
+ * and a tag picker reads as one more thing to operate; chips made that worse
+ * than the faint text did, because they are heavier. Its container needs
+ * `flex-wrap` for this to land.
  */
 export function ShortcutBar({ items }: { items: Shortcut[] }) {
   return (
-    <span className="flex items-center gap-2 flex-wrap text-[11px] text-gray-500">
+    <span className="w-full order-last flex items-center gap-x-3 gap-y-1 flex-wrap text-[11px] text-gray-500 pt-1.5 mt-0.5 border-t border-gray-100">
       {items.map((s) => (
         <span key={s.keys} className="flex items-center gap-1">
           <Kbd>{s.keys}</Kbd>

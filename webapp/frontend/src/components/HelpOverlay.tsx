@@ -72,6 +72,12 @@ export function HelpOverlay({ onClose }: Props) {
             <Section key={title} title={title} keys={keys} />
           ))}
         </div>
+        <p className="mt-5 pt-3 border-t border-gray-100 text-xs text-gray-500 flex items-center gap-1.5">
+          <Kbd>?</Kbd>
+          <span>toggles this help ·</span>
+          <Kbd>Esc</Kbd>
+          <span>closes it</span>
+        </p>
       </div>
     </div>
   );

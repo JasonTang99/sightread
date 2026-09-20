@@ -129,7 +129,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
 
   return (
     <div className="space-y-2">
-      <div className="bg-white rounded border border-gray-200 px-3 py-2 flex items-center gap-2">
+      <div className="bg-white rounded border border-gray-200 px-3 py-2 flex items-center flex-wrap gap-2">
         <span className="text-sm font-medium text-yellow-600">
           ★ {favorites.length} favorite{favorites.length !== 1 ? "s" : ""}
         </span>
