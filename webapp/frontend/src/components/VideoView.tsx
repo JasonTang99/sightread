@@ -757,7 +757,7 @@ export function VideoView({
   return (
     <div className="-mx-2 -mt-2 flex flex-col" style={{ height: "calc(100vh - 2.25rem)" }}>
       {/* Toolbar */}
-      <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-3 shrink-0">
+      <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center flex-wrap gap-3 shrink-0">
         <span className="text-xs text-gray-500 tabular-nums">{Math.min(idx, videos.length - 1) + 1} / {videos.length}</span>
         <span className="text-xs text-gray-600 truncate max-w-xs">{name}</span>
         <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${isKept ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>

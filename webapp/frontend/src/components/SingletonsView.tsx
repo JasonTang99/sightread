@@ -224,7 +224,7 @@ export function SingletonsView({
   return (
     <div className="-mx-2 -mt-2 flex flex-col" style={{ height: "calc(100vh - 2.25rem)" }}>
       {/* Toolbar */}
-      <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-3 shrink-0">
+      <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center flex-wrap gap-3 shrink-0">
         <span className="text-xs text-gray-500 tabular-nums">{Math.min(idx, items.length - 1) + 1} / {items.length}</span>
         <span className="text-xs text-gray-600 truncate max-w-xs" title={current.path}>{current.path.split("/").pop()}</span>
         <span className="text-xs font-mono text-gray-600">{current.score.toFixed(2)}</span>

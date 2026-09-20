@@ -42,7 +42,6 @@ export const CLUSTER_KEYS: Shortcut[] = [
   { keys: "s", what: "star / unstar focused image (star keeps)", brief: true, short: "star" },
   { keys: "t", what: "cycle tag on focused image" },
   { keys: "u", what: "undo last confirm" },
-  { keys: "?", what: "toggle this help" },
 ];
 
 export const SINGLES_KEYS: Shortcut[] = [
@@ -53,7 +52,6 @@ export const SINGLES_KEYS: Shortcut[] = [
   { keys: "1–9", what: "tag current image" },
   { keys: "t", what: "cycle tag" },
   { keys: "Enter", what: "confirm single (last → next tab)", brief: true, short: "confirm" },
-  { keys: "?", what: "toggle this help" },
 ];
 
 export const VIDEO_KEYS: Shortcut[] = [
@@ -65,7 +63,6 @@ export const VIDEO_KEYS: Shortcut[] = [
   { keys: "1–9", what: "tag current clip" },
   { keys: "t", what: "cycle tag" },
   { keys: "Enter", what: "confirm clip (last → next tab)", brief: true, short: "confirm" },
-  { keys: "?", what: "toggle this help" },
 ];
 
 /** Only shown once the clip has suggested or user clips to step through. */
@@ -84,9 +81,11 @@ export const FAVORITES_KEYS: Shortcut[] = [
   { keys: "h/j/k/l", what: "move focus", brief: true, short: "move" },
   { keys: "d", what: "unfavorite and mark for deletion", brief: true, short: "unstar + delete" },
   { keys: "s", what: "unfavorite", brief: true, short: "unstar" },
-  { keys: "?", what: "toggle this help" },
 ];
 
+/** `?` is deliberately not in any list. It was in all four, so the overlay
+ *  printed "toggle this help" four times, and the crib appends its own "?
+ *  all keys" already. It belongs to the app, not to a view. */
 export function brief(...lists: Shortcut[][]): Shortcut[] {
   return lists.flat().filter((s) => s.brief);
 }
