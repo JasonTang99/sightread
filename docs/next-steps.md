@@ -427,6 +427,58 @@ a description of HEAD.
    alone — with no `google photos/` or `shared/` folder there is nothing for
    the split to do, so their `results.json` is unaffected by the change.
 
+## 8a. UI cleanliness pass — branch `ui-cleanup`
+
+Branched off `mirror-aware-deletes` on 2026-09-20. Four commits, 107 Playwright
+and 383 Python passing on each.
+
+- **`a002752` checkpoints §8's uncommitted tree unchanged**, so the UI diffs are
+  readable on their own. §8's three threads share `App.tsx` and `server.py` with
+  everything the UI work touches, and leaving them dirty meant every later diff
+  carried them. **`mirror-aware-deletes` still points at `f682a74`**, so §8's
+  plan to land them as three hunk-split commits is unaffected — reset this
+  commit there when that happens.
+- **`d7d412e` gives the header three groups** — where you are, where you can go,
+  how the session is doing — separated by hairlines. It was one undivided row of
+  up to thirteen items. `components/ui.tsx` is new and holds Tab, TabCount,
+  Button, Status, Switch, Kbd, ShortcutBar and Divider, with the colour rule
+  written at the top: blue means "where you are" and nothing else. The tab
+  button's 140-character class string had been copy-pasted six times.
+- **`625ba83` writes every shortcut once**, in `src/shortcuts.ts`, shared by the
+  overlay and the per-view cribs. The cribs were `text-gray-300` — about 1.5:1
+  on white — and ClusterView's ran to thirteen run-together items. The overlay
+  covered Clusters and Singles only, so the Videos and Favorites cribs named
+  keys documented nowhere.
+- **`1d9be9b` moves the crib off the control row** onto its own line, and drops
+  `?` from all four lists into a single overlay footer that also names Esc.
+- **`450a3b9`** replaces ClusterView's two hand-rolled dividers with the shared
+  one and groups its control row.
+
+**Caught by screenshot, not by the suite.** A temporary Playwright test captured
+the header, cluster toolbar and overlay at 1440x900; that is how the crib was
+found sitting mid-toolbar, where chips gave reference material more weight than
+the controls beside it. Both commits' tests passed either way. Nothing asserts
+any of this, so **look at it before believing it**. The test was not kept.
+
+**Still open on this branch:**
+
+1. **The bindings themselves are still a third copy.** `shortcuts.ts` describes
+   keys; each view's keydown handler implements them. A key can be changed in
+   the handler and left stale in the list, and nothing catches that. Collapsing
+   the last gap means the handler reading its bindings from the same list — a
+   real refactor of three views, not a doc change. **First action: decide
+   whether it is worth it, or whether a test that asserts every `brief` key
+   actually does something is enough.**
+2. **`ProjectPicker.tsx` (423 lines) and `TimelineView.tsx` (451) were not
+   touched.** The picker is the first screen anyone sees and still has its own
+   button and badge styling.
+3. **Run the Playwright suite with 3.11.15 first on PATH.** `conftest` spawns
+   `python3 -m uvicorn`, so a shell whose `python3` is the 3.10.8 pyenv global
+   fails all 107 in fixture setup with a misleading 30s server timeout:
+   `PATH="$HOME/.pyenv/versions/3.11.15/bin:$PATH" python -m pytest webapp/tests`.
+4. **Not merged and not pushed.** `ui-cleanup` sits ahead of
+   `mirror-aware-deletes` by five commits.
+
 ## 8. The working tree holds a separate, unreviewed body of work
 
 Not the three features above — those are on HEAD. What is uncommitted on
