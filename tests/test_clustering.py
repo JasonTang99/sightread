@@ -340,7 +340,7 @@ class TestOwnVsGuestMerge:
         embeddings, timestamps, orientations, labels, models = fixture
         opts = dict(window_s=120.0, threshold=0.38, max_span_s=3600.0,
                     models=models, cross_window_s=300.0, cross_threshold=0.22,
-                    devices=devices)
+                    own=pipeline.own_flags(devices, models))
         opts.update(kw)
         return pipeline._merge_reshoot_pairs(
             embeddings, timestamps, orientations, labels, **opts)
@@ -393,9 +393,74 @@ class TestOwnVsGuestMerge:
         clusters = pipeline.cluster_embeddings(
             embeddings, timestamps, orientations, orient_window_s=120.0,
             models=models, cross_window_s=300.0, cross_threshold=0.22,
-            devices=devices,
+            own=pipeline.own_flags(devices, models),
         )
         assert len(clusters) == 2
+
+    def test_a_near_duplicate_of_a_guest_frame_is_split_off(self):
+        """Two people photographing one view land inside the tight threshold.
+
+        Stage 4 never merged these — the stages above it did, as near-duplicates
+        — so refusing the merge is not enough to keep the two owners apart.
+        """
+        same = [1.0, 0.0, 0.0]
+        embeddings = _embeddings([same] * 4)
+        timestamps = [0.0, 1.0, 2.0, 3.0]
+        orientations = ["portrait"] * 4
+        models = ["X-T5", "X-T5", "iPhone 17 Pro", "iPhone 17 Pro"]
+        devices = ["xt5", "xt5", "google photos", "google photos"]
+        clusters = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+            models=models, cross_window_s=300.0, cross_threshold=0.22,
+            own=pipeline.own_flags(devices, models),
+        )
+        assert len(clusters) == 2
+        assert sorted(sorted(v) for v in clusters.values()) == [[0, 1], [2, 3]]
+
+    def test_no_device_folders_leaves_clusters_alone(self):
+        """A project opened on one camera folder has no line to split on."""
+        same = [1.0, 0.0, 0.0]
+        clusters = pipeline.cluster_embeddings(
+            _embeddings([same] * 4), [0.0, 1.0, 2.0, 3.0], ["portrait"] * 4,
+            orient_window_s=120.0,
+        )
+        assert len(clusters) == 1
+
+
+class TestOwnFlags:
+    """Which photos are his. Folder decides; model only un-misfiles."""
+
+    def test_guest_folders_are_other_peoples(self):
+        assert pipeline.own_flags(
+            ["iphone", "xt5", "canon", "google photos", "shared"],
+            ["iPhone 14", "X-T5", "EOS R6", "Galaxy Z Fold6", "iPhone 17 Pro"],
+        ) == [True, True, True, False, False]
+
+    def test_a_file_in_the_trip_root_counts_as_his(self):
+        assert pipeline.own_flags(["", "google photos"], ["X-T5", "X-T5"])[0] is True
+
+    def test_his_frame_filed_in_the_shared_album_is_still_his(self):
+        """`google photos/` backfills numbering gaps in `iphone/`.
+
+        7 frames on Hawaii, 15 on Vegas — his own camera, filed with everyone
+        else's. Splitting those off his burst would be the new wrong.
+        """
+        assert pipeline.own_flags(
+            ["iphone", "google photos", "google photos"],
+            ["iPhone 14", "iPhone 14", "Galaxy Z Fold6"],
+        ) == [True, True, False]
+
+    def test_only_a_model_his_own_folders_carry_is_rescued(self):
+        """No own folder names that model, so nothing in the album is his."""
+        assert pipeline.own_flags(
+            ["xt5", "google photos"], ["X-T5", "iPhone 14"],
+        ) == [True, False]
+
+    def test_a_guest_frame_without_a_model_stays_a_guest(self):
+        assert pipeline.own_flags(["iphone", "google photos"], ["X-T5", None]) == [True, False]
+
+    def test_models_are_optional(self):
+        assert pipeline.own_flags(["xt5", "shared"]) == [True, False]
 
 
 # ---------------------------------------------------------------------------
