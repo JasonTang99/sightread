@@ -345,8 +345,28 @@ class TestOwnVsGuestMerge:
         return pipeline._merge_reshoot_pairs(
             embeddings, timestamps, orientations, labels, **opts)
 
-    def test_other_people_cameras_still_merge(self):
+    def test_two_guest_cameras_no_longer_merge(self):
+        """Reversed 2026-09-20: a second camera in the album is a second person.
+
+        The 14th let other people's cameras merge with each other, on the
+        grounds that only his photos needed protecting. They need it too — h0's
+        copy of the shared album is deleted from for real, so ranking a Galaxy
+        frame against a Xiaomi one throws away one person's shot for another's.
+        """
         out = self._merge(self._pair(), devices=["google photos"] * 4)
+        assert len(set(out.tolist())) == 2
+
+    def test_one_guest_re_shooting_on_their_own_camera_still_merges(self):
+        """Same model, so as far as EXIF knows it is one person, rotating.
+
+        Inside the 120s rotation window, not the 300s cross-camera one — that
+        wider window was only ever for reaching past one camera to another.
+        """
+        out = self._merge(
+            self._pair(models=("Galaxy Z Fold6", "Galaxy Z Fold6"),
+                       kinds=("portrait", "landscape"), dist=0.3, gap_s=100.0),
+            devices=["google photos"] * 4,
+        )
         assert len(set(out.tolist())) == 1
 
     def test_own_camera_does_not_join_other_people(self):
@@ -416,6 +436,36 @@ class TestOwnVsGuestMerge:
         )
         assert len(clusters) == 2
         assert sorted(sorted(v) for v in clusters.values()) == [[0, 1], [2, 3]]
+
+    def test_two_guests_are_split_out_of_one_near_duplicate_cluster(self):
+        """Several people at one view land inside the tight threshold too.
+
+        Hawaii's largest album cluster was 26 Galaxy Z Fold6 frames and 12
+        Xiaomi over 183s — two people at the lava field, not one subject.
+        """
+        same = [1.0, 0.0, 0.0]
+        embeddings = _embeddings([same] * 4)
+        timestamps = [0.0, 1.0, 2.0, 3.0]
+        orientations = ["portrait"] * 4
+        models = ["Galaxy Z Fold6", "Galaxy Z Fold6", "Xiaomi 17 Pro Max", "Xiaomi 17 Pro Max"]
+        devices = ["google photos"] * 4
+        clusters = pipeline.cluster_embeddings(
+            embeddings, timestamps, orientations, orient_window_s=120.0,
+            models=models, cross_window_s=300.0, cross_threshold=0.22,
+            own=pipeline.own_flags(devices, models),
+        )
+        assert sorted(sorted(v) for v in clusters.values()) == [[0, 1], [2, 3]]
+
+    def test_his_two_cameras_are_one_photographer(self):
+        """The split is per person, not per camera — his phone and camera stay."""
+        same = [1.0, 0.0, 0.0]
+        clusters = pipeline.cluster_embeddings(
+            _embeddings([same] * 4), [0.0, 1.0, 2.0, 3.0], ["portrait"] * 4,
+            orient_window_s=120.0,
+            models=["X-T5", "X-T5", "iPhone 14", "iPhone 14"],
+            own=pipeline.own_flags(["xt5", "xt5", "iphone", "iphone"], None),
+        )
+        assert len(clusters) == 1
 
     def test_no_device_folders_leaves_clusters_alone(self):
         """A project opened on one camera folder has no line to split on."""
