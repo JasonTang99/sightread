@@ -25,6 +25,23 @@ export function nextPendingIndex(count: number, from: number, isPending: (i: num
   return -1;
 }
 
+// Where Enter goes after a confirm. Skip-reviewed hops to the next pending
+// item (wrapping); otherwise the next index. `"advance"` when that hop has
+// nowhere to land — last in the list, or nothing else still pending — so the
+// view can open the next tab instead of sitting on the row just confirmed.
+export function nextAfterConfirm(
+  count: number,
+  from: number,
+  skipReviewed: boolean,
+  isPending: (i: number) => boolean,
+): number | "advance" {
+  if (skipReviewed) {
+    const pending = nextPendingIndex(count, from, isPending);
+    return pending === -1 ? "advance" : pending;
+  }
+  return from + 1 < count ? from + 1 : "advance";
+}
+
 // ...and wiped when it was decided and nothing survived.
 export function isWiped(cluster: Cluster, decisions: PhotoDecisions): boolean {
   return isDecided(cluster, decisions) && cluster.images.every((img) => isDoomed(decisions[img.path]));

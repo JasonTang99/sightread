@@ -10,11 +10,12 @@ import json
 from playwright.sync_api import Page, expect
 
 
-def _project(folder, status, pending, eta_s):
+def _project(folder, status, pending, eta_s, display_name=None, last_opened=None, subtrip=None):
     return {
         "folder": folder,
-        "display_name": folder.rsplit("/", 1)[-1],
-        "last_opened": None,
+        "subtrip": subtrip,
+        "display_name": display_name or folder.rsplit("/", 1)[-1],
+        "last_opened": last_opened,
         "last_pipeline_run": None,
         "image_count": 1173,
         "status": status,
@@ -45,6 +46,7 @@ def _open_picker(browser, webapp_server, projects, entries) -> Page:
         )
 
     page.route("**/api/state", fulfill({"no_project": True}))
+    page.route("**/api/projects/details", fulfill(projects))
     page.route("**/api/projects", fulfill(projects))
     page.route("**/api/fs/list*", fulfill({"path": "/trips", "parent": None, "entries": entries}))
     page.goto(webapp_server)
@@ -122,6 +124,52 @@ def test_trips_list_newest_trip_first(browser, webapp_server):
     page.context.close()
 
 
+def test_same_trip_cities_stay_in_name_order(browser, webapp_server):
+    """Opening a city used to bubble it to the top of the date list, because
+    same-trip rows tied on folder and inherited last-opened order."""
+    trip = "/mnt/h0/Trips/2024/2024_01_Japan"
+    page = _open_picker(
+        browser, webapp_server,
+        projects=[
+            _project(trip, "ready", 0, None,
+                     display_name="2024_01_Japan / 12_Wakayama",
+                     last_opened="2026-09-15T00:00:00+00:00", subtrip="12_Wakayama"),
+            _project(trip, "ready", 0, None,
+                     display_name="2024_01_Japan / 01_Hakodate",
+                     last_opened="2026-09-01T00:00:00+00:00", subtrip="01_Hakodate"),
+            _project("/mnt/h0/Trips/2026_07_Hawaii", "ready", 0, None),
+        ],
+        entries=[],
+    )
+    names = lambda list_id: page.get_by_test_id(list_id).locator("li p.font-medium").all_inner_texts()
+    assert names("recent-projects") == [
+        "2024_01_Japan / 12_Wakayama", "2024_01_Japan / 01_Hakodate", "2026_07_Hawaii",
+    ]
+    assert names("projects-by-date") == [
+        "2026_07_Hawaii", "2024_01_Japan / 01_Hakodate", "2024_01_Japan / 12_Wakayama",
+    ]
+    page.context.close()
+
+
+def test_double_click_opens_a_ready_project(browser, webapp_server):
+    opened = []
+    page = _open_picker(
+        browser, webapp_server,
+        projects=[_project("/trips/2026_07_Hawaii", "ready", 0, None)],
+        entries=[],
+    )
+
+    def handle_open(route):
+        opened.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+    page.route("**/api/projects/open", handle_open)
+    with page.expect_request("**/api/projects/open"):
+        page.get_by_test_id("projects-by-date").locator("li", has_text="2026_07_Hawaii").dblclick()
+    assert opened[0]["folder"] == "/trips/2026_07_Hawaii"
+    page.context.close()
+
+
 def test_browsing_waits_until_asked(browser, webapp_server):
     page = _open_picker(browser, webapp_server, projects=[], entries=[_entry("2024_03_Europe", 9522, 7140)])
     expect(page.get_by_text("Browse", exact=True)).to_have_count(0)
@@ -133,4 +181,35 @@ def test_browsing_waits_until_asked(browser, webapp_server):
     page.get_by_title("Close browser").click()
     expect(page.get_by_text("2024_03_Europe", exact=True)).to_have_count(0)
     expect(page.get_by_role("button", name="Other folder…")).to_be_visible()
+    page.context.close()
+
+
+def test_names_paint_before_counts_arrive(browser, webapp_server):
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    names = [_project("/trips/2026_07_Hawaii", "ready", 0, None)]
+    names[0]["image_count"] = 0
+    details = [_project("/trips/2026_07_Hawaii", "stale", 731, 488)]
+    held = []
+
+    def fulfill(body):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(body)
+        )
+
+    page.route("**/api/state", fulfill({"no_project": True}))
+    page.route("**/api/projects/details", lambda route: held.append(route))
+    page.route("**/api/projects", fulfill(names))
+    page.route("**/api/fs/list*", fulfill({"path": "/trips", "parent": None, "entries": []}))
+    page.goto(webapp_server)
+
+    hawaii = page.get_by_test_id("recent-projects").locator("li", has_text="2026_07_Hawaii")
+    expect(hawaii).to_be_visible()
+    expect(hawaii.get_by_test_id("pipeline-eta")).to_have_count(0)
+    expect(hawaii.get_by_text("images")).to_have_count(0)
+    assert held, "details fetch must start once names are in"
+
+    held[0].fulfill(status=200, content_type="application/json", body=json.dumps(details))
+    expect(hawaii.get_by_test_id("pipeline-eta")).to_have_text("⏱ ~8 min · 731 to process")
+    expect(hawaii.get_by_text("1173 images")).to_be_visible()
     page.context.close()

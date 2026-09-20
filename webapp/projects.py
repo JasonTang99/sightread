@@ -310,18 +310,16 @@ def discover_pipeline_projects() -> list[dict]:
         folder = _folder_for_output_dir(out_dir)
         if folder is None:
             continue
-        sidecar = out_dir / "embeddings_dinov3_mpcls_tta.paths.json"
-        try:
-            image_count = len(json.loads(sidecar.read_text()))
-        except Exception:
-            image_count = 0
+        # Do not parse embeddings paths.json just to count photos. The picker
+        # shows names first; recents.json or /api/projects/details fill the
+        # number later.
         meta = _project_meta(out_dir) or {}
         entry = {
             "folder": str(folder),
             "output_dir": str(out_dir),
             "last_opened": None,
             "last_pipeline_run": _pipeline_run_time(out_dir),
-            "image_count": image_count,
+            "image_count": 0,
         }
         if meta.get("subtrip"):
             entry["subtrip"] = meta["subtrip"]
@@ -818,16 +816,8 @@ def known_projects() -> list[dict]:
         if entry.get("image_count"):
             existing["image_count"] = entry["image_count"]
     rolled = roll_up_to_trips(list(merged.values()))
-    seen: set[str] = set()
-    for entry in rolled:
-        folder = entry["folder"]
-        if folder in seen:
-            continue
-        seen.add(folder)
-        try:
-            ensure_city_caches(Path(folder))
-        except OSError:
-            pass
+    # City cache splits copy embeddings; that belongs on open / details, not
+    # on the names list the picker needs first.
     entries = expand_city_subtrips(rolled)
     entries.sort(
         key=lambda e: max(e.get("last_opened") or "", e.get("last_pipeline_run") or ""),

@@ -50,8 +50,8 @@ fi
 URL="http://127.0.0.1:8765"
 echo "🚀 Launching curation UI at $URL ..."
 
-# Open browser after server has a moment to bind
-(sleep 1 && xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null || true) &
+# Open browser after server has a moment to bind (Chrome, for GPU accel)
+(sleep 1 && google-chrome "$URL" 2>/dev/null || xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null || true) &
 
 # No --reload: it restarts the server on file edits, wiping the active
 # project and undo stack (both held in memory).

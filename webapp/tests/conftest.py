@@ -142,6 +142,7 @@ def reset_state(output_dir, project_folder, webapp_server):
     (output_dir / "results.json").write_text(json.dumps(FIXTURE_RESULTS))
     for name in CURATION_FILES:
         (output_dir / name).unlink(missing_ok=True)
+    (output_dir / "curation_done.json").unlink(missing_ok=True)
     requests.post(f"{BASE_URL}/api/_test_reset")
     requests.post(
         f"{BASE_URL}/api/_test_set_project",

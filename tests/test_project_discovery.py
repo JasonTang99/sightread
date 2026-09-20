@@ -28,7 +28,6 @@ def test_discovers_folder_never_opened_in_ui(tmp_path, monkeypatch):
     entries = projects.known_projects()
 
     assert [e["folder"] for e in entries] == [str(folder)]
-    assert entries[0]["image_count"] == 2
     assert entries[0]["last_pipeline_run"] is not None
     assert entries[0]["last_opened"] is None
 
@@ -136,7 +135,6 @@ def test_device_folders_roll_up_into_their_trip(tmp_path, monkeypatch):
 
     korea = trips / "2024" / "2024_02_Korea"
     assert set(entries) == {str(hoh), str(korea), str(demo)}
-    assert entries[str(hoh)]["image_count"] == 1
     assert entries[str(korea)]["output_dir"] == str(data_dir / projects.project_output_dir_name(korea))
     # The trip inherits when its device folder last ran.
     run_time = projects._pipeline_run_time(out)

@@ -11,7 +11,7 @@ const CLUSTER_KEYS = [
   ["1–9", "toggle image by rank number"],
   ["K", "keep best (rank 1 only)"],
   ["n", "jump to next unreviewed cluster"],
-  ["Enter", "confirm cluster"],
+  ["Enter", "confirm cluster (last → next tab)"],
   ["b", "skip cluster (no confirm)"],
   ["s", "star / unstar focused image (star keeps)"],
   ["t", "cycle tag on focused image"],
@@ -25,7 +25,7 @@ const SINGLES_KEYS = [
   ["s", "star / unstar (star keeps)"],
   ["1–9", "tag current image"],
   ["t", "cycle tag"],
-  ["Enter", "confirm singles"],
+  ["Enter", "confirm single (last → next tab)"],
   ["?", "toggle this help"],
 ];
 

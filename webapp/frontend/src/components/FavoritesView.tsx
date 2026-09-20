@@ -48,7 +48,9 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
     }
   };
 
-  // Space: drop the favorite and mark the item for deletion. Order matters —
+  // d: drop the favorite and mark the item for deletion. Kept off spacebar —
+  // that's the keep/delete toggle everywhere else in the app, so an
+  // instinctive space press here must not delete anything. Order matters —
   // the backend /api/confirm endpoint skips anything still favorited, so the
   // favorite must be removed first.
   const handleDelete = async (path: string) => {
@@ -94,7 +96,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         e.preventDefault();
         setFocus((i) => Math.max(0, i - COLS));
         break;
-      case " ": {
+      case "d": {
         e.preventDefault();
         const path = favorites[Math.min(focus, last)];
         if (path && busy === null) handleDelete(path);
@@ -130,7 +132,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
           ★ {favorites.length} favorite{favorites.length !== 1 ? "s" : ""}
         </span>
         <span className="text-xs text-gray-400">
-          h/j/k/l move · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">space</kbd> unfavorite + mark delete · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> unfavorite
+          h/j/k/l move · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">d</kbd> unfavorite + mark delete · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> unfavorite
         </span>
       </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` }}>
