@@ -55,6 +55,7 @@ def test_finish_preview_reports_counts(api, monkeypatch):
         "photos": {
             "a.jpg": "to_delete",
             "b.jpg": "favorite",
+            "c.mp4": "kept",
         },
     }))
     monkeypatch.setattr(server, "EXPORTS_ROOT", out / "exports")
@@ -63,6 +64,8 @@ def test_finish_preview_reports_counts(api, monkeypatch):
     preview = client.get("/api/finish/preview").json()
 
     assert preview["pending_deletes"] == 1
+    assert preview["remaining_photos"] == 1
+    assert preview["remaining_videos"] == 1
     assert preview["favorites"] == 1
     assert preview["pipeline_cache_bytes"] > 0
 

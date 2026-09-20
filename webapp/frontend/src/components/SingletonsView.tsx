@@ -5,7 +5,7 @@ import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { DeviceBadge } from "./DeviceBadge";
 import { deviceOf } from "../device";
-import { nextPendingIndex } from "../decisions";
+import { nextAfterConfirm } from "../decisions";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 
 interface Props {
@@ -19,6 +19,9 @@ interface Props {
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
   onToggleFavorite: (path: string) => Promise<void>;
+  // Enter on the last single (or last still-pending, with skip on) opens
+  // the next tab instead of sitting on the row just confirmed.
+  onAdvance?: () => void;
   videoTags?: VideoTagsState;
   onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
@@ -40,6 +43,7 @@ export function SingletonsView({
   onRefresh,
   onError,
   onToggleFavorite,
+  onAdvance,
   videoTags = { tags: [], assignments: {} },
   onVideoTagsChange,
 }: Props) {
@@ -90,6 +94,14 @@ export function SingletonsView({
     clearFlash();
   }, [idx]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Turning skip-reviewed on jumps straight to the next thing still needing
+  // a decision, same landing spot confirm would drop you at.
+  useEffect(() => {
+    if (!skipReviewed) return;
+    const first = items.findIndex((it) => !(it.path in decisions));
+    if (first !== -1) setIdx(first);
+  }, [skipReviewed]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const confirmCurrent = () => {
     const it = items[idx];
     if (!it) return;
@@ -108,11 +120,14 @@ export function SingletonsView({
       })
       .catch((err) => onError(err instanceof Error ? err.message : String(err)));
     confirmedRef.current.add(it.path);
-    const pending = skipReviewed
-      ? nextPendingIndex(items.length, idx, (i) =>
-          !(items[i].path in decisions) && !confirmedRef.current.has(items[i].path))
-      : -1;
-    setIdx(pending !== -1 ? pending : Math.min(items.length - 1, idx + 1));
+    const hop = nextAfterConfirm(
+      items.length,
+      idx,
+      skipReviewed,
+      (i) => !(items[i].path in decisions) && !confirmedRef.current.has(items[i].path),
+    );
+    if (hop === "advance") onAdvance?.();
+    else setIdx(hop);
   };
 
   useWindowKeydown((e) => {
@@ -136,11 +151,13 @@ export function SingletonsView({
     switch (e.key) {
       case "j":
       case "ArrowDown":
+      case "ArrowRight":
         e.preventDefault();
         setIdx((i) => Math.min(items.length - 1, i + 1));
         break;
       case "k":
       case "ArrowUp":
+      case "ArrowLeft":
         e.preventDefault();
         setIdx((i) => Math.max(0, i - 1));
         break;
@@ -229,7 +246,7 @@ export function SingletonsView({
           }}
           onAdd={addTag}
         />
-        <span className="text-xs text-gray-300">j/k move · space toggle · s star · 1–9 tag · t cycle · enter confirm+next</span>
+        <span className="text-xs text-gray-300">j/k · ←/→ move · space toggle · s star · 1–9 tag · t cycle · enter confirm+next</span>
         <div className="ml-auto flex items-center gap-2">
           {nDelete > 0 && <span className="text-xs text-gray-400">{nDelete} → trash</span>}
           <button onClick={confirm} disabled={submitting}

@@ -96,8 +96,10 @@ export default function App() {
   // needs triage, and only the timeline once clusters, singles *and* videos are
   // all decided. Videos used to be left out, so reloading mid-way through the
   // Videos tab dropped you on the timeline with footage still undecided.
-  // Deliberately does not re-run on later state changes; confirming the last
-  // cluster shouldn't yank you off the tab you're working in.
+  // Deliberately does not re-run on later state changes; confirming a cluster
+  // in the middle of the pile shouldn't yank you off the tab you're working
+  // in. Enter on the *last* cluster/single/video is the explicit hop — see
+  // `advanceTab`.
   const landedRef = useRef(false);
   useEffect(() => {
     if (!state || state.no_project || landedRef.current) return;
@@ -186,6 +188,8 @@ export default function App() {
     setState(null);
     setVideos([]);
     setJustDecidedVideos(new Set());
+    setTab("clusters");
+    landedRef.current = false;
     setLoading(false);
   };
 
@@ -218,6 +222,31 @@ export default function App() {
   const hasVideos = reviewableVideos.length > 0;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
+
+  // Jumps to whichever tab has the next thing still needing a decision —
+  // clusters, then singles, then videos — same priority as the initial
+  // landing choice above.
+  const goToNextUnconfirmed = () => {
+    if (clusterList.some((c) => !isDecided(c, decisions))) { setTab("clusters"); return; }
+    if (singleList.some((c) => !isDecided(c, decisions))) { setTab("singles"); return; }
+    const videosPending = videos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
+    if (videosPending) { setTab("videos"); return; }
+    setTab("timeline");
+  };
+
+  // Enter on the last cluster / single / video opens the next visible tab,
+  // skipping ones that have nothing to show. Finish stays last so a review
+  // pass lands on the timeline before the export/delete panel.
+  const advanceTab = () => {
+    const visible: typeof tab[] = [];
+    if (hasClusters) visible.push("clusters");
+    if (hasSingles) visible.push("singles");
+    if (hasVideos) visible.push("videos");
+    if (hasFavorites) visible.push("favorites");
+    visible.push("timeline", "finish");
+    const i = visible.indexOf(tab);
+    if (i >= 0 && i < visible.length - 1) setTab(visible[i + 1]);
+  };
 
   // Session progress across everything that needs a decision. Clusters and
   // singles count as one unit each — that is how they are reviewed — and every
@@ -320,23 +349,32 @@ export default function App() {
           {/* Skipping what is already decided: confirm jumps over it. Shown
               once something is decided, since before that it would do nothing. */}
           {reviewedUnits > 0 || hideReviewed ? (
-            <button
-              onClick={() => setHideReviewed((on) => !on)}
-              className={`text-xs rounded px-2 py-0.5 border transition-colors ${
-                hideReviewed
-                  ? "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
-                  : "text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600"
-              }`}
-              title={
-                hideReviewed
-                  ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
-                  : "Make confirm jump past clusters, singles and videos that have already been decided"
-              }
-              aria-pressed={hideReviewed}
-              data-testid="hide-reviewed"
-            >
-              {hideReviewed ? "Skipping reviewed" : "Skip reviewed"}
-            </button>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-gray-500">Skip reviewed</span>
+              <button
+                onClick={() => {
+                  setHideReviewed((on) => !on);
+                  goToNextUnconfirmed();
+                }}
+                role="switch"
+                aria-checked={hideReviewed}
+                title={
+                  hideReviewed
+                    ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
+                    : "Make confirm jump past clusters, singles and videos that have already been decided"
+                }
+                data-testid="hide-reviewed"
+                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
+                  hideReviewed ? "bg-green-500" : "bg-red-400"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                    hideReviewed ? "translate-x-4" : ""
+                  }`}
+                />
+              </button>
+            </div>
           ) : null}
           {totalUnits > 0 && (
             <span
@@ -382,10 +420,8 @@ export default function App() {
         {tab === "finish" ? (
           <FinishTripPanel
             pendingCount={state.pending_delete_count}
-            favoriteCount={favorites.length}
-            onRefresh={reload}
             onError={setError}
-            onFinished={reload}
+            onFinished={handleChangeProject}
           />
         ) : tab === "timeline" ? (
           <TimelineView
@@ -411,6 +447,7 @@ export default function App() {
             favorites={favorites}
             onToggleFavorite={toggleFavorite}
             onConfirmed={async () => { await reload(); await refetchVideos(); }}
+            onAdvance={advanceTab}
             onPersisted={(path) =>
               setJustDecidedVideos((prev) => new Set(prev).add(path))
             }
@@ -421,7 +458,7 @@ export default function App() {
             <p className="text-gray-700 font-medium">All done!</p>
             <p className="text-sm text-gray-500 mt-1">
               {state.pending_delete_count > 0 || favorites.length > 0
-                ? "Open the Finish tab to apply deletes, export the trip, and clear caches."
+                ? "Open the Finish tab to delete and export."
                 : "Nothing pending."}
             </p>
             <button
@@ -434,7 +471,7 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} onAdvance={advanceTab} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
@@ -446,6 +483,7 @@ export default function App() {
                 onRefresh={reload}
                 onError={setError}
                 onToggleFavorite={toggleFavorite}
+                onAdvance={advanceTab}
                 videoTags={videoTags}
                 onVideoTagsChange={setVideoTags}
               />

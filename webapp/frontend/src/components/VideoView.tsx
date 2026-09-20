@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
-import { nextPendingIndex } from "../decisions";
+import { nextAfterConfirm } from "../decisions";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
@@ -210,6 +210,9 @@ interface Props {
   userClips?: UserClipsMap;
   videoTags?: VideoTagsState;
   onVideoTagsChange?: (tags: VideoTagsState) => void;
+  // Enter on the last clip (or last still-pending, with skip on) opens the
+  // next tab instead of sitting on the row just confirmed.
+  onAdvance?: () => void;
 }
 
 export function VideoView({
@@ -225,6 +228,7 @@ export function VideoView({
   userClips = {},
   videoTags = { tags: [], assignments: {} },
   onVideoTagsChange,
+  onAdvance,
 }: Props) {
   const [idx, setIdx] = useState(0);
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
@@ -313,6 +317,14 @@ export function VideoView({
   useEffect(() => {
     prevCurrentRef.current = current;
   }, [current]);
+
+  // Turning skip-reviewed on jumps straight to the next thing still needing
+  // a decision, same landing spot confirm would drop you at.
+  useEffect(() => {
+    if (!skipReviewed) return;
+    const first = videos.findIndex((v) => !reviewed(v));
+    if (first >= 0) setIdx(first);
+  }, [skipReviewed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (soundOn) return;
@@ -562,11 +574,14 @@ export function VideoView({
       // second Enter would still see this clip as unreviewed and wrap back
       // onto it. The ref is updated synchronously.
       if (current) enteredRef.current.add(current);
-      const pending = skipReviewed
-        ? nextPendingIndex(videos.length, idx, (i) =>
-            !reviewed(videos[i]) && !enteredRef.current.has(videos[i]))
-        : -1;
-      setIdx(pending !== -1 ? pending : Math.min(videos.length - 1, idx + 1));
+      const hop = nextAfterConfirm(
+        videos.length,
+        idx,
+        skipReviewed,
+        (i) => !reviewed(videos[i]) && !enteredRef.current.has(videos[i]),
+      );
+      if (hop === "advance") onAdvance?.();
+      else setIdx(hop);
       return;
     }
     // 1–9: apply tag by slot (same convention as cluster rank keys).

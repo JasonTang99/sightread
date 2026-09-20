@@ -378,7 +378,7 @@ class TestSingles:
 # ---------------------------------------------------------------------------
 # Trash panel
 # ---------------------------------------------------------------------------
-class TestTrashPanel:
+class TestFinishTrip:
     def _open_finish(self, page: Page) -> None:
         page.get_by_test_id("finish-tab").click()
         settle(page)
@@ -387,40 +387,41 @@ class TestTrashPanel:
         page.get_by_role("button", name="✓ Confirm").click()
         settle(page)
 
-    def test_trash_panel_shows_after_confirm(self, page_loaded: Page):
+    def test_finish_shows_delete_and_remaining_counts(self, page_loaded: Page):
+        self._open_finish(page_loaded)
+        expect(page_loaded.get_by_test_id("finish-delete-count")).to_have_text("0 to delete")
+        expect(page_loaded.get_by_test_id("finish-remain-photos")).to_have_text("7 photos remain")
+        expect(page_loaded.get_by_test_id("finish-remain-videos")).to_have_text("0 videos remain")
+        expect(page_loaded.get_by_test_id("finish-trip")).to_have_text("Finish trip")
+        expect(page_loaded.get_by_test_id("finish-delete-export")).to_have_count(0)
+        expect(page_loaded.get_by_test_id("finish-delete-export-clear")).to_have_count(0)
+
+    def test_finish_counts_queued_deletes(self, page_loaded: Page):
         self._confirm_cluster(page_loaded)
         self._open_finish(page_loaded)
-        expect(page_loaded.get_by_text("Trash —")).to_be_visible()
+        expect(page_loaded.get_by_test_id("finish-delete-count")).to_have_text("2 to delete")
+        expect(page_loaded.get_by_test_id("finish-remain-photos")).to_have_text("5 photos remain")
 
-    def test_trash_panel_expands(self, page_loaded: Page):
-        self._confirm_cluster(page_loaded)
-        self._open_finish(page_loaded)
-        page_loaded.get_by_text("▼ expand").click()
-        expect(page_loaded.get_by_role("button", name="🗑️ Delete 2 from primary drive")).to_be_visible()
-
-    def test_trash_restore_removes_from_delete_list(self, page_loaded: Page, output_dir):
-        self._confirm_cluster(page_loaded)
-        self._open_finish(page_loaded)
-        page_loaded.get_by_text("▼ expand").click()
-        trash_filename = page_loaded.locator(".grid .rounded p.text-xs").first
-        expect(trash_filename).to_be_visible(timeout=10_000)
-        trash_filename.click()
-        expect(page_loaded.locator(".border-blue-400").first).to_be_visible(timeout=5_000)
-        page_loaded.get_by_role("button", name="Restore 1 selected").click()
-        settle(page_loaded)
-        assert len(queued(output_dir)) == 1  # started with 2 (ranks 2,3), restored 1
-
-    def test_apply_deletes_clears_list(self, page_loaded: Page, output_dir):
+    def test_finish_returns_to_projects(self, page_loaded: Page, output_dir):
         # Nonexistent paths: apply must not touch real files during tests
         seed_queue(output_dir, "demo_photos/NOPE_1.JPG", "demo_photos/NOPE_2.JPG")
         page_loaded.reload()
         self._open_finish(page_loaded)
-        page_loaded.get_by_text("▼ expand").click()
+        # Picker's details walk hits the real archive; stub it so this test
+        # does not hold the session server on that scan.
+        page_loaded.route(
+            "**/api/projects/details",
+            lambda route: route.fulfill(status=200, content_type="application/json", body="[]"),
+        )
+        page_loaded.route(
+            "**/api/projects",
+            lambda route: route.fulfill(status=200, content_type="application/json", body="[]"),
+        )
         page_loaded.once("dialog", lambda d: d.accept())
-        page_loaded.get_by_role("button", name="🗑️ Delete 2 from primary drive").click()
+        page_loaded.get_by_test_id("finish-trip").click()
+        expect(page_loaded.get_by_test_id("recent-projects")).to_be_visible()
         settle(page_loaded)
         assert queued(output_dir) == []
-        expect(page_loaded.get_by_text("Trash —")).not_to_be_visible()
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +862,28 @@ class TestClusterSize:
         expect(page_loaded.get_by_test_id("cluster-size")).to_have_class(re.compile(r"bg-orange-100"))
 
 
+@pytest.fixture()
+def video_project(tmp_path, webapp_server):
+    """A throwaway project holding one real clip and no photos."""
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "results.json").write_text(json.dumps({"clusters": []}))
+    video = folder / "a.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi",
+         "-i", "testsrc=size=160x120:rate=10:duration=2",
+         "-pix_fmt", "yuv420p", str(video)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    requests.post(
+        f"{BASE_URL}/api/_test_set_project",
+        json={"folder": str(folder), "output_dir": str(out)},
+    )
+    return out, str(video.resolve())
+
+
 # ---------------------------------------------------------------------------
 # Skipping what has already been reviewed
 # ---------------------------------------------------------------------------
@@ -869,27 +892,6 @@ class TestSkipReviewed:
     review, so the queue is full of clusters, singles and clips that already
     have a decision. The header toggle makes confirm jump over them; it does
     not take them out of the lists, so arrows still reach everything."""
-
-    @pytest.fixture()
-    def video_project(self, tmp_path, webapp_server):
-        """A throwaway project holding one real clip and no photos."""
-        folder = tmp_path / "clips"
-        folder.mkdir()
-        out = tmp_path / "out"
-        out.mkdir()
-        (out / "results.json").write_text(json.dumps({"clusters": []}))
-        video = folder / "a.mp4"
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi",
-             "-i", "testsrc=size=160x120:rate=10:duration=2",
-             "-pix_fmt", "yuv420p", str(video)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        requests.post(
-            f"{BASE_URL}/api/_test_set_project",
-            json={"folder": str(folder), "output_dir": str(out)},
-        )
-        return out, str(video.resolve())
 
     def _decide(self, output_dir, cluster_index: int, status: str = "kept") -> None:
         images = FIXTURE_RESULTS["clusters"][cluster_index]["images"]
@@ -927,7 +929,8 @@ class TestSkipReviewed:
         page_loaded.reload()
         settle(page_loaded)
 
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skip reviewed")
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_be_visible()
+        expect(page_loaded.get_by_text("Skip reviewed")).to_be_visible()
 
     def test_it_never_shrinks_the_tabs(self, page_loaded: Page, output_dir):
         """Filtering made every count drop on confirm and put decided work
@@ -939,7 +942,7 @@ class TestSkipReviewed:
         page_loaded.reload()
         settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skipping reviewed")
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
         expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
         expect(page_loaded.get_by_text(f"Singles ({_singleton_count()})")).to_be_visible()
 
@@ -951,8 +954,7 @@ class TestSkipReviewed:
         page_loaded.get_by_test_id("hide-reviewed").click()
         page_loaded.reload()
         settle(page_loaded)
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_text("Skipping reviewed")
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-pressed", "true")
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
 
     def test_progress_still_counts_everything(self, page_loaded: Page, output_dir):
         self._decide(output_dir, 0)
@@ -1022,3 +1024,55 @@ class TestSkipReviewed:
         settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
         expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()
+
+
+# ---------------------------------------------------------------------------
+# Enter on the last item opens the next tab
+# ---------------------------------------------------------------------------
+class TestEnterAdvancesTab:
+    def test_enter_on_the_last_cluster_opens_singles(self, page_loaded: Page):
+        page_loaded.keyboard.press("ArrowRight")
+        expect(page_loaded.locator("select")).to_have_value("1")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+        expect(page_loaded.locator("select")).to_have_count(0)
+
+    def test_enter_on_the_last_single_opens_the_next_tab(self, page_loaded: Page):
+        """No videos in the fixture, so singles' next tab is the timeline."""
+        page_loaded.get_by_text(f"Singles ({_singleton_count()})").click()
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"2 / {_singleton_count()}")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("button", name="Timeline")).to_have_class(
+            re.compile(r"border-blue-600")
+        )
+
+    def test_enter_on_the_last_video_opens_the_timeline(self, page_loaded: Page, video_project):
+        page_loaded.goto(BASE_URL)
+        settle(page_loaded)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_text("1 / 1")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("button", name="Timeline")).to_have_class(
+            re.compile(r"border-blue-600")
+        )
+
+    def test_skip_reviewed_enter_on_the_last_pending_cluster_opens_singles(
+        self, page_loaded: Page, output_dir,
+    ):
+        save_decisions(output_dir, {
+            img["path"]: "kept" for img in FIXTURE_RESULTS["clusters"][0]["images"]
+        })
+        page_loaded.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.keyboard.press("ArrowRight")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+

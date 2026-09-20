@@ -43,6 +43,7 @@ from projects import (
     IMAGE_EXTENSIONS,
     ProjectContext,
     adopt_subfolder_reviews,
+    ensure_city_caches,
     estimate_pipeline,
     image_files_in,
     clean_pipeline_cache,
@@ -1386,6 +1387,7 @@ if os.getenv("SIGHTREAD_TEST"):
             _clear_undo(_active)
         else:
             _undo_stack.clear()
+        _invalidate_picker_details()
         return {"ok": True}
 
     @app.post("/api/_test_set_project")
@@ -1405,38 +1407,99 @@ class FolderRequest(BaseModel):
     subtrip: str | None = None
 
 
-@app.get("/api/projects")
-def list_projects():
-    entries = known_projects()
-    result = []
-    for e in entries:
-        folder = Path(e["folder"])
-        out_dir = Path(e["output_dir"])
-        subtrip = e.get("subtrip") or None
-        if folder.exists():
-            status = project_status(folder, out_dir, subtrip)
+# Picker names must not wait on per-trip walks. Counts / stale / ETA land in
+# `_picker_details` after /api/projects/details (or a later visit's cache hit).
+_picker_details: dict[tuple[str, str], dict] = {}
+_picker_details_lock = threading.Lock()
+
+
+def _invalidate_picker_details() -> None:
+    with _picker_details_lock:
+        _picker_details.clear()
+
+
+def _running_status(folder: str, subtrip: str | None) -> str | None:
+    job = current_job()
+    if (job and job.running and job.folder == folder
+            and (job.subtrip or None) == subtrip):
+        return "running"
+    return None
+
+
+def _cheap_project_row(e: dict) -> dict:
+    """Names and whatever recents.json already stored. No photo-tree walk."""
+    folder = Path(e["folder"])
+    out_dir = Path(e["output_dir"])
+    subtrip = e.get("subtrip") or None
+    status = _running_status(e["folder"], subtrip)
+    if status is None:
+        if folder.exists() and (out_dir / "results.json").exists():
+            status = "ready"
         else:
             status = "never_run"
-        job = current_job()
-        if (job and job.running and job.folder == e["folder"]
-                and (job.subtrip or None) == subtrip):
-            status = "running"
-        estimate = (
-            estimate_pipeline(folder, out_dir, subtrip=subtrip)
-            if folder.exists() and status != "running" else None
-        )
-        result.append({
-            "folder": e["folder"],
-            "subtrip": subtrip,
-            "display_name": project_display_name(folder, subtrip),
-            "last_opened": e.get("last_opened"),
-            "last_pipeline_run": e.get("last_pipeline_run"),
-            "image_count": e.get("image_count", 0),
-            "status": status,
-            "done_at": is_done(out_dir),
-            "pending_count": estimate.pending if estimate else 0,
-            "eta_s": estimate.eta_s if estimate else None,
-        })
+    return {
+        "folder": e["folder"],
+        "subtrip": subtrip,
+        "display_name": project_display_name(folder, subtrip),
+        "last_opened": e.get("last_opened"),
+        "last_pipeline_run": e.get("last_pipeline_run"),
+        "image_count": e.get("image_count", 0),
+        "status": status,
+        "done_at": is_done(out_dir),
+        "pending_count": 0,
+        "eta_s": None,
+    }
+
+
+def _detailed_project_row(e: dict) -> dict:
+    row = _cheap_project_row(e)
+    folder = Path(e["folder"])
+    out_dir = Path(e["output_dir"])
+    subtrip = e.get("subtrip") or None
+    if not folder.exists() or row["status"] == "running":
+        return row
+    row["status"] = project_status(folder, out_dir, subtrip)
+    estimate = estimate_pipeline(folder, out_dir, subtrip=subtrip)
+    row["pending_count"] = estimate.pending
+    row["eta_s"] = estimate.eta_s
+    if estimate.image_count:
+        row["image_count"] = estimate.image_count
+    return row
+
+
+@app.get("/api/projects")
+def list_projects():
+    return [_cheap_project_row(e) for e in known_projects()]
+
+
+@app.get("/api/projects/details")
+def list_project_details():
+    """Walks, ETA, stale vs ready. Cached until a project is opened or run."""
+    entries = known_projects()
+    seen: set[str] = set()
+    for e in entries:
+        folder = e["folder"]
+        if folder in seen:
+            continue
+        seen.add(folder)
+        try:
+            ensure_city_caches(Path(folder))
+        except OSError:
+            pass
+    result = []
+    for e in entries:
+        key = (e["folder"], e.get("subtrip") or "")
+        with _picker_details_lock:
+            cached = _picker_details.get(key)
+        if cached is None:
+            cached = _detailed_project_row(e)
+            with _picker_details_lock:
+                _picker_details[key] = cached
+        row = dict(cached)
+        running = _running_status(e["folder"], e.get("subtrip") or None)
+        if running:
+            row["status"] = running
+        result.append(row)
     return result
 
 
@@ -1474,7 +1537,13 @@ def open_project(req: FolderRequest):
         _prewarm_started.discard(str(out_dir))
         _prewarm_started.discard(f"posters:{out_dir}")
         _prewarm_started.discard(f"motion:{out_dir}")
+    if subtrip:
+        try:
+            ensure_city_caches(folder)
+        except OSError:
+            pass
     upsert_recent(folder, out_dir, subtrip=subtrip)
+    _invalidate_picker_details()
     status = project_status(folder, out_dir, subtrip)
     return {
         "folder": str(folder),
@@ -1507,10 +1576,14 @@ def run_pipeline_endpoint(req: FolderRequest):
     clear_done(out_dir)  # new output to review; the project is no longer finished
     start_pipeline(
         folder, out_dir, PROJECT_ROOT,
-        on_success=lambda: upsert_recent(folder, out_dir, pipeline_ran=True, subtrip=subtrip),
+        on_success=lambda: (
+            upsert_recent(folder, out_dir, pipeline_ran=True, subtrip=subtrip),
+            _invalidate_picker_details(),
+        ),
         subtrip=subtrip,
     )
     upsert_recent(folder, out_dir, subtrip=subtrip)
+    _invalidate_picker_details()
     return {"ok": True, "folder": str(folder), "subtrip": subtrip}
 
 
@@ -1518,13 +1591,46 @@ class DoneRequest(BaseModel):
     done: bool = True
 
 
+def _remaining_media(decisions: dict[str, str], output_dir: Path) -> tuple[int, int]:
+    """Photos and videos that stay on the primary after the queued deletes."""
+    doomed = {TO_DELETE, DELETED}
+    photos = videos = 0
+    counted: set[str] = set()
+
+    def tally(path: str) -> None:
+        nonlocal photos, videos
+        if path in counted:
+            return
+        counted.add(path)
+        if decisions.get(path) in doomed:
+            return
+        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS:
+            videos += 1
+        else:
+            photos += 1
+
+    for path in decisions:
+        tally(path)
+    try:
+        results = load_results(output_dir / "results.json")
+    except (OSError, json.JSONDecodeError):
+        results = {}
+    for cluster in results.get("clusters") or []:
+        for img in cluster.get("images") or []:
+            p = img.get("path")
+            if p:
+                tally(p)
+    return photos, videos
+
+
 @app.get("/api/finish/preview")
 def finish_trip_preview():
-    """Counts and sizes for the three-step finish flow."""
+    """Counts and sizes for the finish panel: deletes, remaining, export, caches."""
     ctx = _require_active()
     decisions = load_decisions(ctx.output_dir)
     pending = len(paths_with_status(decisions, TO_DELETE))
     favorites = paths_with_status(decisions, FAVORITE)
+    remaining_photos, remaining_videos = _remaining_media(decisions, ctx.output_dir)
     export = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
     pipeline = pipeline_cache_inventory(ctx.output_dir)
     derived_bytes = 0
@@ -1540,6 +1646,8 @@ def finish_trip_preview():
                     pass
     return {
         "pending_deletes": pending,
+        "remaining_photos": remaining_photos,
+        "remaining_videos": remaining_videos,
         "favorites": len(favorites),
         "export": export,
         "pipeline_cache_bytes": pipeline["bytes"],
@@ -1555,6 +1663,7 @@ def clean_project_pipeline():
     ctx = _require_active()
     summary = clean_pipeline_cache(ctx.output_dir)
     invalidate_results_cache(ctx.output_dir / "results.json")
+    _invalidate_picker_details()
     with _prewarm_lock:
         _prewarm_started.discard(str(ctx.output_dir))
         _prewarm_started.discard(f"posters:{ctx.output_dir}")
@@ -1580,8 +1689,10 @@ def set_project_done(req: DoneRequest):
     ctx = _require_active()
     if not req.done:
         clear_done(ctx.output_dir)
+        _invalidate_picker_details()
         return {"done_at": None, "freed_bytes": 0}
     done_at = mark_done(ctx.output_dir)
+    _invalidate_picker_details()
     freed = evict_derived_caches(ctx.output_dir)
     # The prewarmer skips finished projects, but it may already be mid-pass on
     # this one and would write into the directory that was just removed.

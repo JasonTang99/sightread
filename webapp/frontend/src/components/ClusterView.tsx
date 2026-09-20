@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowKeydown } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
-import { isDecided, isDoomed, isWiped, nextPendingIndex } from "../decisions";
+import { isDecided, isDoomed, isWiped, nextAfterConfirm } from "../decisions";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
@@ -21,6 +21,9 @@ interface Props {
   onError: (msg: string) => void;
   onUndo: () => Promise<void>;
   onToggleFavorite: (path: string) => Promise<void>;
+  // Enter on the last cluster (or last still-pending, with skip on) opens
+  // the next tab instead of sitting on the row just confirmed.
+  onAdvance?: () => void;
   videoTags?: VideoTagsState;
   onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
@@ -40,7 +43,7 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ folder, clusters: allClusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
+export function ClusterView({ folder, clusters: allClusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [filter, setFilter] = useState<ClusterFilter>("all");
   const [idx, setIdx] = useState(() => {
     const first = allClusters.findIndex((c) => !isDecided(c, decisions));
@@ -113,6 +116,14 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
   useEffect(() => {
     if (idx >= clusters.length) setIdx(Math.max(0, clusters.length - 1));
   }, [clusters.length]);
+
+  // Turning skip-reviewed on jumps straight to the next thing still needing
+  // a decision, same landing spot confirm would drop you at.
+  useEffect(() => {
+    if (!skipReviewed) return;
+    const first = clusters.findIndex((c) => !isDecided(c, decisions));
+    if (first !== -1) setIdx(first);
+  }, [skipReviewed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const target = landOnRef.current;
@@ -218,11 +229,19 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       // With skip on, jump past clusters that already have a decision —
       // everything stays in the list for ←/→, only this hop changes.
-      const pending = skipReviewed
-        ? nextPendingIndex(clusters.length, clusterIdx, (i) => !isDecided(clusters[i], decisions))
-        : -1;
-      const next = clusters[pending !== -1 ? pending : clusterIdx + 1];
-      landOnRef.current = next ? next.cluster_id : "stay";
+      const hop = nextAfterConfirm(
+        clusters.length,
+        clusterIdx,
+        skipReviewed,
+        (i) => !isDecided(clusters[i], decisions),
+      );
+      if (hop === "advance") {
+        landOnRef.current = "stay";
+        await onRefresh();
+        onAdvance?.();
+        return;
+      }
+      landOnRef.current = clusters[hop].cluster_id;
       await onRefresh();
     } catch (e) {
       landOnRef.current = undefined;

@@ -44,8 +44,12 @@ export function tripKey(folder: string): string | null {
   return null;
 }
 
-/** Newest trip first; undated projects last, by path. */
-function byTripDate(a: ProjectEntry, b: ProjectEntry): number {
+/** Newest trip first; within a trip, by display name.
+
+Same-trip city rows share a folder, so sorting by path left them in
+whatever order `/api/projects` sent — last opened. Opening Hakodate
+then jumped it above Tokyo. Name is stable. Undated projects last. */
+function byTripThenName(a: ProjectEntry, b: ProjectEntry): number {
   const ka = tripKey(a.folder);
   const kb = tripKey(b.folder);
   if (ka !== kb) {
@@ -53,7 +57,7 @@ function byTripDate(a: ProjectEntry, b: ProjectEntry): number {
     if (kb === null) return -1;
     return ka < kb ? 1 : -1;
   }
-  return a.folder.localeCompare(b.folder);
+  return (a.display_name || a.folder).localeCompare(b.display_name || b.folder);
 }
 
 function projectKey(p: { folder: string; subtrip?: string | null }): string {
@@ -66,9 +70,10 @@ interface ProjectListProps {
   projects: ProjectEntry[];
   selected: string | null;
   onSelect: (key: string) => void;
+  onOpen?: (project: ProjectEntry) => void;
 }
 
-function ProjectList({ title, testId, projects, selected, onSelect }: ProjectListProps) {
+function ProjectList({ title, testId, projects, selected, onSelect, onOpen }: ProjectListProps) {
   return (
     <div data-testid={testId} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
       <div className="px-3 py-2 border-b border-gray-100">
@@ -80,7 +85,7 @@ function ProjectList({ title, testId, projects, selected, onSelect }: ProjectLis
         <ul className="max-h-[65vh] overflow-y-auto">
           {projects.map((p) => {
             const badge = p.done_at
-              ? { label: "Done", cls: "bg-green-100 text-green-700" }
+              ? { label: "Done", cls: "bg-purple-100 text-purple-700" }
               : STATUS_BADGE[p.status];
             const key = projectKey(p);
             const isSelected = selected === key;
@@ -88,6 +93,7 @@ function ProjectList({ title, testId, projects, selected, onSelect }: ProjectLis
               <li key={key}>
                 <button
                   onClick={() => onSelect(key)}
+                  onDoubleClick={() => onOpen?.(p)}
                   className={`w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
                     isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
                   }`}
@@ -127,6 +133,10 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   const loadRecents = useCallback(async () => {
     const res = await fetch("/api/projects");
     if (res.ok) setRecents(await res.json());
+    // Names already painted. Counts / stale / ETA walk the photo tree and
+    // can take minutes on a large archive; fill them in when they land.
+    const detail = await fetch("/api/projects/details");
+    if (detail.ok) setRecents(await detail.json());
   }, []);
 
   const browse = useCallback(async (path?: string) => {
@@ -143,7 +153,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     loadRecents();
   }, [loadRecents]);
 
-  const byDate = useMemo(() => [...recents].sort(byTripDate), [recents]);
+  const byDate = useMemo(() => [...recents].sort(byTripThenName), [recents]);
 
   // Poll job status while running
   useEffect(() => {
@@ -168,6 +178,11 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     }, 1000);
     return () => clearInterval(id);
   }, [job?.running, onProjectOpened]);
+
+  const openIfReady = (p: ProjectEntry) => {
+    if (busy) return;
+    if (p.status === "ready" || p.status === "stale") openProject(p);
+  };
 
   const openProject = async (p: ProjectEntry) => {
     setBusy(true);
@@ -266,6 +281,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           projects={recents}
           selected={selected}
           onSelect={setSelected}
+          onOpen={openIfReady}
         />
 
         <div className="flex flex-col gap-3">
@@ -275,6 +291,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
             projects={byDate}
             selected={selected}
             onSelect={setSelected}
+            onOpen={openIfReady}
           />
 
           {!browsing ? (
