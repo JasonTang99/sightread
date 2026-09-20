@@ -1,6 +1,6 @@
 # sightread — next steps
 
-_Last updated: 2026-09-19._
+_Last updated: 2026-09-20._
 
 ## Done since the last update
 
@@ -63,6 +63,10 @@ _Last updated: 2026-09-19._
 - **City subtrips** (`02e6c38`). A trip whose cameras use `NN_City` folders
   (`01_Hakodate`) becomes one picker row per city instead of one 1,200-cluster
   pile. See §7.
+- **Hawaii, Hoh, Yellowstone and Vegas are reclustered, and the own-vs-guest
+  rule now holds in every stage** (`3ee68ab`). The four trips with a shared
+  album went through the pipeline from cached embeddings — no GPU, 5–23 s each
+  — and the rule turned out to be enforced only in stage 4. See §4.
 - **The two tests `02e6c38` left stale now pass** (`18bdedd`). That commit gave
   `project_output_dir` a `subtrip` argument and `/api/state` a `display_name`,
   but left `test_project_done` stubbing the first with a one-argument lambda
@@ -84,6 +88,11 @@ single trip project:
 | `2026_02_Yellowstone` | 25 / 18 | 33 | 4 | 0 |
 | `2026_05_Vegas` | 2 / 3 (+1 `shared/`) | 5 | 2 | 0 |
 | `2026_07_Rattlesnake` | 0 / 5 | 5 | 1 | 0 |
+
+The counts above are from the runs of the 11th–13th. The four trips with a
+shared album were reclustered on the 20th (§4) and their numbers moved —
+Hawaii 528 → 535 clusters, Hoh 185 → 182, Yellowstone 331 → 328, Vegas
+117 → 116 — while the table's stills and largest-cluster figures still hold.
 
 The two large clusters are both real: Hawaii's 47 is one 48-second X-T5 burst of
 the same kitchen scene, and Hoh's 44 is the single-viewpoint burst that `a52f2f9`
@@ -153,9 +162,12 @@ one takes "Other folder…".
 
 ## 4. Open questions on the cross-camera merge
 
-- **The cross-camera merge over-merges on group trips.** This is the most useful
+- **The cross-camera merge over-merged on group trips.** ~~This is the most useful
   thing the `google photos/` re-runs showed, and it wants a decision before more
-  review happens on those trips.
+  review happens on those trips.~~ **Closed 2026-09-20** — decided on the 14th,
+  shipped in `02e6c38`, and as of `3ee68ab` it holds in every stage and has
+  reached every trip it applies to. The survey below is kept because it is the
+  evidence the rule was fitted to; its counts are from before the fix.
 
   `google photos/` is not a third device of Jason's but a shared album: on Hawaii
   it holds nine camera models from other people (Galaxy Z Fold6 181, Xiaomi 17 Pro
@@ -186,15 +198,79 @@ one takes "Other folder…".
   model — `google photos/` holds six cameras, and a handful of his iPhone
   frames live in there too. Re-cluster to take effect; decisions are keyed by
   path, so review survives.
+
+  **Done 2026-09-20** (`3ee68ab`). All four trips holding a shared album —
+  Hawaii, Hoh, Yellowstone and Vegas — were reclustered from cached
+  embeddings. No GPU, 5–23 s each; none of them had been reviewed yet, so no
+  decisions were at stake. Cluster 443 came apart into 10 clusters, largest 8
+  (the replay had predicted 9 and 10). Old 526 → 3, old 117 → 7.
+
+  The recluster also showed the rule did not hold. `02e6c38` implemented it in
+  `_merge_reshoot_pairs` alone, because the Hawaii replay had pinned the
+  over-merging on stage 4's chaining. The stages above it know nothing about
+  folders, and on a group trip two people photograph one view from nearly the
+  same spot — close enough for the tight pass to call them near-duplicates,
+  with no merge rule involved. Left over after that first recluster: Hawaii 6
+  clusters (20 photos), Hoh 3, Vegas 1, Yellowstone 0. One was an X-T5 frame
+  with five of a guest's iPhone 17 Pro 49 s later, where keep-best ranks one
+  first and queues the rest, across owners, for deletion.
+
+  A new stage 3b splits any cluster holding both, so the line is drawn once at
+  the end rather than defended by each merge rule. Doing that by folder alone
+  would have created a new wrong: `google photos/IMG_9253` and `IMG_9254` are
+  his own iPhone 14, two seconds from `iphone/IMG_9255`, and a folder-only
+  split cut them off that burst. `pipeline.own_flags` therefore takes the
+  folder's verdict and then rescues a guest-folder frame whose EXIF model is
+  one his own folders also carry — 7 such frames on Hawaii, 15 on Vegas, 3 on
+  Hoh, 0 on Yellowstone. Only those models qualify, so the album's six other
+  cameras stay guests; the split is still by folder, and the model only says
+  which frames were misfiled. After the second recluster no cluster on any of
+  the four mixes his photos with other people's.
 - A subject revisited hours later — Portugal's 0.089 pair, four hours apart — is
   deliberately left in separate clusters, since `MAX_CLUSTER_GAP_S` is an hour.
   ~~Whether trip review wants a looser "same place, another day" grouping is a
   product question, not a threshold one, and nothing in the UI expresses it yet.~~
   **Decided 2026-09-14:** keep them apart. Same place on another pass is a new
   cluster, not a re-shoot. No threshold change.
-- The X-T5 shoots portrait more than expected (64 of 101 stills on Japan). That is
+- ~~The X-T5 shoots portrait more than expected (64 of 101 stills on Japan). That is
   what makes the framing-only rule miss so much, and it is worth confirming it
-  holds on the next trip rather than being a Japan habit.
+  holds on the next trip rather than being a Japan habit.~~
+  **Measured 2026-09-20: it was a Japan habit, and the camera was the wrong
+  thing to watch.** Across the seven 2026 trips the X-T5's portrait share
+  swings by trip with no stable level — 63% on Japan (64/101), 44% on
+  Yellowstone and Hoh, 21% on Portugal (57/268), 7% on Hawaii (25/345), 22%
+  over all 781 stills. The iPhone 14 does not swing: 91% portrait over 423
+  stills, 85–100% on every trip.
+
+  So the thing that makes a cross-camera pair share a framing is not a habit of
+  the X-T5 but the phone being near-always portrait while the camera's framing
+  moves with the trip. Whether the two agree is decided by the camera alone,
+  trip by trip, which is why Japan looked like a rule and Hoh hid the problem
+  entirely. There is no framing assumption to lean on, so the cross-camera path
+  stays unconditional — the current design is right, for a different reason
+  than the one recorded. Nothing to change; re-run the count only if a trip's
+  cross-camera merges look wrong again.
+  (`pipeline.load_paths_and_meta` over `/mnt/h0/Trips/2026_*` reproduces it.)
+- **The chaining the own-vs-guest rule was built to stop still happens inside
+  `google photos/`, and nothing decides whether that matters.** The
+  2026-09-14 decision deliberately lets other people's cameras merge with each
+  other, so the split protects his photos and stops there. After the recluster
+  Hawaii's four largest clusters that are not his are guest-only and large:
+  38 photos over 183 s across a Galaxy Z Fold6 and a Xiaomi (cluster 368), 25
+  over 209 s, 18, 16. Those have the same shape as old cluster 443 — several
+  people, several subjects, one place — and keep-best will rank one first and
+  queue the other 37 for deletion.
+
+  It is not obvious this is worth fixing, which is why it is a question rather
+  than a task. These are copies of other people's photos in a shared album; if
+  the local copy on h0 is disposable, an over-merged guest cluster costs
+  nothing, and per-camera capping (which the earlier replay measured at
+  443 → 10/7/3/3) would only add review. **First action: decide whether
+  deleting from `google photos/` is a thing that should happen at all.** If it
+  is not, say so here and consider closing the whole guest side of §4 — the
+  Finish tab could skip guest folders entirely instead. If it is, the
+  one-cluster-per-camera cap is the measured lever; `CROSS_DEVICE_THRESHOLD` is
+  not (at 0.12 cluster 443 still kept 19).
 
 ## 5. These trips are mostly video, and the pipeline barely looks at them
 
@@ -298,12 +374,22 @@ a description of HEAD.
 
 **First action next session:**
 
-1. Restart sightread when ffmpeg is idle.
+1. Restart sightread. **Unblocked as of 2026-09-20:** nothing is listening on
+   8765 and no ffmpeg is running, so the old process is gone and there is
+   nothing left to wait for. Hard-refresh after.
 2. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
    on picker load, and whether Canon photos showed up via time assignment.
-3. Recluster Hawaii, Hoh and Yellowstone so the own-vs-guest split reaches
+   Half-answered: four Europe city dirs exist on disk (`01_Iceland`,
+   `02_Amsterdam`, `03_Brussels`, `04_Nice`), so the slice did happen. Whether
+   Canon's `2024_02_Amsterdam` folders landed in them by time assignment has
+   still not been looked at.
+3. ~~Recluster Hawaii, Hoh and Yellowstone so the own-vs-guest split reaches
    them (§4). Long runs — their current `results.json` still mixes
-   `google photos/` into Jason's clusters.
+   `google photos/` into Jason's clusters.~~ **Done 2026-09-20** (`3ee68ab`),
+   Vegas with them. Not long runs at all: from cached embeddings they are
+   5–23 s of CPU each. The 13 Japan cities and every other trip were left
+   alone — with no `google photos/` or `shared/` folder there is nothing for
+   the split to do, so their `results.json` is unaffected by the change.
 
 ## 8. The working tree holds a separate, unreviewed body of work
 
@@ -340,6 +426,5 @@ commit each, which means hunk-level splitting of the three shared files.
 `dist/` was built on the 17th and matches this tree, so the running UI already
 reflects it.
 
-The X-T5 portrait mix (§4) is still observational, on the next trip.
 Hoh and Portugal still adopt on first open (§3). Remote curation stays
 gated on auth (`plan.md`). Clipfarm highlights stay off.
