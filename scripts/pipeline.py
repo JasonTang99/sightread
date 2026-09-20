@@ -513,35 +513,57 @@ def own_flags(devices: list[str], models: list[str | None] | None = None) -> lis
             for own, m in zip(by_folder, models)]
 
 
-def _split_guest_mixes(labels: np.ndarray, own: list[bool]) -> np.ndarray:
-    """Split any cluster holding both his photos and other people's.
+def _split_by_photographer(
+    labels: np.ndarray,
+    own: list[bool],
+    models: list[str | None] | None = None,
+) -> np.ndarray:
+    """One cluster, one photographer.
 
     Stage 4 refuses to *merge* across that line, but the stages before it know
-    nothing about folders, and on a group trip two people photograph one view
-    from nearly the same spot: close enough for the tight pass to call them
-    near-duplicates. Hawaii came out of the first own-vs-guest recluster with
-    six such clusters (20 photos) — an X-T5 frame and five of a guest's iPhone
-    17 Pro among them, where keep-best would rank one shot first and queue the
-    rest, across owners, for deletion.
+    nothing about who shot what, and on a group trip several people photograph
+    one view from nearly the same spot: close enough for the tight pass to call
+    them near-duplicates, with no merge rule involved. Hawaii came out of the
+    first own-vs-guest recluster with six clusters mixing his photos with the
+    shared album's (20 photos) — an X-T5 frame and five of a guest's iPhone 17
+    Pro among them.
 
-    Splitting rather than re-thresholding keeps that judgement out of it: the
-    two halves are each still a cluster, reviewed by whoever owns them.
+    Inside the album the same thing happens between guests, and there EXIF
+    model is the only handle on who held the camera: a cluster of 26 Galaxy Z
+    Fold6 and 12 Xiaomi frames over 183 s is two people at one place, not one
+    subject. So his photos split off the album's, and the album's split by
+    model. Two guests carrying the same model are indistinguishable here and
+    stay together; his own two cameras stay together, which is the whole point
+    of the cross-camera merge.
+
+    This matters because keep-best ranks one photo first and queues the rest
+    for deletion, and h0's copy of the shared album is deleted from for real.
+    Ranking across photographers throws away one person's shot in favour of
+    another's. Splitting rather than re-thresholding keeps that judgement out
+    of it: each part is still a cluster, reviewed against its own.
     """
+    models = models or [None] * len(labels)
     groups: dict[int, list[int]] = {}
     for i, lab in enumerate(labels):
         groups.setdefault(int(lab), []).append(i)
     next_id = int(labels.max()) + 1 if len(labels) else 0
     split = 0
     for idxs in groups.values():
-        guests = [i for i in idxs if not own[i]]
-        if not guests or len(guests) == len(idxs):
+        # His photos are one photographer whichever camera they came from;
+        # each guest model is another. None groups the model-less together.
+        who: dict[object, list[int]] = {}
+        for i in idxs:
+            who.setdefault(True if own[i] else models[i], []).append(i)
+        if len(who) < 2:
             continue
-        for i in guests:
-            labels[i] = next_id
-        next_id += 1
+        # The first part keeps the original label so ids stay stable.
+        for part in sorted(who.values(), key=lambda p: -len(p))[1:]:
+            for i in part:
+                labels[i] = next_id
+            next_id += 1
         split += 1
     if split:
-        print(f"Split {split} cluster(s) that mixed his photos with other people's")
+        print(f"Split {split} cluster(s) that held more than one photographer")
     return labels
 
 
@@ -639,6 +661,16 @@ def _merge_reshoot_pairs(
             cross = bool(
                 left["models"] and right["models"] and not (left["models"] & right["models"])
             )
+            # Both re-shoot rules describe one person: turning the camera they
+            # are holding, or reaching for their second body. Inside the shared
+            # album a second camera is a second *person* — several people
+            # photographing one place, which is what built Hawaii's 38-photo
+            # Galaxy-plus-Xiaomi cluster out of two separate chains. Their own
+            # camera may still re-shoot and rotate; another model may not join
+            # it. (Two guests carrying the same model are indistinguishable
+            # here, and still merge.)
+            if cross and left["own"] is False:
+                continue
             if gap > (cross_window_s if cross else window_s):
                 continue
             same_framing = left["kinds"] == right["kinds"]
@@ -788,12 +820,12 @@ def cluster_embeddings(
                     final_labels[i] = next_id
                 next_id += 1
 
-    # Stage 3b: his photos and other people's are never one cluster. Stage 4
-    # refuses to merge across that line; the stages above it do not know about
-    # folders at all, so on a group trip they still land a guest's frame in his
-    # cluster as a near-duplicate.
+    # Stage 3b: a cluster holds one photographer. Stage 4 refuses to merge
+    # across that line; the stages above it do not know about folders or
+    # cameras at all, so on a group trip they still land someone else's frame
+    # in his cluster, or two guests' in one, as near-duplicates.
     if own is not None:
-        final_labels = _split_guest_mixes(final_labels, own)
+        final_labels = _split_by_photographer(final_labels, own, models)
 
     # Stage 4: rejoin the same subject shot twice — rotated, or on the other camera
     if orientations is not None and orient_window_s > 0:
