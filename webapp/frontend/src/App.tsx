@@ -9,6 +9,7 @@ import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
 import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
+import { Button, Divider, Status, Switch, Tab, TabCount } from "./components/ui";
 import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
 
 export default function App() {
@@ -264,6 +265,12 @@ export default function App() {
   return (
     <div>
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
+      {/* Three groups, left to right: where you are, where you can go, and
+          how the session is doing. They used to be one undivided run of up to
+          thirteen items — back button, project name, six tabs, a switch, a
+          progress bar, two counts and Undo — so the eye had no way to tell
+          navigation from status from action. The dividers do that work; the
+          items inside each group are unchanged in meaning. */}
       <header className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-3">
         <button
           onClick={handleChangeProject}
@@ -287,98 +294,71 @@ export default function App() {
           </span>
         )}
 
-        {hasClusters && (
-          <button
-            onClick={selectTab("clusters")}
-            className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-              tab === "clusters" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
+        <Divider />
+
+        <nav className="flex items-center self-stretch" aria-label="Review sections">
+          {hasClusters && (
+            <Tab active={tab === "clusters"} onClick={selectTab("clusters")}>
+              Clusters <TabCount>{clusterList.length}</TabCount>
+            </Tab>
+          )}
+          {hasSingles && (
+            <Tab active={tab === "singles"} onClick={selectTab("singles")}>
+              Singles <TabCount>{singleList.length}</TabCount>
+            </Tab>
+          )}
+          {hasVideos && (
+            <Tab active={tab === "videos"} onClick={selectTab("videos")}>
+              Videos <TabCount>{reviewableVideos.length}</TabCount>
+            </Tab>
+          )}
+          {hasFavorites && (
+            <Tab active={tab === "favorites"} tone="star" onClick={selectTab("favorites")}>
+              ★ Favorites <TabCount>{favorites.length}</TabCount>
+            </Tab>
+          )}
+          <Tab active={tab === "timeline"} onClick={selectTab("timeline")}>
+            Timeline
+          </Tab>
+          <Tab
+            active={tab === "finish"}
+            tone="done"
+            onClick={selectTab("finish")}
+            data-testid="finish-tab"
           >
-            Clusters ({clusterList.length})
-          </button>
-        )}
-        {hasSingles && (
-          <button
-            onClick={selectTab("singles")}
-            className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-              tab === "singles" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            Singles ({singleList.length})
-          </button>
-        )}
-        {hasVideos && (
-          <button
-            onClick={selectTab("videos")}
-            className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-              tab === "videos" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            Videos ({reviewableVideos.length})
-          </button>
-        )}
-        {hasFavorites && (
-          <button
-            onClick={selectTab("favorites")}
-            className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-              tab === "favorites" ? "border-yellow-500 text-yellow-600" : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            ★ Favorites ({favorites.length})
-          </button>
-        )}
-        <button
-          onClick={selectTab("timeline")}
-          className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-            tab === "timeline" ? "border-blue-600 text-blue-600" : "border-transparent text-gray-500 hover:text-gray-700"
-          }`}
-        >
-          Timeline
-        </button>
-        <button
-          onClick={selectTab("finish")}
-          className={`px-3 py-1 text-sm border-b-2 transition-colors ${
-            tab === "finish" ? "border-green-600 text-green-600" : "border-transparent text-gray-500 hover:text-gray-700"
-          }`}
-          data-testid="finish-tab"
-        >
-          Finish{state.done_at ? " ✓" : ""}
-        </button>
+            Finish{state.done_at ? " ✓" : ""}
+          </Tab>
+        </nav>
 
         <div className="ml-auto flex items-center gap-2">
           {/* Skipping what is already decided: confirm jumps over it. Shown
               once something is decided, since before that it would do nothing. */}
           {reviewedUnits > 0 || hideReviewed ? (
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs text-gray-500">Skip reviewed</span>
-              <button
-                onClick={() => {
-                  setHideReviewed((on) => !on);
-                  goToNextUnconfirmed();
-                }}
-                role="switch"
-                aria-checked={hideReviewed}
-                title={
-                  hideReviewed
-                    ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
-                    : "Make confirm jump past clusters, singles and videos that have already been decided"
-                }
-                data-testid="hide-reviewed"
-                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
-                  hideReviewed ? "bg-green-500" : "bg-red-400"
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
-                    hideReviewed ? "translate-x-4" : ""
-                  }`}
-                />
-              </button>
-            </div>
+            <Switch
+              checked={hideReviewed}
+              label="Skip reviewed"
+              onClick={() => {
+                setHideReviewed((on) => !on);
+                goToNextUnconfirmed();
+              }}
+              title={
+                hideReviewed
+                  ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
+                  : "Make confirm jump past clusters, singles and videos that have already been decided"
+              }
+              data-testid="hide-reviewed"
+            />
           ) : null}
+
+          {(totalUnits > 0 || state.pending_delete_count > 0 || state.done_at) && <Divider />}
+
+          {/* Progress, the delete queue and the finished flag are one readout,
+              not three loose greys next to a button. Spelling out "pending
+              delete" costs nothing here and "12 pending" never said pending
+              what. */}
           {totalUnits > 0 && (
-            <span
-              className="flex items-center gap-1.5 text-xs text-gray-400"
+            <Status
+              className="flex items-center gap-1.5"
               title="Clusters, singles and videos that have been decided"
               data-testid="session-progress"
             >
@@ -389,23 +369,24 @@ export default function App() {
                 />
               </span>
               {reviewedUnits}/{totalUnits} reviewed
-            </span>
+            </Status>
           )}
           {state.pending_delete_count > 0 && (
-            <span className="text-xs text-gray-400">{state.pending_delete_count} pending</span>
+            <Status title="Marked for deletion — nothing leaves disk until you apply deletes in the Finish tab">
+              {state.pending_delete_count} pending delete
+            </Status>
           )}
           {state.done_at && (
-            <span className="text-xs text-green-600" title={state.done_at}>
+            <Status tone="done" title={state.done_at}>
               Trip finished
-            </span>
+            </Status>
           )}
-          <button
-            onClick={handleUndo}
-            disabled={!state.undo_available || undoing}
-            className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
+
+          <Divider />
+
+          <Button onClick={handleUndo} disabled={!state.undo_available || undoing}>
             {undoing ? "…" : "↶ Undo"}
-          </button>
+          </Button>
         </div>
       </header>
 
