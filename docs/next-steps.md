@@ -124,15 +124,32 @@ then took every 2025 trip and the smaller 2024 ones — 25 runs in 88 minutes, a
 unbounded pass is walking the rest, newest first. Sigil (`sigil.service`,
 `sigil-stt.service`) was stopped to give it the GPU: with them up, clipiqa+ ran
 out of memory and fell back to per-image scoring on every trip (10-14 fallbacks
-each on Yellowstone and Gothics); after, none. **Restart them when the batch is
-done:** `systemctl --user start sigil-stt sigil`.
+each on Yellowstone and Gothics); after, none. ~~**Restart them when the batch is
+done:** `systemctl --user start sigil-stt sigil`.~~ **Done** — both are `active`
+as of 2026-09-20, and no pipeline process is running.
 
-As of 18:45 on the 13th, `2024_03_Europe` (9,522 photos, estimated 2 h 10 m) is
+~~As of 18:45 on the 13th, `2024_03_Europe` (9,522 photos, estimated 2 h 10 m) is
 running. Still to come: `2024_02_Taiwan`, `2024_02_Korea` (as a whole trip, 1,305
 photos), `2024_02_China`, `2024_01_Japan` (6,324 photos, ~1.5 h), then 2023 back
-to 2020 — about 50 small trips, 2022's LA, Stratford and Greece the only ones over
-five minutes. The runner and per-trip logs are in the session scratchpad, not the
-repo; the picker's estimate tag is the source of truth for what is left.
+to 2020 — about 50 small trips.~~
+
+**Where it actually stopped, counted 2026-09-20: 38 of 68 trips on h0 have a
+`results.json`; 30 do not.** Everything named above as "still to come" for 2024
+did run — Europe, Taiwan, Korea, China and Japan all have output. The unbounded
+pass then stopped before reaching the older years, and nothing is running now.
+
+What is left, by year: all of **2020** (1), **2021** (6), **2022** (17),
+**2023** (5), plus **`2024/2024_12_NYC`**. 2022 is most of the remainder and is
+mostly small trips; LA, Stratford and Greece are the only ones over five
+minutes. Reproduce the list with `project_output_dir_name` over
+`/mnt/h0/Trips/*/*`, which is what produced these counts — the picker's
+estimate tag says the same thing one row at a time.
+
+**Resuming costs the GPU back.** Sigil is up again, and the reason it was
+stopped has not changed: with it resident, clipiqa+ ran out of memory and fell
+back to per-image scoring on every trip. Stop both services before restarting
+the batch, and restart them after. Nothing here is urgent — these are old,
+small trips and none is queued for review.
 
 **2026-09-15:** `2024_01_Japan` did run as one project (6,324 stills, 1,275
 clusters). That pile is now being split into city subtrips — §7. Do not re-GPU
@@ -162,7 +179,12 @@ reviewing its trip — so it is recorded rather than fixed.~~ **Decided 2026-09-
 won't fix.** Since `e83d51c` the picker no longer lists device folders; reaching
 one takes "Other folder…".
 
-## 4. Open questions on the cross-camera merge
+## 4. The cross-camera merge — all four questions settled
+
+Kept in full because it is the evidence every rule in `_merge_reshoot_pairs`
+and stage 3b was fitted to, and because two of the four were settled *against*
+what was recorded. Nothing here is waiting on anyone. The one standing limit is
+at the end: two guests carrying the same camera model cannot be told apart.
 
 - **The cross-camera merge over-merged on group trips.** ~~This is the most useful
   thing the `google photos/` re-runs showed, and it wants a decision before more
@@ -479,7 +501,15 @@ any of this, so **look at it before believing it**. The test was not kept.
 4. **Not merged and not pushed.** `ui-cleanup` sits ahead of
    `mirror-aware-deletes` by five commits.
 
-## 8. The working tree holds a separate, unreviewed body of work
+## 8. A separate, unreviewed body of work
+
+**Where it lives changed on 2026-09-20.** It is still uncommitted on
+`mirror-aware-deletes`, which has not moved from `f682a74`. It is *also*
+committed unchanged as `a002752`, the first commit of `ui-cleanup` (§8a), which
+was done so the UI diffs after it were readable rather than carrying these
+files in every one. Nothing below was edited. The split described here is still
+the plan; do it from either place, and if from `ui-cleanup`, reset `a002752`
+first.
 
 Not the three features above — those are on HEAD. What is uncommitted on
 `mirror-aware-deletes` as of 2026-09-19 is three entangled threads, sharing
@@ -514,5 +544,8 @@ commit each, which means hunk-level splitting of the three shared files.
 `dist/` was built on the 17th and matches this tree, so the running UI already
 reflects it.
 
-Hoh and Portugal still adopt on first open (§3). Remote curation stays
-gated on auth (`plan.md`). Clipfarm highlights stay off.
+Hoh and Portugal still adopt on first open (§3) — Portugal arrives with 196
+`to_delete` already queued, worth knowing before the first Confirm. 30 old
+trips have no pipeline output and resuming costs the GPU back from Sigil (§2).
+`ui-cleanup` is unmerged and unpushed, five commits ahead (§8a). Remote curation
+stays gated on auth (`plan.md`). Clipfarm highlights stay off.
