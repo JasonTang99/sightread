@@ -333,13 +333,14 @@ export default function App() {
         <div className="ml-auto flex items-center gap-2">
           {/* Skipping what is already decided: confirm jumps over it. Shown
               once something is decided, since before that it would do nothing. */}
-          {reviewedUnits > 0 || hideReviewed ? (
+          {totalUnits > 0 ? (
             <Switch
               checked={hideReviewed}
               label="Skip reviewed"
               onClick={() => {
-                setHideReviewed((on) => !on);
-                goToNextUnconfirmed();
+                const next = !hideReviewed;
+                setHideReviewed(next);
+                if (next) goToNextUnconfirmed();
               }}
               title={
                 hideReviewed

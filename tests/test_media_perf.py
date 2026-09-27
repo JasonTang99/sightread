@@ -130,6 +130,27 @@ def test_failed_transcode_is_not_retried_on_every_video_listing(api, monkeypatch
         server._transcode_failed.discard(src)
 
 
+def test_serve_video_returns_422_after_transcode_failed(api, monkeypatch):
+    client, folder, output_dir = api
+    src = folder / "clip.MOV"
+    src.write_bytes(b"not a video")
+    dest = output_dir / "video_cache" / "clip.mp4"
+
+    def failing(_s, _d):
+        raise RuntimeError("ffmpeg failed")
+
+    monkeypatch.setattr(server, "transcode_for_web", failing)
+    server._transcode_failed.discard(src)
+    try:
+        server._transcode_bg(src, dest)
+        assert src in server._transcode_failed
+        resp = client.get("/api/video", params={"path": str(src)})
+        assert resp.status_code == 422
+        assert "corrupt" in resp.json()["detail"].lower()
+    finally:
+        server._transcode_failed.discard(src)
+
+
 def _wait_for(pred, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:

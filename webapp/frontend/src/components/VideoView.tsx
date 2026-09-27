@@ -260,6 +260,8 @@ export function VideoView({
   // Duration from the video element once loadedmetadata fires; null until then.
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [playhead, setPlayhead] = useState(0);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoStatus, setVideoStatus] = useState<string | null>(null);
   // Working clip lists edited this session, keyed by path. Takes precedence
   // over server user_clips, which takes precedence over suggested highlights.
   // A null entry means "reverted to suggestions" — it masks a stale server
@@ -344,7 +346,53 @@ export function VideoView({
     setMediaDuration(null);
     setPlayhead(0);
     setSelected(null);
+    setVideoSrc(null);
+    setVideoStatus(null);
   }, [current]);
+
+  // Probe /api/video before mounting <video>. A corrupt original (no moov atom)
+  // and a failed transcode both look like a generic element error otherwise.
+  useEffect(() => {
+    if (!current) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const url = `/api/video?path=${encodeURIComponent(current)}`;
+    const basename = current.split("/").pop() ?? current;
+
+    const probe = async () => {
+      const res = await fetch(url, { method: "HEAD" });
+      if (cancelled) return;
+      if (res.ok) {
+        setVideoStatus(null);
+        setVideoSrc(url);
+        return;
+      }
+      if (res.status === 503) {
+        setVideoSrc(null);
+        setVideoStatus("Preparing video…");
+        timer = setTimeout(probe, 2000);
+        return;
+      }
+      let detail = res.statusText;
+      try {
+        const body = await fetch(url).then((r) => r.json());
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      setVideoSrc(null);
+      setVideoStatus(detail);
+      onError(`${basename}: ${detail}`);
+    };
+
+    setVideoSrc(null);
+    setVideoStatus("Loading…");
+    probe();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [current, onError]);
 
   // Keep autoplay/mute behavior: apply volume + mute state and kick off playback.
   useEffect(() => {
@@ -815,10 +863,11 @@ export function VideoView({
           isFavorited ? "border-yellow-400" : isKept ? "border-green-400" : "border-red-400"
         }`}
       >
+        {videoSrc ? (
         <video
           key={current}
           ref={videoRef}
-          src={`/api/video?path=${encodeURIComponent(current)}`}
+          src={videoSrc}
           controls
           autoPlay
           loop
@@ -831,6 +880,11 @@ export function VideoView({
           onTimeUpdate={(e) => setPlayhead(e.currentTarget.currentTime)}
           onError={() => onError(`Failed to load video: ${name}`)}
         />
+        ) : (
+          <div className="flex items-center justify-center h-full text-gray-400 text-sm px-6 text-center">
+            {videoStatus ?? "Loading…"}
+          </div>
+        )}
         {/* Warm the browser's cache for neighboring videos so j/k doesn't hit a cold fetch,
             in either direction — going back is just as common as going forward.
             cached_only=1: only pull the bitrate-capped transcode, never the raw

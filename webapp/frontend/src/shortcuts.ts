@@ -98,13 +98,6 @@ export const CLUSTER_KEYS: Shortcut[] = [
     bind: [{ id: "cluster-toggle-rank", chords: [{ digit: true }] }],
   },
   {
-    keys: "K",
-    what: "keep best (rank 1 only)",
-    brief: true,
-    short: "keep best",
-    bind: [{ id: "cluster-keep-best", chords: [{ key: "K" }] }],
-  },
-  {
     keys: "n",
     what: "jump to next unreviewed cluster",
     bind: [{ id: "cluster-unreviewed", chords: [{ key: "n" }] }],
@@ -115,11 +108,6 @@ export const CLUSTER_KEYS: Shortcut[] = [
     brief: true,
     short: "confirm",
     bind: [{ id: "cluster-confirm", chords: [{ key: "Enter" }] }],
-  },
-  {
-    keys: "b",
-    what: "skip cluster (no confirm)",
-    bind: [{ id: "cluster-skip", chords: [{ key: "b" }] }],
   },
   {
     keys: "s",
