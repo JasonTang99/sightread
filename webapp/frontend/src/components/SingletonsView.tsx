@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
@@ -8,7 +8,7 @@ import { deviceOf } from "../device";
 import { nextAfterConfirm } from "../decisions";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 import { ShortcutBar } from "./ui";
-import { SINGLES_KEYS, brief } from "../shortcuts";
+import { SINGLES_KEYS, brief, typingTarget } from "../shortcuts";
 
 interface Props {
   // The project folder, so a tile can name the camera folder it came from.
@@ -132,14 +132,38 @@ export function SingletonsView({
     else setIdx(hop);
   };
 
-  useWindowKeydown((e) => {
-    if (e.key === "Enter") {
+  // Enter used to fire even with focus in an input, before the form-field
+  // guard. Keep that: confirm is the one key that must never be swallowed
+  // by a tag field.
+  useShortcuts(SINGLES_KEYS, {
+    "singles-confirm": (e) => {
       e.preventDefault();
       confirmCurrent();
-      return;
-    }
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    if (/^[1-9]$/.test(e.key)) {
+    },
+    "singles-next": (e) => {
+      e.preventDefault();
+      setIdx((i) => Math.min(items.length - 1, i + 1));
+    },
+    "singles-prev": (e) => {
+      e.preventDefault();
+      setIdx((i) => Math.max(0, i - 1));
+    },
+    "singles-toggle": (e) => {
+      e.preventDefault();
+      const it = items[idx];
+      if (it && !favSet.has(it.path)) setKeeps((prev) => ({ ...prev, [it.path]: !prev[it.path] }));
+    },
+    "singles-star": (e) => {
+      e.preventDefault();
+      const it = items[idx];
+      if (it) {
+        if (!favSet.has(it.path)) setKeeps((prev) => ({ ...prev, [it.path]: true }));
+        onToggleFavorite(it.path).catch((err) =>
+          onError(err instanceof Error ? err.message : String(err))
+        );
+      }
+    },
+    "singles-tag-slot": (e) => {
       e.preventDefault();
       const it = items[idx];
       if (!it || tagBusy) return;
@@ -148,48 +172,15 @@ export function SingletonsView({
         setKeeps((prev) => ({ ...prev, [it.path]: true }));
         assignTag(it.path, tag);
       }
-      return;
-    }
-    switch (e.key) {
-      case "j":
-      case "ArrowDown":
-      case "ArrowRight":
-        e.preventDefault();
-        setIdx((i) => Math.min(items.length - 1, i + 1));
-        break;
-      case "k":
-      case "ArrowUp":
-      case "ArrowLeft":
-        e.preventDefault();
-        setIdx((i) => Math.max(0, i - 1));
-        break;
-      case " ": {
-        e.preventDefault();
-        const it = items[idx];
-        if (it && !favSet.has(it.path)) setKeeps((prev) => ({ ...prev, [it.path]: !prev[it.path] }));
-        break;
-      }
-      case "s": {
-        e.preventDefault();
-        const it = items[idx];
-        if (it) {
-          if (!favSet.has(it.path)) setKeeps((prev) => ({ ...prev, [it.path]: true }));
-          onToggleFavorite(it.path).catch((err) =>
-            onError(err instanceof Error ? err.message : String(err))
-          );
-        }
-        break;
-      }
-      case "t": {
-        e.preventDefault();
-        const it = items[idx];
-        if (!it || tagBusy) break;
-        setKeeps((prev) => ({ ...prev, [it.path]: true }));
-        assignTag(it.path, nextTag(videoTags.assignments[it.path] ?? null));
-        break;
-      }
-    }
-  });
+    },
+    "singles-tag-cycle": (e) => {
+      e.preventDefault();
+      const it = items[idx];
+      if (!it || tagBusy) return;
+      setKeeps((prev) => ({ ...prev, [it.path]: true }));
+      assignTag(it.path, nextTag(videoTags.assignments[it.path] ?? null));
+    },
+  }, { ignore: (e) => e.key !== "Enter" && typingTarget(e) });
 
   const confirm = async () => {
     setSubmitting(true);

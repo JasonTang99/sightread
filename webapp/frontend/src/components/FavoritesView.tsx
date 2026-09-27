@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useShortcuts } from "../hooks/useWindowKeydown";
 import { Kbd, ShortcutBar } from "./ui";
-import { FAVORITES_KEYS, brief } from "../shortcuts";
+import { FAVORITES_KEYS, brief, typingTarget } from "../shortcuts";
 
 interface Props {
   favorites: string[];
@@ -73,45 +73,34 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
     }
   };
 
-  useWindowKeydown((e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    if (favorites.length === 0) return;
-    const last = favorites.length - 1;
-    switch (e.key) {
-      case "ArrowRight":
-      case "l":
-        e.preventDefault();
-        setFocus((i) => Math.min(last, i + 1));
-        break;
-      case "ArrowLeft":
-      case "h":
-        e.preventDefault();
-        setFocus((i) => Math.max(0, i - 1));
-        break;
-      case "ArrowDown":
-      case "j":
-        e.preventDefault();
-        setFocus((i) => Math.min(last, i + COLS));
-        break;
-      case "ArrowUp":
-      case "k":
-        e.preventDefault();
-        setFocus((i) => Math.max(0, i - COLS));
-        break;
-      case "d": {
-        e.preventDefault();
-        const path = favorites[Math.min(focus, last)];
-        if (path && busy === null) handleDelete(path);
-        break;
-      }
-      case "s": {
-        e.preventDefault();
-        const path = favorites[Math.min(focus, last)];
-        if (path && busy === null) handleUnfavorite(path);
-        break;
-      }
-    }
-  });
+  useShortcuts(FAVORITES_KEYS, {
+    "fav-right": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.min(favorites.length - 1, i + 1));
+    },
+    "fav-left": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.max(0, i - 1));
+    },
+    "fav-down": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.min(favorites.length - 1, i + COLS));
+    },
+    "fav-up": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.max(0, i - COLS));
+    },
+    "fav-delete": (e) => {
+      e.preventDefault();
+      const path = favorites[Math.min(focus, favorites.length - 1)];
+      if (path && busy === null) handleDelete(path);
+    },
+    "fav-unstar": (e) => {
+      e.preventDefault();
+      const path = favorites[Math.min(focus, favorites.length - 1)];
+      if (path && busy === null) handleUnfavorite(path);
+    },
+  }, { ignore: typingTarget, enabled: favorites.length > 0 });
 
   if (favorites.length === 0) {
     return (
