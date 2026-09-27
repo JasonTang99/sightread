@@ -230,6 +230,7 @@ export function TimelineView({
             ))
           : (
               <TimelineDay
+                key={selectedDate}
                 date={selectedDate}
                 dayPhotos={photosByDate[selectedDate] ?? []}
                 dayVideos={videosByDate[selectedDate] ?? []}
