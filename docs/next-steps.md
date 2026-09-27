@@ -451,8 +451,11 @@ a description of HEAD.
 
 ## 8a. UI cleanliness pass — branch `ui-cleanup`
 
-Branched off `mirror-aware-deletes` on 2026-09-20. Four commits, 107 Playwright
-and 383 Python passing on each.
+Branched off `mirror-aware-deletes` on 2026-09-20. The chrome work was four
+commits; the follow-ups below are three more. 107 Playwright and 383 Python
+passing on each, type-check clean. Playwright was run with 3.11.15 first on
+PATH (`conftest` spawns `python3 -m uvicorn`; a 3.10.8 pyenv global fails all
+107 in fixture setup with a 30s server timeout).
 
 - **`a002752` checkpoints §8's uncommitted tree unchanged**, so the UI diffs are
   readable on their own. §8's three threads share `App.tsx` and `server.py` with
@@ -475,6 +478,21 @@ and 383 Python passing on each.
   `?` from all four lists into a single overlay footer that also names Esc.
 - **`450a3b9`** replaces ClusterView's two hand-rolled dividers with the shared
   one and groups its control row.
+- **`07a55ef` closes the third copy.** Each shortcut entry now carries the
+  KeyboardEvent chords that fire it and an id the view must implement.
+  `useShortcuts` looks the event up in that list and calls the id; a missing
+  handler throws on render, so a row added to the list cannot silently do
+  nothing. ClusterView, SingletonsView, VideoView, FavoritesView and App no
+  longer switch on `e.key`. Backspace on a selected video clip was never
+  written down and still isn't — it shares `x`'s id. `?` and Esc live on
+  `APP_KEYS` the same way. The alternative (a test that every `brief` key does
+  something) was not taken; the handler reading the list is the thing that
+  stops a key being changed in one place and left stale in the other.
+- **`4a2e61f` splits ProjectPicker** into the list, folder browser, pipeline
+  screen and action bar it already contained. Markup, class names and behaviour
+  are unchanged.
+- **`787abd1` splits TimelineView** into sidebar, day section and memoised
+  tiles. `content-visibility` stays on the day wrapper. Behaviour unchanged.
 
 **Caught by screenshot, not by the suite.** A temporary Playwright test captured
 the header, cluster toolbar and overlay at 1440x900; that is how the crib was
@@ -482,24 +500,21 @@ found sitting mid-toolbar, where chips gave reference material more weight than
 the controls beside it. Both commits' tests passed either way. Nothing asserts
 any of this, so **look at it before believing it**. The test was not kept.
 
+**Follow-ups done 2026-09-26** (this session), with
+`PATH="$HOME/.pyenv/versions/3.11.15/bin:$PATH" python -m pytest tests`
+(383 passed) and the same PATH on `webapp/tests` (107 passed). `tsc -b` clean.
+No eslint config in the frontend; nothing else to lint.
+
 **Still open on this branch:**
 
-1. **The bindings themselves are still a third copy.** `shortcuts.ts` describes
-   keys; each view's keydown handler implements them. A key can be changed in
-   the handler and left stale in the list, and nothing catches that. Collapsing
-   the last gap means the handler reading its bindings from the same list — a
-   real refactor of three views, not a doc change. **First action: decide
-   whether it is worth it, or whether a test that asserts every `brief` key
-   actually does something is enough.**
-2. **`ProjectPicker.tsx` (423 lines) and `TimelineView.tsx` (451) were not
-   touched.** The picker is the first screen anyone sees and still has its own
-   button and badge styling.
-3. **Run the Playwright suite with 3.11.15 first on PATH.** `conftest` spawns
-   `python3 -m uvicorn`, so a shell whose `python3` is the 3.10.8 pyenv global
-   fails all 107 in fixture setup with a misleading 30s server timeout:
-   `PATH="$HOME/.pyenv/versions/3.11.15/bin:$PATH" python -m pytest webapp/tests`.
+1. ~~The bindings themselves are still a third copy.~~ Done in `07a55ef`.
+2. **The picker still has its own button and badge styling.** The split did not
+   restyle it; that is a look, and it needs a look before believing a shared
+   Button/Status swap. Timeline has nothing equivalent left.
+3. ~~Run the Playwright suite with 3.11.15 first on PATH.~~ Done; 107 passed.
+   The PATH prefix remains load-bearing for any later run from a 3.10.8 shell.
 4. **Not merged and not pushed.** `ui-cleanup` sits ahead of
-   `mirror-aware-deletes` by five commits.
+   `mirror-aware-deletes` by eleven commits.
 
 ## 8. A separate, unreviewed body of work
 
@@ -547,5 +562,5 @@ reflects it.
 Hoh and Portugal still adopt on first open (§3) — Portugal arrives with 196
 `to_delete` already queued, worth knowing before the first Confirm. 30 old
 trips have no pipeline output and resuming costs the GPU back from Sigil (§2).
-`ui-cleanup` is unmerged and unpushed, five commits ahead (§8a). Remote curation
+`ui-cleanup` is unmerged and unpushed, eleven commits ahead (§8a). Remote curation
 stays gated on auth (`plan.md`). Clipfarm highlights stay off.
