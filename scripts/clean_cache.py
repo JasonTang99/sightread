@@ -31,12 +31,6 @@ def clean(output_dir: str = "outputs") -> None:
             p.unlink()
             removed.append(str(p))
 
-    trash = out / "trash"
-    if trash.is_dir() and any(trash.iterdir()):
-        n = sum(1 for _ in trash.iterdir())
-        shutil.rmtree(trash)
-        removed.append(f"{trash}/ ({n} files)")
-
     thumb_cache = out / "thumb_cache"
     if thumb_cache.is_dir():
         n = sum(1 for _ in thumb_cache.iterdir())

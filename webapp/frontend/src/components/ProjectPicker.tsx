@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
-import type { FsListing, JobStatus, ProjectEntry, ProjectStatus } from "../types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FsListing, JobStatus, ProjectEntry } from "../types";
+import { FolderBrowser } from "./FolderBrowser";
+import { PickerActionBar } from "./PickerActionBar";
+import { PipelineScreen } from "./PipelineScreen";
+import { ProjectList } from "./ProjectList";
+import { byTripThenName, projectKey } from "./picker";
+import { Button } from "./ui";
+
+export { tripKey } from "./picker";
 
 interface Props {
   onProjectOpened: () => void;
 }
-
-const STATUS_BADGE: Record<ProjectStatus, { label: string; cls: string }> = {
-  ready:     { label: "Ready",     cls: "bg-green-100 text-green-700" },
-  stale:     { label: "Stale",     cls: "bg-yellow-100 text-yellow-700" },
-  never_run: { label: "Not run",   cls: "bg-gray-100 text-gray-500" },
-  running:   { label: "Running…",  cls: "bg-blue-100 text-blue-600" },
-};
 
 export function ProjectPicker({ onProjectOpened }: Props) {
   const [recents, setRecents] = useState<ProjectEntry[]>([]);
@@ -19,10 +20,17 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   const [job, setJob] = useState<JobStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Browsing is for folders no project covers yet — rare once the archive
+  // has been through the pipeline, so it stays out of the way until asked.
+  const [browsing, setBrowsing] = useState(false);
 
   const loadRecents = useCallback(async () => {
     const res = await fetch("/api/projects");
     if (res.ok) setRecents(await res.json());
+    // Names already painted. Counts / stale / ETA walk the photo tree and
+    // can take minutes on a large archive; fill them in when they land.
+    const detail = await fetch("/api/projects/details");
+    if (detail.ok) setRecents(await detail.json());
   }, []);
 
   const browse = useCallback(async (path?: string) => {
@@ -37,8 +45,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
 
   useEffect(() => {
     loadRecents();
-    browse();
-  }, [loadRecents, browse]);
+  }, [loadRecents]);
+
+  const byDate = useMemo(() => [...recents].sort(byTripThenName), [recents]);
 
   // Poll job status while running
   useEffect(() => {
@@ -55,7 +64,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           await fetch("/api/projects/open", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ folder: status.folder }),
+            body: JSON.stringify({ folder: status.folder, subtrip: status.subtrip ?? null }),
           });
           onProjectOpened();
         }
@@ -64,14 +73,19 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     return () => clearInterval(id);
   }, [job?.running, onProjectOpened]);
 
-  const openProject = async (folder: string) => {
+  const openIfReady = (p: ProjectEntry) => {
+    if (busy) return;
+    if (p.status === "ready" || p.status === "stale") openProject(p);
+  };
+
+  const openProject = async (p: ProjectEntry) => {
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/projects/open", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder }),
+        body: JSON.stringify({ folder: p.folder, subtrip: p.subtrip ?? null }),
       });
       if (!res.ok) {
         const e = await res.json();
@@ -85,20 +99,20 @@ export function ProjectPicker({ onProjectOpened }: Props) {
     }
   };
 
-  const runPipeline = async (folder: string) => {
+  const runPipeline = async (folder: string, subtrip?: string | null) => {
     setBusy(true);
     setError(null);
     try {
       const res = await fetch("/api/projects/run-pipeline", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder }),
+        body: JSON.stringify({ folder, subtrip: subtrip ?? null }),
       });
       if (!res.ok) {
         const e = await res.json();
         throw new Error(e.detail ?? "Failed to start pipeline");
       }
-      setJob({ running: true, done: false, error: null, last_line: null, lines: [], folder });
+      setJob({ running: true, done: false, error: null, last_line: null, lines: [], folder, subtrip: subtrip ?? null });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -107,46 +121,10 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   };
 
   if (job?.running || job?.done) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-gray-50">
-        <div className="bg-white border border-gray-200 rounded-lg p-8 w-full max-w-lg text-center shadow-sm">
-          {job.done && !job.error ? (
-            <p className="text-sm font-medium text-green-600">Pipeline complete — loading…</p>
-          ) : !job.done ? (
-            <>
-              <p className="text-sm font-semibold text-gray-700 mb-1">Running pipeline</p>
-              <p className="text-xs text-gray-400 mb-4 truncate">{job.folder}</p>
-              <div className="w-full bg-gray-100 rounded-full h-1.5 mb-3">
-                <div className="bg-blue-500 h-1.5 rounded-full animate-pulse w-1/2" />
-              </div>
-              {job.last_line && (
-                <p className="text-xs text-gray-500 font-mono truncate">{job.last_line}</p>
-              )}
-            </>
-          ) : (
-            <>
-              <p className="text-sm font-semibold text-red-600 mb-1">Pipeline failed</p>
-              <p className="text-xs text-red-600 mb-3">{job.error}</p>
-              {(job.lines?.length ?? 0) > 0 && (
-                <pre className="text-left text-xs text-gray-600 font-mono bg-gray-50 border border-gray-200 rounded p-2 mb-3 max-h-48 overflow-y-auto whitespace-pre-wrap">
-                  {job.lines.join("\n")}
-                </pre>
-              )}
-              <button
-                onClick={() => setJob(null)}
-                className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-              >
-                Back
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    );
+    return <PipelineScreen job={job} onBack={() => setJob(null)} />;
   }
 
-  const selectedIsNew = selected && !recents.find((r) => r.folder === selected);
-  const selectedRecent = selected ? recents.find((r) => r.folder === selected) : null;
+  const selectedRecent = selected ? recents.find((r) => projectKey(r) === selected) : null;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -155,146 +133,53 @@ export function ProjectPicker({ onProjectOpened }: Props) {
       </header>
 
       <div className="max-w-5xl mx-auto p-4 grid grid-cols-[280px_1fr] gap-4">
-        {/* Recents */}
-        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-          <div className="px-3 py-2 border-b border-gray-100">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Recent</p>
-          </div>
-          {recents.length === 0 ? (
-            <p className="text-xs text-gray-400 px-3 py-4">No recent projects.</p>
-          ) : (
-            <ul>
-              {recents.map((p) => {
-                const badge = STATUS_BADGE[p.status];
-                const isSelected = selected === p.folder;
-                return (
-                  <li key={p.folder}>
-                    <button
-                      onClick={() => setSelected(p.folder)}
-                      className={`w-full text-left px-3 py-2.5 flex items-start gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
-                        isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800 truncate">{p.display_name}</p>
-                        <p className="text-xs text-gray-400 truncate">{p.folder}</p>
-                        {p.image_count > 0 && (
-                          <p className="text-xs text-gray-400">{p.image_count} images</p>
-                        )}
-                      </div>
-                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}>
-                        {badge.label}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+        <ProjectList
+          title="Recent"
+          testId="recent-projects"
+          projects={recents}
+          selected={selected}
+          onSelect={setSelected}
+          onOpen={openIfReady}
+        />
 
-        {/* Browser + actions */}
         <div className="flex flex-col gap-3">
-          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden flex-1">
-            <div className="px-3 py-2 border-b border-gray-100 flex items-center gap-2">
-              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Browse</p>
-              {listing && (
-                <p className="text-xs text-gray-400 truncate font-mono">{listing.path}</p>
-              )}
+          <ProjectList
+            title="By trip date"
+            testId="projects-by-date"
+            projects={byDate}
+            selected={selected}
+            onSelect={setSelected}
+            onOpen={openIfReady}
+          />
+
+          {!browsing ? (
+            <div className="self-start">
+              <Button
+                size="md"
+                onClick={() => { setBrowsing(true); browse(); }}
+              >
+                Other folder…
+              </Button>
             </div>
+          ) : (
+            <FolderBrowser
+              listing={listing}
+              selected={selected}
+              onSelect={setSelected}
+              onBrowse={browse}
+              onClose={() => setBrowsing(false)}
+            />
+          )}
 
-            {listing && (
-              <>
-                {listing.parent && (
-                  <button
-                    onClick={() => browse(listing.parent!)}
-                    className="w-full text-left px-3 py-2 text-xs text-gray-500 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100"
-                  >
-                    <span>↑</span>
-                    <span className="font-mono">..</span>
-                  </button>
-                )}
-                <ul className="divide-y divide-gray-50 max-h-[400px] overflow-y-auto">
-                  {listing.entries.map((entry) => {
-                    const isSelected = selected === entry.path;
-                    return (
-                      <li key={entry.path}>
-                        <button
-                          onClick={() => setSelected(entry.path)}
-                          onDoubleClick={() => entry.is_dir && browse(entry.path)}
-                          className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-gray-50 transition-colors border-l-2 ${
-                            isSelected ? "border-blue-500 bg-blue-50" : "border-transparent"
-                          }`}
-                        >
-                          <span className="text-base leading-none">
-                            {entry.image_count > 0 ? "📸" : "📁"}
-                          </span>
-                          <span className="flex-1 text-sm text-gray-700 truncate">{entry.name}</span>
-                          {entry.image_count > 0 && (
-                            <span className="text-xs text-gray-400 shrink-0">{entry.image_count}</span>
-                          )}
-                          {entry.is_dir && (
-                            <button
-                              onClick={(e) => { e.stopPropagation(); browse(entry.path); }}
-                              className="text-xs text-gray-400 hover:text-gray-600 shrink-0 px-1"
-                              title="Open folder"
-                            >
-                              →
-                            </button>
-                          )}
-                        </button>
-                      </li>
-                    );
-                  })}
-                  {listing.entries.length === 0 && (
-                    <li className="px-3 py-4 text-xs text-gray-400">No subdirectories.</li>
-                  )}
-                </ul>
-              </>
-            )}
-          </div>
-
-          {/* Action bar */}
           {selected && (
-            <div className="bg-white border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-gray-500">Selected</p>
-                <p className="text-sm font-medium text-gray-800 truncate font-mono">{selected}</p>
-              </div>
-
-              {error && (
-                <p className="text-xs text-red-600 shrink-0">{error}</p>
-              )}
-
-              {selectedRecent ? (
-                <>
-                  {(selectedRecent.status === "ready" || selectedRecent.status === "stale") && (
-                    <button
-                      onClick={() => openProject(selected)}
-                      disabled={busy}
-                      className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
-                    >
-                      Open
-                    </button>
-                  )}
-                  <button
-                    onClick={() => runPipeline(selected)}
-                    disabled={busy}
-                    className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50 shrink-0"
-                  >
-                    {selectedRecent.status === "stale" ? "Re-run Pipeline" : "Run Pipeline"}
-                  </button>
-                </>
-              ) : (
-                <button
-                  onClick={() => runPipeline(selected)}
-                  disabled={busy}
-                  className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
-                >
-                  Run Pipeline
-                </button>
-              )}
-            </div>
+            <PickerActionBar
+              selected={selected}
+              selectedRecent={selectedRecent ?? null}
+              busy={busy}
+              error={error}
+              onOpen={openProject}
+              onRun={runPipeline}
+            />
           )}
         </div>
       </div>

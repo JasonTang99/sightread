@@ -29,6 +29,8 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(
         server._transcode_executor, "submit", lambda *a, **k: None
     )
+    # Cuts land in <trip>/_exports/clips; pin the layout regardless of the env.
+    monkeypatch.setattr(server, "EXPORTS_ROOT", None)
     return TestClient(server.app, base_url="http://localhost"), folder, output_dir
 
 
@@ -282,7 +284,7 @@ class TestExportClips:
 
         assert resp.status_code == 200
         body = resp.json()
-        clips_dir = folder / "clips"
+        clips_dir = folder.parent / "_exports" / "clips"
         assert clips_dir.is_dir()
         assert body == {"ok": True, "files": [
             str((clips_dir / "beach_c01_1p2s-5p6s.mp4").resolve()),
@@ -338,7 +340,7 @@ class TestExportClips:
 
         assert resp.status_code == 200
         assert resp.json()["files"] == [
-            str((folder / "clips" / "surf_c01_3p0s-8p0s.mp4").resolve()),
+            str((folder.parent / "_exports" / "clips" / "surf_c01_3p0s-8p0s.mp4").resolve()),
         ]
 
     def test_user_clips_override_suggestions(self, api, fake_ffmpeg):
@@ -356,7 +358,7 @@ class TestExportClips:
         resp = client.post("/api/clips/export", json={"path": video})
 
         assert resp.json()["files"] == [
-            str((folder / "clips" / "v_c01_10p0s-12p0s.mp4").resolve()),
+            str((folder.parent / "_exports" / "clips" / "v_c01_10p0s-12p0s.mp4").resolve()),
         ]
 
     def test_export_400_when_no_clips_anywhere(self, api, fake_ffmpeg):
@@ -475,7 +477,7 @@ def test_export_real_ffmpeg_roundtrip(api):
     assert len(files) == 1
     out = files[0]
     assert out.endswith("test_c01_0p5s-1p5s.mp4")
-    assert (folder / "clips" / "test_c01_0p5s-1p5s.mp4").exists()
+    assert (folder.parent / "_exports" / "clips" / "test_c01_0p5s-1p5s.mp4").exists()
     probe = subprocess.run(
         [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
