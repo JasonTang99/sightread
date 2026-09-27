@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import server
 from projects import ProjectContext
+from utils import KEPT, TO_DELETE, save_decisions
 
 
 def _write_highlights(output_dir, videos):
@@ -139,16 +140,23 @@ class TestApiVideosEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body.keys()) == {"paths", "shot_times", "highlights", "user_clips"}
+        assert set(body.keys()) == {
+            "paths", "folder", "statuses", "shot_times", "highlights", "user_clips", "video_tags",
+        }
         assert body["paths"] == [video]
+        assert body["statuses"] == {video: "undecided"}
         assert video in body["shot_times"]
         assert body["highlights"] == {video: {"duration": 34.5, "clips": CLIPS}}
 
-    def test_pending_delete_videos_filtered(self, api):
+    def test_pending_delete_videos_reported_not_dropped(self, api):
+        """The timeline colours a marked video red, so it has to be listed.
+
+        Views that only review undecided footage filter on `statuses` instead.
+        """
         client, folder, out = api
         keep = _make_video(folder, "keep.mp4")
         gone = _make_video(folder, "gone.mp4")
-        (out / "to_delete.txt").write_text(gone + "\n")
+        save_decisions(out, {gone: TO_DELETE, keep: KEPT})
         _write_highlights(out, {
             keep: {"fingerprint": "1:1", "duration": 34.5, "clips": CLIPS},
             gone: {"fingerprint": "2:2", "duration": 10.0, "clips": []},
@@ -156,9 +164,9 @@ class TestApiVideosEndpoint:
 
         body = client.get("/api/videos").json()
 
-        assert body["paths"] == [keep]
-        assert gone not in body["shot_times"]
-        assert body["highlights"] == {keep: {"duration": 34.5, "clips": CLIPS}}
+        assert body["paths"] == [gone, keep]
+        assert body["statuses"] == {gone: "delete", keep: "keep"}
+        assert body["highlights"][keep] == {"duration": 34.5, "clips": CLIPS}
 
     def test_missing_highlights_file_degrades(self, api):
         client, folder, _ = api

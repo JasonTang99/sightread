@@ -17,11 +17,13 @@ original file (see server.py), so the downscale costs nothing in exported
 quality. Originals are never modified.
 """
 import hashlib
+import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+from media import VIDEO_EXTENSIONS  # noqa: F401 — re-exported for convert_videos.py
 
 
 def _ffmpeg() -> str | None:
@@ -34,6 +36,55 @@ def cache_path(output_dir: Path, src: Path) -> Path:
         f"{src.resolve()}|{src.stat().st_mtime_ns}".encode()
     ).hexdigest()
     return output_dir / "video_cache" / f"{key}.mp4"
+
+
+def poster_path(
+    output_dir: Path, src: Path, w: int, st: os.stat_result | None = None
+) -> Path:
+    """Cache location for a video's still frame, keyed like cache_path plus width."""
+    if st is None:
+        st = src.stat()
+    key = hashlib.sha1(
+        f"{src.resolve()}|{st.st_mtime_ns}|{w}".encode()
+    ).hexdigest()
+    return output_dir / "poster_cache" / f"{key}.jpg"
+
+
+# Cameras often open on a fraction of a second of lens motion or exposure
+# settling, so grab a frame a beat in rather than frame zero.
+_POSTER_SEEK_SECONDS = 1
+
+
+def extract_poster(src: Path, dest: Path, w: int) -> None:
+    """Write one still frame from src into dest as a JPEG no wider than w.
+
+    Placed before -i so ffmpeg seeks by keyframe rather than decoding up to the
+    timestamp: on a 4K All-I file that is the difference between milliseconds
+    and seconds. Videos shorter than the seek point fall back to their first
+    frame, which is what -ss past the end already yields with an empty output —
+    so retry from zero in that case.
+    """
+    ff = _ffmpeg()
+    if ff is None:
+        raise RuntimeError("ffmpeg not found on PATH")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp.jpg")
+    scale = f"scale=w='min({w},iw)':h=-2"
+    # Not check=True on the first pass: seeking past the end of a short clip is
+    # an ffmpeg error, and that is exactly the case the second pass handles.
+    for seek, strict in ((_POSTER_SEEK_SECONDS, False), (0, True)):
+        subprocess.run(
+            [ff, "-y", "-ss", str(seek), "-i", str(src),
+             "-frames:v", "1", "-vf", scale, "-q:v", "4", str(tmp)],
+            check=strict,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dest)
+            return
+    tmp.unlink(missing_ok=True)
+    raise RuntimeError(f"ffmpeg produced no poster frame for {src}")
 
 
 # Cap the long edge at 1440p. Both orientations occur in real projects (the

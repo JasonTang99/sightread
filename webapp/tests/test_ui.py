@@ -1,21 +1,56 @@
 """Playwright tests for the Sightread React webapp."""
 
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
+import requests
 from playwright.sync_api import Page, expect
 
-from conftest import FIXTURE_RESULTS, _cluster_count, _singleton_count, output_dir  # noqa: F401
+from utils import save_decisions
+
+from conftest import (  # noqa: F401
+    BASE_URL,
+    FIXTURE_RESULTS,
+    _cluster_count,
+    _singleton_count,
+    output_dir,
+    project_folder,
+    queued,
+    seed_queue,
+    settle,
+    statuses,
+)
 
 
 # ---------------------------------------------------------------------------
 # Page load
 # ---------------------------------------------------------------------------
 class TestPageLoad:
-    def test_header_title(self, page_loaded: Page):
-        # Header title is plain text (a span), not a button anymore
-        expect(page_loaded.locator("header").get_by_text("Sightread", exact=True)).to_be_visible()
+    def test_header_leads_with_the_project_not_the_product(self, page_loaded: Page):
+        """The wordmark said nothing a user needed twice; the project does."""
+        expect(page_loaded.locator("header").get_by_text("Sightread", exact=True)).to_have_count(0)
+        first = page_loaded.locator("header > *").first
+        expect(first).to_have_text("← Projects")
+
+    def test_header_names_the_open_project(self, page_loaded: Page, project_folder):
+        """Which trip is on screen. Every other project control is a verb, so
+        with several trips half reviewed nothing said where you were."""
+        name = page_loaded.get_by_test_id("project-name")
+        expect(name).to_have_text(project_folder.name)
+        # Trips on different drives share names, so the tooltip carries the
+        # display name and the full path underneath it.
+        expect(name).to_have_attribute(
+            "title", f"{project_folder.name}\n{project_folder}"
+        )
+
+    def test_the_project_name_survives_a_tab_change(self, page_loaded: Page, project_folder):
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("project-name")).to_have_text(project_folder.name)
 
     def test_cluster_tab_visible(self, page_loaded: Page):
         expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
@@ -27,7 +62,12 @@ class TestPageLoad:
         expect(page_loaded.get_by_role("button", name="↶ Undo")).to_be_disabled()
 
     def test_progress_bar_visible(self, page_loaded: Page):
-        expect(page_loaded.locator(".bg-blue-500").first).to_be_visible()
+        # By test id, not by colour class: the header's session meter uses the
+        # same blue and would otherwise win `.first` purely by DOM order.
+        expect(page_loaded.get_by_test_id("cluster-progress")).to_be_visible()
+
+    def test_session_progress_visible(self, page_loaded: Page):
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("reviewed")
 
     def test_cluster_select_shows_first(self, page_loaded: Page):
         # Select dropdown should show "1/N" for the first cluster
@@ -110,19 +150,51 @@ class TestKeyboardNav:
         page_loaded.keyboard.press("Space")  # → keep again
         expect(page_loaded.locator("button.bg-green-50").first).to_be_visible()
 
+    def test_shift_space_keeps_only_the_focused_image(self, page_loaded: Page, output_dir):
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Space")  # rank 1 is kept too now: two keeps
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Shift+Space")
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        assert statuses(output_dir)[images[2]["path"]] == "kept"
+        assert len(queued(output_dir)) == 2
+
+    def test_shift_space_leaves_starred_images_kept(self, page_loaded: Page, output_dir):
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        page_loaded.keyboard.press("s")  # star the first image
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Space")  # keep the second image as well
+        page_loaded.keyboard.press("l")
+        page_loaded.keyboard.press("Shift+Space")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        # Only the unstarred, unfocused second image goes; the starred first stays.
+        deleted = queued(output_dir)
+        assert len(deleted) == 1
+        assert Path(images[1]["path"]).name in deleted[0]
+
     def test_enter_confirms(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
-        page_loaded.wait_for_load_state("networkidle")
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
-        assert len(deleted) == 2  # ranks 2 and 3 deleted by default
+        settle(page_loaded)
+        assert len(queued(output_dir)) == 2  # ranks 2 and 3 deleted by default
 
     def test_enter_confirm_advances_and_records_decision(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
-        page_loaded.wait_for_load_state("networkidle")
+        settle(page_loaded)
         expect(page_loaded.locator("select")).to_have_value("1")
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "1" in decisions
-        assert len(decisions["1"]["deleted"]) == 2
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4380.JPG"] == "kept"  # rank 1
+        assert sorted(p for p, v in decisions.items() if v == "to_delete") == [
+            "demo_photos/DSCF4370.JPG",
+            "demo_photos/DSCF4375.JPG",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +210,24 @@ class TestToggle:
     def test_click_image_toggles(self, page_loaded: Page):
         page_loaded.locator("button.bg-green-50").first.click()
         expect(page_loaded.locator("button.bg-red-50")).to_have_count(3)
+
+    def test_a_partial_decision_is_honoured(self, page_loaded: Page, output_dir):
+        """Keep/delete/star belong to the photo, not the whole cluster.
+
+        Rank-1 starts keep and rank-2 starts delete when nothing is stored.
+        After a child-folder review those statuses are already on disk —
+        they must show even though the rest of the cluster is still blank.
+        """
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        save_decisions(output_dir, {
+            images[0]["path"]: "to_delete",
+            images[1]["path"]: "favorite",
+        })
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
 
 
 # ---------------------------------------------------------------------------
@@ -160,25 +250,24 @@ class TestKeepBest:
 class TestConfirm:
     def test_confirm_writes_delete_list(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
-        page_loaded.wait_for_load_state("networkidle")
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
-        assert len(deleted) == 2
+        settle(page_loaded)
+        assert len(queued(output_dir)) == 2
 
     def test_confirm_advances_to_next_cluster(self, page_loaded: Page):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
-        page_loaded.wait_for_load_state("networkidle")
+        settle(page_loaded)
         expect(page_loaded.locator("select")).to_have_value("1")
 
     def test_confirm_records_decision(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="✓ Confirm").click()
-        page_loaded.wait_for_load_state("networkidle")
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert decisions["1"]["kept"] and len(decisions["1"]["deleted"]) == 2
+        settle(page_loaded)
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4380.JPG"] == "kept"
+        assert sum(1 for v in decisions.values() if v == "to_delete") == 2
 
     def test_skip_does_not_write_delete_list(self, page_loaded: Page, output_dir):
         page_loaded.get_by_role("button", name="Skip").click()
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
+        assert queued(output_dir) == []
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +276,7 @@ class TestConfirm:
 class TestUndo:
     def _confirm(self, page: Page) -> None:
         page.get_by_role("button", name="✓ Confirm").click()
-        page.wait_for_load_state("networkidle")
+        settle(page)
 
     def test_undo_enabled_after_confirm(self, page_loaded: Page):
         self._confirm(page_loaded)
@@ -196,21 +285,20 @@ class TestUndo:
     def test_undo_clears_delete_list(self, page_loaded: Page, output_dir):
         self._confirm(page_loaded)
         page_loaded.get_by_role("button", name="↶ Undo").click()
-        page_loaded.wait_for_load_state("networkidle")
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
+        settle(page_loaded)
+        assert queued(output_dir) == []
 
     def test_undo_removes_decision(self, page_loaded: Page, output_dir):
         self._confirm(page_loaded)
         page_loaded.get_by_role("button", name="↶ Undo").click()
-        page_loaded.wait_for_load_state("networkidle")
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "1" not in decisions
+        settle(page_loaded)
+        decisions = statuses(output_dir)
+        assert decisions == {}  # every photo the cluster decided on is cleared
 
     def test_undo_disabled_after_undo(self, page_loaded: Page):
         self._confirm(page_loaded)
         page_loaded.get_by_role("button", name="↶ Undo").click()
-        page_loaded.wait_for_load_state("networkidle")
+        settle(page_loaded)
         expect(page_loaded.get_by_role("button", name="↶ Undo")).to_be_disabled()
 
 
@@ -243,22 +331,36 @@ class TestSingles:
         page_loaded.keyboard.press("k")
         expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
 
+    def test_clicking_a_tag_stars_and_keeps_the_single(self, page_loaded: Page, output_dir):
+        """Photos share the video tag vocabulary; a tag is a star and a keep."""
+        self._open_singles(page_loaded)
+        expect(page_loaded.get_by_text("Delete", exact=True)).to_be_visible()
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Keep", exact=True)).to_be_visible()
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+        photo = "demo_photos/DSCF4283.JPG"
+        assert json.loads((output_dir / "video_tags.json").read_text())["videos"][photo] == "vibes"
+        assert photo in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
+
     def test_enter_confirms_current_item(self, page_loaded: Page, output_dir):
         self._open_singles(page_loaded)
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/4 reviewed")
         page_loaded.keyboard.press("Enter")
-        page_loaded.wait_for_load_state("networkidle")
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
+        settle(page_loaded)
+        deleted = queued(output_dir)
         assert len(deleted) == 1
         assert "DSCF4283" in deleted[0]
-        decisions = json.loads((output_dir / "decisions.json").read_text())
-        assert "3" in decisions  # singleton cluster_id 3 recorded
+        decisions = statuses(output_dir)
+        assert decisions["demo_photos/DSCF4283.JPG"] == "to_delete"
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/4 reviewed")
 
     def test_confirm_all_writes_delete_list(self, page_loaded: Page, output_dir):
         # No auto-keep threshold anymore: all unmarked singles default to Delete
         self._open_singles(page_loaded)
         page_loaded.get_by_role("button", name="✓ Confirm").click()
-        page_loaded.wait_for_load_state("networkidle")
-        deleted = (output_dir / "to_delete.txt").read_text().splitlines()
+        settle(page_loaded)
+        deleted = queued(output_dir)
         assert len(deleted) == _singleton_count()
         assert any("DSCF4283" in d for d in deleted)
         assert any("DSCF4284" in d for d in deleted)
@@ -268,7 +370,7 @@ class TestSingles:
         # badged "confirmed" and the tab stays visible.
         self._open_singles(page_loaded)
         page_loaded.get_by_role("button", name="✓ Confirm").click()
-        page_loaded.wait_for_load_state("networkidle")
+        settle(page_loaded)
         expect(page_loaded.get_by_text("confirmed", exact=True)).to_be_visible()
         expect(page_loaded.get_by_text(f"Singles ({_singleton_count()})")).to_be_visible()
 
@@ -276,45 +378,50 @@ class TestSingles:
 # ---------------------------------------------------------------------------
 # Trash panel
 # ---------------------------------------------------------------------------
-class TestTrashPanel:
+class TestFinishTrip:
+    def _open_finish(self, page: Page) -> None:
+        page.get_by_test_id("finish-tab").click()
+        settle(page)
+
     def _confirm_cluster(self, page: Page) -> None:
         page.get_by_role("button", name="✓ Confirm").click()
-        page.wait_for_load_state("networkidle")
+        settle(page)
 
-    def test_trash_panel_shows_after_confirm(self, page_loaded: Page):
+    def test_finish_shows_delete_and_remaining_counts(self, page_loaded: Page):
+        self._open_finish(page_loaded)
+        expect(page_loaded.get_by_test_id("finish-delete-count")).to_have_text("0 to delete")
+        expect(page_loaded.get_by_test_id("finish-remain-photos")).to_have_text("7 photos remain")
+        expect(page_loaded.get_by_test_id("finish-remain-videos")).to_have_text("0 videos remain")
+        expect(page_loaded.get_by_test_id("finish-trip")).to_have_text("Finish trip")
+        expect(page_loaded.get_by_test_id("finish-delete-export")).to_have_count(0)
+        expect(page_loaded.get_by_test_id("finish-delete-export-clear")).to_have_count(0)
+
+    def test_finish_counts_queued_deletes(self, page_loaded: Page):
         self._confirm_cluster(page_loaded)
-        expect(page_loaded.get_by_text("Trash —")).to_be_visible()
+        self._open_finish(page_loaded)
+        expect(page_loaded.get_by_test_id("finish-delete-count")).to_have_text("2 to delete")
+        expect(page_loaded.get_by_test_id("finish-remain-photos")).to_have_text("5 photos remain")
 
-    def test_trash_panel_expands(self, page_loaded: Page):
-        self._confirm_cluster(page_loaded)
-        page_loaded.get_by_text("▼ expand").click()
-        expect(page_loaded.get_by_role("button", name="🗑️ Move 2 to trash")).to_be_visible()
-
-    def test_trash_restore_removes_from_delete_list(self, page_loaded: Page, output_dir):
-        self._confirm_cluster(page_loaded)
-        page_loaded.get_by_text("▼ expand").click()
-        trash_filename = page_loaded.locator(".grid .rounded p.text-xs").first
-        expect(trash_filename).to_be_visible(timeout=10_000)
-        trash_filename.click()
-        expect(page_loaded.locator(".border-blue-400").first).to_be_visible(timeout=5_000)
-        page_loaded.get_by_role("button", name="Restore 1 selected").click()
-        page_loaded.wait_for_load_state("networkidle")
-        after = (output_dir / "to_delete.txt").read_text().strip().splitlines()
-        assert len(after) == 1  # started with 2 (ranks 2,3), restored 1
-
-    def test_apply_deletes_clears_list(self, page_loaded: Page, output_dir):
+    def test_finish_returns_to_projects(self, page_loaded: Page, output_dir):
         # Nonexistent paths: apply must not touch real files during tests
-        (output_dir / "to_delete.txt").write_text(
-            "demo_photos/NOPE_1.JPG\ndemo_photos/NOPE_2.JPG\n"
-        )
+        seed_queue(output_dir, "demo_photos/NOPE_1.JPG", "demo_photos/NOPE_2.JPG")
         page_loaded.reload()
-        page_loaded.get_by_text("▼ expand").click()
+        self._open_finish(page_loaded)
+        # Picker's details walk hits the real archive; stub it so this test
+        # does not hold the session server on that scan.
+        page_loaded.route(
+            "**/api/projects/details",
+            lambda route: route.fulfill(status=200, content_type="application/json", body="[]"),
+        )
+        page_loaded.route(
+            "**/api/projects",
+            lambda route: route.fulfill(status=200, content_type="application/json", body="[]"),
+        )
         page_loaded.once("dialog", lambda d: d.accept())
-        page_loaded.get_by_role("button", name="🗑️ Move 2 to trash").click()
-        page_loaded.wait_for_load_state("networkidle")
-        content = (output_dir / "to_delete.txt").read_text().strip()
-        assert content == ""
-        expect(page_loaded.get_by_text("Trash —")).not_to_be_visible()
+        page_loaded.get_by_test_id("finish-trip").click()
+        expect(page_loaded.get_by_test_id("recent-projects")).to_be_visible()
+        settle(page_loaded)
+        assert queued(output_dir) == []
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +448,15 @@ class TestKeyboardNewBindings:
         page_loaded.keyboard.press("s")
         expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
 
+    def test_starring_a_delete_marked_photo_keeps_it(self, page_loaded: Page):
+        """A star is a keep: rank-2 starts delete, starring it must flip Keep."""
+        page_loaded.keyboard.press("l")
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
+        page_loaded.keyboard.press("s")
+        settle(page_loaded)
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
+        expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
+
     def test_shift_k_keep_best(self, page_loaded: Page):
         page_loaded.keyboard.press("2")  # rank-2 → keep (2 green)
         expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
@@ -359,11 +475,11 @@ class TestKeyboardNewBindings:
 
     def test_u_undo_after_confirm(self, page_loaded: Page, output_dir):
         page_loaded.keyboard.press("Enter")
-        page_loaded.wait_for_load_state("networkidle")
-        assert len((output_dir / "to_delete.txt").read_text().splitlines()) == 2
+        settle(page_loaded)
+        assert len(queued(output_dir)) == 2
         page_loaded.keyboard.press("u")
-        page_loaded.wait_for_load_state("networkidle")
-        assert (output_dir / "to_delete.txt").read_text().strip() == ""
+        settle(page_loaded)
+        assert queued(output_dir) == []
 
     def test_question_mark_shows_help(self, page_loaded: Page):
         page_loaded.keyboard.press("?")
@@ -378,3 +494,585 @@ class TestKeyboardNewBindings:
         page_loaded.keyboard.press("?")
         page_loaded.keyboard.press("Escape")
         expect(page_loaded.get_by_text("Keyboard shortcuts")).not_to_be_visible()
+
+
+# ---------------------------------------------------------------------------
+# Timeline video tiles
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestTimelineVideos:
+    """Videos are curated like photos, so the timeline has to show their status.
+
+    Its tiles are still frames rather than <video> elements: media elements load
+    eagerly, and at six connections per origin they starve the lazy photo
+    thumbnails below them — with 89 videos in a real project, 150 photos never
+    got requested at all.
+    """
+
+    @pytest.fixture()
+    def video_project(self, tmp_path, webapp_server):
+        """Point the server at a throwaway folder holding one real video."""
+        folder = tmp_path / "clips"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "results.json").write_text(json.dumps({"clusters": []}))
+        video = folder / "a.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(video)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, str(video.resolve())
+
+    def _open_timeline(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.get_by_role("button", name="Timeline").click()
+        settle(page)
+
+    def test_tile_uses_a_poster_not_a_video_element(self, page_loaded: Page, video_project):
+        self._open_timeline(page_loaded)
+        expect(page_loaded.locator("img[src*='/api/video-poster']")).to_have_count(1)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_undecided_video_is_grey(self, page_loaded: Page, video_project):
+        self._open_timeline(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-gray-300"))
+
+    def test_marked_video_is_red(self, page_loaded: Page, video_project):
+        out, video = video_project
+        seed_queue(out, video)
+        self._open_timeline(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-red-400"))
+
+    def test_confirm_day_records_a_video_keep(self, page_loaded: Page, video_project):
+        out, video = video_project
+        self._open_timeline(page_loaded)
+        page_loaded.get_by_role("button", name="✓ Confirm Day").click()
+        settle(page_loaded)
+        assert statuses(out).get(video) == "kept"
+
+    def test_clicking_a_tile_then_confirming_queues_the_video(self, page_loaded: Page, video_project):
+        out, video = video_project
+        self._open_timeline(page_loaded)
+        page_loaded.locator("img[src*='/api/video-poster']").click()
+        page_loaded.get_by_role("button", name="✓ Confirm Day").click()
+        settle(page_loaded)
+        assert queued(out) == [video]
+
+    def test_space_records_a_delete_immediately(self, page_loaded: Page, video_project):
+        """Marks used to live only in component state until a bulk confirm."""
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/1 reviewed")
+        page_loaded.keyboard.press(" ")
+        settle(page_loaded)
+        assert queued(out) == [video]
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
+
+    def test_enter_records_a_keep_immediately(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("0/1 reviewed")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        assert statuses(out).get(video) == "kept"
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
+
+    def test_starring_a_delete_marked_video_keeps_it(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press(" ")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Delete", exact=True)).to_be_visible()
+        page_loaded.keyboard.press("s")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text("Keep", exact=True)).to_be_visible()
+        assert video in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text("1/1 reviewed")
+
+    def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
+        out, video = video_project
+        page_loaded.goto(BASE_URL)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        tile = page_loaded.locator("img[src*='/api/video-poster']").locator("..")
+        expect(tile).to_have_class(re.compile(r"border-green-400"))
+
+
+# ---------------------------------------------------------------------------
+# Video tag feedback
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestVideoTagFeedback:
+    """Pressing a tag has to say so on screen.
+
+    The pills scroll horizontally once a project has a few tags, so "which pill
+    is lit" is not a reliable answer to "what is this clip tagged" — the lit one
+    can be off-screen. A badge in the toolbar states it outright, and confirms
+    the write only after the server has acknowledged it.
+    """
+
+    @pytest.fixture()
+    def video_project(self, tmp_path, webapp_server):
+        folder = tmp_path / "clips"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "results.json").write_text(json.dumps({"clusters": []}))
+        video = folder / "a.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(video)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, str(video.resolve())
+
+    def _open_videos(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.get_by_role("button", name="Videos").click()
+        settle(page)
+
+    def test_the_tags_are_on_screen_before_anything_is_starred(
+        self, page_loaded: Page, video_project
+    ):
+        """The row used to be hidden until a clip was favourited, which hid the
+        whole feature: nothing to discover, and 1-9 silently did nothing."""
+        self._open_videos(page_loaded)
+        expect(page_loaded.get_by_role("button", name=re.compile(r"vibes"))).to_have_count(1)
+        # Nothing is tagged yet, so nothing in the row is selected and the
+        # export badge -- which only means something for a favourite -- is absent.
+        expect(page_loaded.locator("text=🏷")).to_have_count(0)
+
+    def test_clicking_a_tag_stars_the_clip_and_says_so(self, page_loaded: Page, video_project):
+        """Tagging means 'deliver this', and exports.py only delivers favourites,
+        so the tag is taken as the stronger statement and stars the clip too."""
+        out, video = video_project
+        self._open_videos(page_loaded)
+
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+
+        expect(page_loaded.locator("span[title='Exports to …/vibes/']")).to_have_count(1)
+        assert json.loads((out / "video_tags.json").read_text())["videos"][video] == "vibes"
+        # The star is the half that would silently not happen: the tag write
+        # succeeds either way, and only a favourite is ever exported.
+        assert video in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
+
+    def test_clearing_a_tag_does_not_star_anything(self, page_loaded: Page, video_project):
+        """'No tag' says nothing about wanting the clip, so it must not favourite
+        it -- only a real tag carries that meaning."""
+        self._open_videos(page_loaded)
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+        page_loaded.get_by_title("No tag → …/untagged/").click()
+        settle(page_loaded)
+        # Still favourited from the tag click, now with no tag.
+        expect(page_loaded.locator("span[title='Exports to …/untagged/']")).to_have_count(1)
+
+    def test_the_tag_survives_stepping_away_and_back(self, page_loaded: Page, video_project):
+        """A badge driven by local click state rather than by server state would
+        pass the test above and still lose the tag on reload."""
+        out, video = video_project
+        self._open_videos(page_loaded)
+        page_loaded.get_by_role("button", name=re.compile(r"vibes")).first.click()
+        settle(page_loaded)
+
+        assert json.loads((out / "video_tags.json").read_text())["videos"][video] == "vibes"
+
+        self._open_videos(page_loaded)
+        expect(page_loaded.locator("span[title='Exports to …/vibes/']")).to_have_count(1)
+
+
+# ---------------------------------------------------------------------------
+# Live Photos
+# ---------------------------------------------------------------------------
+class TestLivePhotoHover:
+    """A Live Photo plays when the pointer rests on its LIVE badge.
+
+    Playback hangs off the badge, not the tile, so crossing a grid on the way
+    to the keep button does not start dozens of clips, and the <video> is only
+    mounted while hovered — one media element per tile loads eagerly and, at
+    six connections per origin, starves the lazy thumbnails around it.
+    """
+
+    @pytest.fixture()
+    def live_project(self, tmp_path, webapp_server):
+        """A cluster of two stills where only the first has a motion file."""
+        folder = tmp_path / "live"
+        folder.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        stills = []
+        for name in ("IMG_0001.JPG", "IMG_0002.JPG"):
+            dst = folder / name
+            shutil.copy(Path(__file__).parent.parent.parent / "demo_photos" / "DSCF4380.JPG", dst)
+            stills.append(str(dst.resolve()))
+        motion = folder / "IMG_0001.MOV"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi",
+             "-i", "testsrc=size=160x120:rate=10:duration=2",
+             "-pix_fmt", "yuv420p", str(motion)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        (out / "results.json").write_text(json.dumps({"clusters": [{
+            "cluster_id": 1,
+            "best_image": stills[0],
+            "images": [
+                {"path": stills[0], "score": 0.71, "centrality": 0.98, "rank": 1,
+                 "motion": str(motion.resolve())},
+                {"path": stills[1], "score": 0.52, "centrality": 0.95, "rank": 2},
+            ],
+        }]}))
+        requests.post(
+            f"{BASE_URL}/api/_test_set_project",
+            json={"folder": str(folder), "output_dir": str(out)},
+        )
+        return out, stills, str(motion.resolve())
+
+    def _open_clusters(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        page.wait_for_selector("select", timeout=10_000)
+        settle(page)
+
+    def test_only_the_still_with_a_motion_file_is_badged(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(1)
+
+    def test_nothing_plays_until_the_badge_is_hovered(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_hovering_the_badge_plays_the_motion_file(self, page_loaded: Page, live_project):
+        out, _stills, motion = live_project
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_test_id("live-badge").hover()
+        video = page_loaded.locator("video")
+        expect(video).to_have_count(1)
+        assert motion in requests.utils.unquote(video.get_attribute("src"))
+
+    def test_leaving_the_badge_unmounts_the_video(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_test_id("live-badge").hover()
+        expect(page_loaded.locator("video")).to_have_count(1)
+        page_loaded.mouse.move(0, 0)
+        expect(page_loaded.locator("video")).to_have_count(0)
+
+    def test_hovering_one_badge_does_not_start_the_neighbours(self, page_loaded: Page, live_project):
+        """Both stills are Live Photos here, so a tile-level hover would play two."""
+        out, stills, motion = live_project
+        results = json.loads((out / "results.json").read_text())
+        results["clusters"][0]["images"][1]["motion"] = motion
+        (out / "results.json").write_text(json.dumps(results))
+        self._open_clusters(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(2)
+        page_loaded.get_by_test_id("live-badge").first.hover()
+        expect(page_loaded.locator("video")).to_have_count(1)
+
+    def test_the_badge_is_not_a_keep_or_delete_vote(self, page_loaded: Page, live_project):
+        """The tile toggles on click; the badge sits on top of it."""
+        self._open_clusters(page_loaded)
+        before = page_loaded.get_by_role("button", name=re.compile(r"Keep|Delete")).first.inner_text()
+        page_loaded.get_by_test_id("live-badge").click()
+        settle(page_loaded)
+        after = page_loaded.get_by_role("button", name=re.compile(r"Keep|Delete")).first.inner_text()
+        assert before == after
+
+    def test_the_timeline_badges_it_too(self, page_loaded: Page, live_project):
+        self._open_clusters(page_loaded)
+        page_loaded.get_by_role("button", name="Timeline").click()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("live-badge")).to_have_count(1)
+
+
+# ---------------------------------------------------------------------------
+# How big is this cluster
+# ---------------------------------------------------------------------------
+class TestClusterSize:
+    """How many photos you are deciding between, and how loud that should be.
+
+    The count used to live only inside the cluster dropdown's own label — the
+    one place you cannot read it while looking at the photos. Size also decides
+    what kind of job this is: a pair is a glance, Hawaii's 47-frame burst is
+    not, and the colour says which before you start.
+    """
+
+    def _sizes(self):
+        return [len(c["images"]) for c in FIXTURE_RESULTS["clusters"] if len(c["images"]) > 1]
+
+    def test_the_count_is_on_the_bar(self, page_loaded: Page):
+        first = self._sizes()[0]
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text(f"{first} photos")
+
+    def test_it_follows_the_cluster_you_move_to(self, page_loaded: Page):
+        sizes = self._sizes()
+        page_loaded.get_by_role("button", name="→", exact=True).click()
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text(f"{sizes[1]} photos")
+
+    def test_a_small_cluster_is_quiet(self, page_loaded: Page):
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_class(re.compile(r"bg-blue-50"))
+
+    def test_a_burst_is_loud(self, page_loaded: Page, output_dir):
+        """A 20-plus cluster is the shape that hides work behind a best pick."""
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        first = results["clusters"][0]
+        template = first["images"][0]
+        first["images"] = [
+            {**template, "path": f"demo_photos/burst_{i}.JPG", "rank": i + 1}
+            for i in range(24)
+        ]
+        (output_dir / "results.json").write_text(json.dumps(results))
+        page_loaded.reload()
+        settle(page_loaded)
+
+        badge = page_loaded.get_by_test_id("cluster-size")
+        expect(badge).to_have_text("24 photos")
+        expect(badge).to_have_class(re.compile(r"bg-red-100"))
+
+    def test_the_middle_band_sits_between_them(self, page_loaded: Page, output_dir):
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        first = results["clusters"][0]
+        template = first["images"][0]
+        first["images"] = [
+            {**template, "path": f"demo_photos/mid_{i}.JPG", "rank": i + 1}
+            for i in range(9)
+        ]
+        (output_dir / "results.json").write_text(json.dumps(results))
+        page_loaded.reload()
+        settle(page_loaded)
+
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_class(re.compile(r"bg-orange-100"))
+
+
+@pytest.fixture()
+def video_project(tmp_path, webapp_server):
+    """A throwaway project holding one real clip and no photos."""
+    folder = tmp_path / "clips"
+    folder.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "results.json").write_text(json.dumps({"clusters": []}))
+    video = folder / "a.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi",
+         "-i", "testsrc=size=160x120:rate=10:duration=2",
+         "-pix_fmt", "yuv420p", str(video)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    requests.post(
+        f"{BASE_URL}/api/_test_set_project",
+        json={"folder": str(folder), "output_dir": str(out)},
+    )
+    return out, str(video.resolve())
+
+
+# ---------------------------------------------------------------------------
+# Skipping what has already been reviewed
+# ---------------------------------------------------------------------------
+class TestSkipReviewed:
+    """Opening a trip whose camera folder was reviewed on its own adopts that
+    review, so the queue is full of clusters, singles and clips that already
+    have a decision. The header toggle makes confirm jump over them; it does
+    not take them out of the lists, so arrows still reach everything."""
+
+    def _decide(self, output_dir, cluster_index: int, status: str = "kept") -> None:
+        images = FIXTURE_RESULTS["clusters"][cluster_index]["images"]
+        save_decisions(output_dir, {img["path"]: status for img in images})
+
+    def _with_extra(self, output_dir, at: int, cluster: dict) -> dict:
+        results = json.loads(json.dumps(FIXTURE_RESULTS))
+        results["clusters"].insert(at, cluster)
+        (output_dir / "results.json").write_text(json.dumps(results))
+        return results
+
+    def _extra_cluster(self) -> dict:
+        """A 4-photo cluster, so where the cursor lands reads off the size badge."""
+        template = FIXTURE_RESULTS["clusters"][0]["images"][0]
+        return {
+            "cluster_id": 99,
+            "best_image": "demo_photos/extra0.JPG",
+            "images": [
+                {**template, "path": f"demo_photos/extra{i}.JPG", "rank": i + 1}
+                for i in range(4)
+            ],
+        }
+
+    def _skip_on(self, page: Page) -> None:
+        page.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
+        page.reload()
+        settle(page)
+
+    def test_absent_until_there_is_something_to_skip(self, page_loaded: Page, output_dir):
+        """A project with nothing decided has nothing to skip, and a control
+        that would do nothing is noise in a header this busy."""
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_count(0)
+
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_be_visible()
+        expect(page_loaded.get_by_text("Skip reviewed")).to_be_visible()
+
+    def test_it_never_shrinks_the_tabs(self, page_loaded: Page, output_dir):
+        """Filtering made every count drop on confirm and put decided work
+        out of reach of the arrows."""
+        save_decisions(output_dir, {
+            **{img["path"]: "kept" for img in FIXTURE_RESULTS["clusters"][0]["images"]},
+            FIXTURE_RESULTS["clusters"][3]["images"][0]["path"]: "kept",
+        })
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count()})")).to_be_visible()
+        expect(page_loaded.get_by_text(f"Singles ({_singleton_count()})")).to_be_visible()
+
+    def test_the_choice_survives_a_reload(self, page_loaded: Page, output_dir):
+        """It is a way of working, not a per-visit decision."""
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
+
+    def test_progress_still_counts_everything(self, page_loaded: Page, output_dir):
+        self._decide(output_dir, 0)
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        total = _cluster_count() + _singleton_count()
+        expect(page_loaded.get_by_test_id("session-progress")).to_contain_text(f"1/{total} reviewed")
+
+    def test_enter_jumps_past_a_decided_cluster(self, page_loaded: Page, output_dir):
+        # 3 photos (undecided), 2 photos (decided), 4 photos (undecided).
+        self._with_extra(output_dir, 2, self._extra_cluster())
+        self._decide(output_dir, 1)
+        self._skip_on(page_loaded)
+
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("3 photos")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("4 photos")
+        expect(page_loaded.locator("select")).to_have_value("2")
+        expect(page_loaded.get_by_text(f"Clusters ({_cluster_count() + 1})")).to_be_visible()
+
+        # The decided one is still there to go back to.
+        page_loaded.keyboard.press("ArrowLeft")
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
+
+    def test_enter_steps_one_at_a_time_when_off(self, page_loaded: Page, output_dir):
+        self._with_extra(output_dir, 2, self._extra_cluster())
+        self._decide(output_dir, 1)
+        page_loaded.reload()
+        settle(page_loaded)
+
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_test_id("cluster-size")).to_have_text("2 photos")
+
+    def test_enter_wraps_to_an_earlier_undecided_cluster(self, page_loaded: Page, output_dir):
+        self._skip_on(page_loaded)
+        page_loaded.keyboard.press("ArrowRight")
+        expect(page_loaded.locator("select")).to_have_value("1")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.locator("select")).to_have_value("0")
+
+    def test_enter_jumps_past_a_decided_single(self, page_loaded: Page, output_dir):
+        # Singles sort by score: 0.30, then this 0.50 one, then 0.65.
+        self._with_extra(output_dir, 3, {
+            "cluster_id": 98,
+            "best_image": "demo_photos/extra_single.JPG",
+            "images": [{"path": "demo_photos/extra_single.JPG", "score": 0.50,
+                        "centrality": 1.0, "rank": 1}],
+        })
+        save_decisions(output_dir, {"demo_photos/extra_single.JPG": "kept"})
+        self._skip_on(page_loaded)
+
+        page_loaded.get_by_text(f"Singles ({_singleton_count() + 1})").click()
+        expect(page_loaded.get_by_text("1 / 3")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        expect(page_loaded.get_by_text("3 / 3")).to_be_visible()
+        page_loaded.keyboard.press("k")
+        expect(page_loaded.get_by_text("2 / 3")).to_be_visible()
+
+    def test_a_reviewed_clip_stays_in_the_videos_tab(self, page_loaded: Page, video_project):
+        out, video = video_project
+        save_decisions(out, {video: "kept"})
+        page_loaded.goto(BASE_URL)
+        settle(page_loaded)
+        page_loaded.get_by_test_id("hide-reviewed").click()
+        expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()
+
+
+# ---------------------------------------------------------------------------
+# Enter on the last item opens the next tab
+# ---------------------------------------------------------------------------
+class TestEnterAdvancesTab:
+    def test_enter_on_the_last_cluster_opens_singles(self, page_loaded: Page):
+        page_loaded.keyboard.press("ArrowRight")
+        expect(page_loaded.locator("select")).to_have_value("1")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+        expect(page_loaded.locator("select")).to_have_count(0)
+
+    def test_enter_on_the_last_single_opens_the_next_tab(self, page_loaded: Page):
+        """No videos in the fixture, so singles' next tab is the timeline."""
+        page_loaded.get_by_text(f"Singles ({_singleton_count()})").click()
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"2 / {_singleton_count()}")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("button", name="Timeline")).to_have_class(
+            re.compile(r"border-blue-600")
+        )
+
+    def test_enter_on_the_last_video_opens_the_timeline(self, page_loaded: Page, video_project):
+        page_loaded.goto(BASE_URL)
+        settle(page_loaded)
+        page_loaded.get_by_role("button", name="Videos (1)").click()
+        expect(page_loaded.get_by_text("1 / 1")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("button", name="Timeline")).to_have_class(
+            re.compile(r"border-blue-600")
+        )
+
+    def test_skip_reviewed_enter_on_the_last_pending_cluster_opens_singles(
+        self, page_loaded: Page, output_dir,
+    ):
+        save_decisions(output_dir, {
+            img["path"]: "kept" for img in FIXTURE_RESULTS["clusters"][0]["images"]
+        })
+        page_loaded.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
+        page_loaded.reload()
+        settle(page_loaded)
+        page_loaded.keyboard.press("ArrowRight")
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(page_loaded.get_by_text(f"1 / {_singleton_count()}")).to_be_visible()
+

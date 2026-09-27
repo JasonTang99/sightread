@@ -1,4 +1,5 @@
 pillow
+pillow-heif==1.7.0
 pandas
 numpy==2.4.6
 torch==2.12.0

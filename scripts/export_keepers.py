@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Export the list of keeper images (all images not marked for deletion).
 
-Reads outputs/results.json and outputs/to_delete.txt, writes a list of
-keeper paths to stdout or a file.
+Reads results.json and decisions.json from a project's output dir, writes a
+list of keeper paths to stdout or a file. A photo counts as a keeper unless it
+is on its way out — `to_delete` or already `deleted`. Undecided photos are
+keepers, matching the old behaviour of "not in the delete list".
 
 Usage:
     python scripts/export_keepers.py
@@ -11,23 +13,23 @@ Usage:
 """
 
 import argparse
+import json
 import shutil
+import sys
 from pathlib import Path
 
+# Shares the webapp's decisions schema rather than reimplementing it; see the
+# same import in delete_marked.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+from utils import DELETED, TO_DELETE, load_decisions  # noqa: E402
 
-def get_keepers(results_path: Path, curation_path: Path) -> list[str]:
-    import json
+
+def get_keepers(results_path: Path, output_dir: Path) -> list[str]:
     data = json.loads(results_path.read_text())
     all_paths = [img["path"] for c in data["clusters"] for img in c["images"]]
-    deleted: set[str] = set()
-    if curation_path.exists():
-        c = json.loads(curation_path.read_text())
-        deleted = set(c.get("deleted", []))
-    elif (curation_path.parent / "to_delete.txt").exists():
-        # Legacy fallback
-        lines = (curation_path.parent / "to_delete.txt").read_text().splitlines()
-        deleted = {l.strip() for l in lines if l.strip()}
-    return [p for p in all_paths if p not in deleted]
+    decisions = load_decisions(output_dir)
+    doomed = {TO_DELETE, DELETED}
+    return [p for p in all_paths if decisions.get(p) not in doomed]
 
 
 def main():
@@ -38,7 +40,7 @@ def main():
     args = parser.parse_args()
 
     out = Path(args.output_dir)
-    keepers = get_keepers(out / "results.json", out / "curation.json")
+    keepers = get_keepers(out / "results.json", out)
 
     if args.output:
         Path(args.output).write_text("\n".join(keepers) + "\n")

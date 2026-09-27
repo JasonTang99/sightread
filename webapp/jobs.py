@@ -17,6 +17,7 @@ class JobState:
     running: bool = True
     done: bool = False
     error: str | None = None
+    subtrip: str | None = None
     _lines: list[str] = field(default_factory=list, repr=False)
 
     def append_line(self, line: str) -> None:
@@ -45,20 +46,24 @@ def start_pipeline(
     output_dir: Path,
     project_root: Path,
     on_success: Optional[Callable[[], None]] = None,
+    subtrip: str | None = None,
 ) -> JobState:
     global _current
     output_dir.mkdir(parents=True, exist_ok=True)
-    job = JobState(folder=str(folder), output_dir=str(output_dir))
+    job = JobState(folder=str(folder), output_dir=str(output_dir), subtrip=subtrip)
 
     def _run() -> None:
         try:
+            cmd = [
+                sys.executable,
+                str(project_root / "scripts" / "pipeline.py"),
+                "--image-dir", str(folder.resolve()),
+                "--output-dir", str(output_dir),
+            ]
+            if subtrip:
+                cmd.extend(["--subtrip", subtrip])
             proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(project_root / "scripts" / "pipeline.py"),
-                    "--image-dir", str(folder.resolve()),
-                    "--output-dir", str(output_dir),
-                ],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

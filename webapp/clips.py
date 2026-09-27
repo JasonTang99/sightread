@@ -9,7 +9,7 @@ that video (it overrides pipeline suggestions in the UI); an empty clips list
 means the user explicitly wants no clips for it.
 
 Exports cut from the ORIGINAL video file (never the web-transcode cache) into
-<project folder>/clips/.
+<trip>/_exports/clips/ (see exports.export_dir_for).
 """
 import json
 import shutil

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useShortcuts } from "../hooks/useWindowKeydown";
+import { Kbd, ShortcutBar } from "./ui";
+import { FAVORITES_KEYS, brief, typingTarget } from "../shortcuts";
 
 interface Props {
   favorites: string[];
@@ -48,7 +50,9 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
     }
   };
 
-  // Space: drop the favorite and mark the item for deletion. Order matters —
+  // d: drop the favorite and mark the item for deletion. Kept off spacebar —
+  // that's the keep/delete toggle everywhere else in the app, so an
+  // instinctive space press here must not delete anything. Order matters —
   // the backend /api/confirm endpoint skips anything still favorited, so the
   // favorite must be removed first.
   const handleDelete = async (path: string) => {
@@ -69,45 +73,34 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
     }
   };
 
-  useWindowKeydown((e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    if (favorites.length === 0) return;
-    const last = favorites.length - 1;
-    switch (e.key) {
-      case "ArrowRight":
-      case "l":
-        e.preventDefault();
-        setFocus((i) => Math.min(last, i + 1));
-        break;
-      case "ArrowLeft":
-      case "h":
-        e.preventDefault();
-        setFocus((i) => Math.max(0, i - 1));
-        break;
-      case "ArrowDown":
-      case "j":
-        e.preventDefault();
-        setFocus((i) => Math.min(last, i + COLS));
-        break;
-      case "ArrowUp":
-      case "k":
-        e.preventDefault();
-        setFocus((i) => Math.max(0, i - COLS));
-        break;
-      case " ": {
-        e.preventDefault();
-        const path = favorites[Math.min(focus, last)];
-        if (path && busy === null) handleDelete(path);
-        break;
-      }
-      case "s": {
-        e.preventDefault();
-        const path = favorites[Math.min(focus, last)];
-        if (path && busy === null) handleUnfavorite(path);
-        break;
-      }
-    }
-  });
+  useShortcuts(FAVORITES_KEYS, {
+    "fav-right": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.min(favorites.length - 1, i + 1));
+    },
+    "fav-left": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.max(0, i - 1));
+    },
+    "fav-down": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.min(favorites.length - 1, i + COLS));
+    },
+    "fav-up": (e) => {
+      e.preventDefault();
+      setFocus((i) => Math.max(0, i - COLS));
+    },
+    "fav-delete": (e) => {
+      e.preventDefault();
+      const path = favorites[Math.min(focus, favorites.length - 1)];
+      if (path && busy === null) handleDelete(path);
+    },
+    "fav-unstar": (e) => {
+      e.preventDefault();
+      const path = favorites[Math.min(focus, favorites.length - 1)];
+      if (path && busy === null) handleUnfavorite(path);
+    },
+  }, { ignore: typingTarget, enabled: favorites.length > 0 });
 
   if (favorites.length === 0) {
     return (
@@ -115,7 +108,7 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
         <p className="text-2xl mb-2">★</p>
         <p className="text-gray-700 font-medium">No favorites yet</p>
         <p className="text-sm text-gray-500 mt-1">
-          Press <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> on any photo or video to star it
+          Press <Kbd>s</Kbd> on any photo or video to star it
         </p>
       </div>
     );
@@ -125,13 +118,11 @@ export function FavoritesView({ favorites, onToggleFavorite, onRefresh, onError 
 
   return (
     <div className="space-y-2">
-      <div className="bg-white rounded border border-gray-200 px-3 py-2 flex items-center gap-2">
+      <div className="bg-white rounded border border-gray-200 px-3 py-2 flex items-center flex-wrap gap-2">
         <span className="text-sm font-medium text-yellow-600">
           ★ {favorites.length} favorite{favorites.length !== 1 ? "s" : ""}
         </span>
-        <span className="text-xs text-gray-400">
-          h/j/k/l move · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">space</kbd> unfavorite + mark delete · <kbd className="px-1 py-0.5 text-xs bg-gray-100 border border-gray-300 rounded">s</kbd> unfavorite
-        </span>
+        <ShortcutBar items={brief(FAVORITES_KEYS)} />
       </div>
       <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${COLS}, minmax(0, 1fr))` }}>
         {favorites.map((path, i) => (

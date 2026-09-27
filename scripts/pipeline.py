@@ -13,14 +13,26 @@ Without --output-dir, results go to the per-project data directory
 import argparse
 import gc
 import json
+import os
+import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
 from PIL import Image, ExifTags
 from tqdm import tqdm
+
+# thumbs.py and media.py are the webapp modules scripts may import: they pull
+# in nothing beyond PIL, pillow-heif and the stdlib. Duplicating the thumbnail
+# cache key instead is how the pipeline's output silently stops being a cache
+# hit, and duplicating the extension sets is how a format gets scanned here and
+# forgotten by the export. Importing thumbs also registers the HEIF opener.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+import media  # noqa: E402
+import thumbs  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config defaults
@@ -34,7 +46,39 @@ NUM_WORKERS = 4
 TIGHT_THRESHOLD = 0.08   # near-duplicate / burst
 LOOSE_THRESHOLD = 0.22   # same-scene
 BURST_WINDOW_S = 3.0     # EXIF timestamp delta to pre-group
+# Same subject a few seconds later, AE moved the embedding just past tight.
+# Measured on 2024_01_Japan Canon SL3: IMG_1939/1940 are the same Hakodate
+# stairs, ISO 800 vs 400, 6s apart, cosine 0.093. Ungated burst at this width
+# chains a 20-minute Koyasan walk into one cluster (49 → 61 photos); the
+# embedding ceiling is what stops that.
+BRACKET_WINDOW_S = 12.0
+BRACKET_THRESHOLD = 0.12
 MAX_CLUSTER_GAP_S = 3600.0  # max EXIF gap within a cluster (1 hr)
+
+# Re-shoot merge: same subject framed portrait *and* landscape lands in two
+# clusters because rotating the camera moves the embedding further than the
+# same-scene threshold. Merge those back when they are close in time.
+ORIENT_MERGE_WINDOW_S = 120.0  # max EXIF gap between the two framings
+ORIENT_MERGE_THRESHOLD = 0.38  # cosine dist between cluster centroids
+
+# The same shot taken on two cameras is the other re-shoot: different sensor,
+# lens and processing move the embedding the way rotating the camera does, and
+# the two never land in one cluster on their own. It takes longer to raise the
+# second camera than to turn the first, so it gets its own wider window —
+# measured on 2026_01_Japan, where the phone/camera pairs of one subject sit
+# 126-331s apart. The distance ceiling is the *same-scene* threshold, not the
+# looser rotation one: two framings of one subject genuinely sit further apart
+# than two devices pointed at it, and at 0.38 same-framing merges started
+# swallowing neighbouring compositions (a 12-photo riverbed group on the Hoh
+# trip that held three different subjects).
+#
+# Other people's cameras may join each other that way. Jason's folders must
+# not: a group trip's `google photos/` is many people shooting one place, and
+# chaining them with his `iphone/` / `xt5/` is how Hawaii cluster 443 became
+# 23 photos of five subjects with his frames in the delete queue. His own
+# two cameras of one subject still merge — that is the Japan case.
+CROSS_DEVICE_WINDOW_S = 300.0
+CROSS_DEVICE_THRESHOLD = LOOSE_THRESHOLD
 
 # Score weights (ensemble)
 SCORE_WEIGHTS = {
@@ -47,10 +91,8 @@ SCORE_WEIGHTS = {
 EXPOSURE_PENALTY_WEIGHT = 0.15
 FACE_BONUS_WEIGHT = 0.10
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-# Keep in sync with webapp/server.py VIDEO_EXTENSIONS (scripts must not import webapp).
-# No ".ts": MPEG-TS shares the extension with TypeScript sources.
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".m2ts", ".webm"}
+IMAGE_EXTENSIONS = media.IMAGE_EXTENSIONS
+VIDEO_EXTENSIONS = media.VIDEO_EXTENSIONS
 # FAISS k-NN connectivity replaces O(n²) sklearn distance matrix above this size
 _FAISS_N_THRESHOLD = 5_000
 _FAISS_K_NEIGHBORS = 50     # neighbors per point for connectivity graph
@@ -58,53 +100,174 @@ _FAISS_K_NEIGHBORS = 50     # neighbors per point for connectivity graph
 SCORE_BATCH_SIZE = 16
 SCORE_RESIZE = 512           # resize to this before neural metrics
 _EXIF_DATETIME_TAG = next(k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal")
+_EXIF_ORIENTATION_TAG = 0x0112
+_EXIF_MODEL_TAG = 0x0110
 
 
 # ---------------------------------------------------------------------------
 # Scanning
 # ---------------------------------------------------------------------------
-def _scan_image_paths(image_dir: str) -> list[str]:
+def _scan_image_paths(image_dir: str, subtrip: str | None = None) -> list[str]:
     root = Path(image_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Image directory not found: {root}")
+    extra = None
+    if subtrip:
+        from projects import unfiled_paths_for_subtrip
+        extra = unfiled_paths_for_subtrip(root, subtrip)
     return sorted(
-        str(p) for p in root.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS
+        str(Path(dirpath, name))
+        for dirpath, names in media.walk_media(root, subtrip, extra_paths=extra)
+        for name in names
+        if media.is_image(name)
     )
 
 
-def _read_exif_timestamp(path: str) -> float | None:
+def _parse_exif_timestamp(exif) -> float | None:
     """Return EXIF DateTimeOriginal as unix seconds, or None."""
+    raw = None
     try:
-        with Image.open(path) as img:
-            exif = img.getexif()
-            if not exif:
-                return None
-            raw = None
-            try:
-                ifd = exif.get_ifd(ExifTags.IFD.Exif)
-                raw = ifd.get(_EXIF_DATETIME_TAG)
-            except Exception:
-                pass
-            if not raw:
-                raw = exif.get(_EXIF_DATETIME_TAG)
-            if not raw:
-                # Fallback to DateTime (0x0132) top-level
-                raw = exif.get(0x0132)
-            if not raw:
-                return None
-            dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
-            return dt.timestamp()
+        ifd = exif.get_ifd(ExifTags.IFD.Exif)
+        raw = ifd.get(_EXIF_DATETIME_TAG)
     except Exception:
+        pass
+    if not raw:
+        raw = exif.get(_EXIF_DATETIME_TAG)
+    if not raw:
+        # Fallback to DateTime (0x0132) top-level
+        raw = exif.get(0x0132)
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y:%m:%d %H:%M:%S").timestamp()
+    except ValueError:
         return None
 
 
-def load_paths_and_timestamps(image_dir: str) -> tuple[list[str], list[float | None]]:
-    paths = _scan_image_paths(image_dir)
+class ShotMeta(NamedTuple):
+    timestamp: float | None
+    # The *displayed* framing: EXIF Orientation 5-8 rotates by 90°, which
+    # swaps the stored width and height.
+    framing: str  # portrait | landscape | square | unknown
+    # EXIF Model, e.g. "X-T5" or "iPhone 16 Pro". A trip opened as one project
+    # mixes cameras, and the folder a photo sits in only names who handed the
+    # files over: "google photos" alone holds six models on the Hoh trip.
+    model: str | None
+
+
+def _read_exif_meta(path: str) -> ShotMeta:
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            exif = img.getexif()
+            ts = _parse_exif_timestamp(exif) if exif else None
+            model = exif.get(_EXIF_MODEL_TAG) if exif else None
+            if exif and exif.get(_EXIF_ORIENTATION_TAG) in (5, 6, 7, 8):
+                width, height = height, width
+    except Exception:
+        return ShotMeta(None, "unknown", None)
+    if isinstance(model, str):
+        model = model.strip() or None
+    else:
+        model = None
+    if width == height:
+        return ShotMeta(ts, "square", model)
+    return ShotMeta(ts, "portrait" if height > width else "landscape", model)
+
+
+def load_paths_and_meta(
+    image_dir: str,
+    subtrip: str | None = None,
+) -> tuple[list[str], list[float | None], list[str], list[str | None]]:
+    paths = _scan_image_paths(image_dir, subtrip)
     if not paths:
         raise RuntimeError(f"No images found in {image_dir}")
-    timestamps = [_read_exif_timestamp(p) for p in tqdm(paths, desc="Reading EXIF")]
+    meta = [_read_exif_meta(p) for p in tqdm(paths, desc="Reading EXIF")]
+    timestamps = [m.timestamp for m in meta]
+    orientations = [m.framing for m in meta]
+    models = [m.model for m in meta]
     print(f"Found {len(paths)} images ({sum(t is not None for t in timestamps)} with EXIF timestamps)")
-    return paths, timestamps
+    seen = sorted({m for m in models if m})
+    if len(seen) > 1:
+        print(f"Cameras: {', '.join(seen)}")
+    return paths, timestamps, orientations, models
+
+
+def _day_chunks(
+    paths: list[str], timestamps: list[float | None] | None
+) -> list[tuple[str, list[str]]]:
+    """Split photos into one chunk per shooting day, in day order.
+
+    The expensive stages checkpoint their cache after each chunk. A 9,500-photo
+    trip scores for two hours, and the cache used to be written only once the
+    whole stage finished — a crash at 90% threw all of it away. A day is the
+    natural unit: nothing clusters across a one-hour gap, let alone a night.
+    Undated photos trail as one last chunk. Input order is kept within a day.
+    """
+    days: dict[str, list[str]] = {}
+    undated: list[str] = []
+    for i, p in enumerate(paths):
+        t = timestamps[i] if timestamps is not None else None
+        if t is None:
+            undated.append(p)
+        else:
+            days.setdefault(datetime.fromtimestamp(t).date().isoformat(), []).append(p)
+    chunks = sorted(days.items())
+    if undated:
+        chunks.append(("undated", undated))
+    return chunks
+
+
+def _load_path_cache(cache_path: Path, paths: list[str], load) -> dict | None:
+    """Rows of a path-keyed cache, or None when it cannot be used incrementally.
+
+    Unusable means absent, unreadable, or — with checkpointing, which rewrites
+    the pair many times a run — a data file whose row count disagrees with its
+    sidecar, which would map rows to the wrong photos.
+
+    Extra cached paths (a whole-trip cache loaded for one city) are ignored.
+    Missing paths stay out of the result so the caller can embed just those.
+    """
+    sidecar = cache_path.with_suffix(".paths.json")
+    if not (cache_path.exists() and sidecar.exists()):
+        return None
+    try:
+        cached_paths = json.loads(sidecar.read_text())
+        rows = load(cache_path)
+    except Exception:
+        return None
+    if any(len(v) != len(cached_paths) for v in rows.values()):
+        warnings.warn(f"{cache_path.name} does not match its sidecar — recomputing")
+        return None
+    wanted = set(paths)
+    return {
+        k: {p: v[i] for i, p in enumerate(cached_paths) if p in wanted}
+        for k, v in rows.items()
+    }
+
+
+def _write_path_cache(cache_path: Path, paths: list[str], write) -> None:
+    """Write a data file and its paths sidecar, each via rename.
+
+    `write(fileobj)` writes the data. The data file is replaced first, so a
+    crash between the two renames leaves a longer data file than sidecar, which
+    _load_path_cache rejects rather than misreads.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar = cache_path.with_suffix(".paths.json")
+    tmp_data = cache_path.with_name(cache_path.name + ".tmp")
+    tmp_side = sidecar.with_name(sidecar.name + ".tmp")
+    with open(tmp_data, "wb") as f:
+        write(f)
+    tmp_side.write_text(json.dumps(paths))
+    os.replace(tmp_data, cache_path)
+    os.replace(tmp_side, sidecar)
+
+
+def _release_gpu() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -183,30 +346,6 @@ def _load_embedding_model(model_name: str = MODEL_NAME, device: str = DEVICE):
     return model, processor, 1 + num_register
 
 
-def _run_embedding_model(
-    paths: list[str],
-    device: str = DEVICE,
-    model_name: str = MODEL_NAME,
-    batch_size: int = BATCH_SIZE,
-    num_workers: int = NUM_WORKERS,
-    flip_tta: bool = False,
-) -> np.ndarray:
-    """Compute L2-normalized embeddings. No caching. Returns float32 [N, 2D]."""
-    model, processor, num_skip = _load_embedding_model(model_name, device)
-
-    embeddings = _embed_with_model(
-        paths, model, processor, num_skip,
-        device=device, batch_size=batch_size, num_workers=num_workers, flip_tta=flip_tta,
-    )
-
-    del model, processor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return embeddings
-
-
 def compute_embeddings(
     paths: list[str],
     cache_path: Path,
@@ -215,46 +354,57 @@ def compute_embeddings(
     batch_size: int = BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
     flip_tta: bool = False,
+    timestamps: list[float | None] | None = None,
+    extra_cache_paths: list[Path] | None = None,
 ) -> np.ndarray:
-    """Compute or load cached embeddings. Incremental: only new paths are processed."""
-    paths_sidecar = cache_path.with_suffix(".paths.json")
+    """Compute or load cached embeddings.
 
-    if cache_path.exists() and paths_sidecar.exists():
-        cached_paths = json.loads(paths_sidecar.read_text())
-        cached_set = set(cached_paths)
-        new_paths = [p for p in paths if p not in cached_set]
+    Incremental: only photos missing from the cache are embedded, one shooting
+    day at a time, and the cache is written after every day.
+    """
+    cached = _load_path_cache(cache_path, paths, lambda f: {"emb": np.load(str(f))})
+    done: dict[str, np.ndarray] = dict(cached["emb"]) if cached else {}
+    for extra in extra_cache_paths or []:
+        more = _load_path_cache(extra, paths, lambda f: {"emb": np.load(str(f))})
+        if more:
+            for p, v in more["emb"].items():
+                done.setdefault(p, v)
+    todo = [i for i, p in enumerate(paths) if p not in done]
 
-        if cached_set <= set(paths):
-            old_embs = np.load(str(cache_path))
-            old_idx = {p: i for i, p in enumerate(cached_paths)}
+    if not todo:
+        print(f"Loading cached embeddings ({len(paths)} paths)")
+        return np.stack([done[p] for p in paths]).astype(np.float32)
+    if done:
+        print(f"Incremental embeddings: {len(done)} cached + {len(todo)} new")
 
-            if not new_paths:
-                print(f"Loading cached embeddings ({len(paths)} paths)")
-                return np.array([old_embs[old_idx[p]] for p in paths], dtype=np.float32)
+    chunks = _day_chunks(
+        [paths[i] for i in todo],
+        [timestamps[i] for i in todo] if timestamps is not None else None,
+    )
+    model, processor, num_skip = _load_embedding_model(model_name, device)
+    try:
+        for day, chunk in chunks:
+            embs = _embed_with_model(
+                chunk, model, processor, num_skip,
+                device=device, batch_size=batch_size, num_workers=num_workers, flip_tta=flip_tta,
+                desc=f"DINOv3 embeddings {day} ({len(chunk)} images)",
+            )
+            done.update(zip(chunk, embs))
+            have = [p for p in paths if p in done]
+            _write_path_cache(
+                cache_path, have,
+                lambda f: np.save(f, np.stack([done[p] for p in have]).astype(np.float32)),
+            )
+    finally:
+        del model, processor
+        _release_gpu()
 
-            print(f"Incremental embeddings: {len(cached_paths)} cached + {len(new_paths)} new")
-            new_embs = _run_embedding_model(new_paths, device, model_name, batch_size, num_workers, flip_tta)
-            new_idx = {p: i for i, p in enumerate(new_paths)}
-            d = old_embs.shape[1]
-            result = np.empty((len(paths), d), dtype=np.float32)
-            for i, p in enumerate(paths):
-                result[i] = old_embs[old_idx[p]] if p in old_idx else new_embs[new_idx[p]]
-            np.save(str(cache_path), result)
-            paths_sidecar.write_text(json.dumps(paths))
-            print(f"Updated embeddings cache → {len(paths)} total")
-            return result
-
-    # Full recompute
-    embeddings = _run_embedding_model(paths, device, model_name, batch_size, num_workers, flip_tta)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(str(cache_path), embeddings)
-    paths_sidecar.write_text(json.dumps(paths))
     # Remove stale .hash sidecar from old cache format
     old_hash = cache_path.with_suffix(".hash")
     if old_hash.exists():
         old_hash.unlink()
-    print(f"Saved embeddings to {cache_path}  shape={embeddings.shape}")
-    return embeddings
+    print(f"Saved embeddings to {cache_path}  ({len(paths)} total, {len(chunks)} day checkpoint(s))")
+    return np.stack([done[p] for p in paths]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -341,14 +491,248 @@ def calibrate_threshold(embeddings: np.ndarray, fallback: float) -> float:
     return chosen
 
 
+def own_flags(devices: list[str], models: list[str | None] | None = None) -> list[bool]:
+    """Per photo: did Jason shoot it?
+
+    Folder first: `google photos/` and `shared/` are other people's, everything
+    else is his. An empty device name — file in the trip root, or a project
+    opened on a single camera folder — counts as his, so unidentified shots are
+    not absorbed into a guest group.
+
+    Then one rescue inside the guest folders. A handful of his own frames live
+    in `google photos/` too, filling numbering gaps in `iphone/` (7 on Hawaii,
+    15 on Vegas, 3 on Hoh) — missing frames, not duplicates. A frame there whose
+    EXIF model is one his *own* folders also carry is his. Only those models
+    qualify, so the six other cameras in that album stay guests; the folder is
+    still what decides, and the model only says which frames were misfiled.
+    """
+    models = models or [None] * len(devices)
+    by_folder = [d not in media.OTHER_PEOPLE_DEVICES for d in devices]
+    own_models = {m for m, own in zip(models, by_folder) if own and m}
+    return [own or (m in own_models if m else False)
+            for own, m in zip(by_folder, models)]
+
+
+def _split_by_photographer(
+    labels: np.ndarray,
+    own: list[bool],
+    models: list[str | None] | None = None,
+) -> np.ndarray:
+    """One cluster, one photographer.
+
+    Stage 4 refuses to *merge* across that line, but the stages before it know
+    nothing about who shot what, and on a group trip several people photograph
+    one view from nearly the same spot: close enough for the tight pass to call
+    them near-duplicates, with no merge rule involved. Hawaii came out of the
+    first own-vs-guest recluster with six clusters mixing his photos with the
+    shared album's (20 photos) — an X-T5 frame and five of a guest's iPhone 17
+    Pro among them.
+
+    Inside the album the same thing happens between guests, and there EXIF
+    model is the only handle on who held the camera: a cluster of 26 Galaxy Z
+    Fold6 and 12 Xiaomi frames over 183 s is two people at one place, not one
+    subject. So his photos split off the album's, and the album's split by
+    model. Two guests carrying the same model are indistinguishable here and
+    stay together; his own two cameras stay together, which is the whole point
+    of the cross-camera merge.
+
+    This matters because keep-best ranks one photo first and queues the rest
+    for deletion, and h0's copy of the shared album is deleted from for real.
+    Ranking across photographers throws away one person's shot in favour of
+    another's. Splitting rather than re-thresholding keeps that judgement out
+    of it: each part is still a cluster, reviewed against its own.
+    """
+    models = models or [None] * len(labels)
+    groups: dict[int, list[int]] = {}
+    for i, lab in enumerate(labels):
+        groups.setdefault(int(lab), []).append(i)
+    next_id = int(labels.max()) + 1 if len(labels) else 0
+    split = 0
+    for idxs in groups.values():
+        # His photos are one photographer whichever camera they came from;
+        # each guest model is another. None groups the model-less together.
+        who: dict[object, list[int]] = {}
+        for i in idxs:
+            who.setdefault(True if own[i] else models[i], []).append(i)
+        if len(who) < 2:
+            continue
+        # The first part keeps the original label so ids stay stable.
+        for part in sorted(who.values(), key=lambda p: -len(p))[1:]:
+            for i in part:
+                labels[i] = next_id
+            next_id += 1
+        split += 1
+    if split:
+        print(f"Split {split} cluster(s) that held more than one photographer")
+    return labels
+
+
+def _merge_reshoot_pairs(
+    embeddings: np.ndarray,
+    timestamps: list[float | None],
+    orientations: list[str],
+    labels: np.ndarray,
+    window_s: float,
+    threshold: float,
+    max_span_s: float,
+    models: list[str | None] | None = None,
+    cross_window_s: float = 0.0,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
+    own: list[bool] | None = None,
+) -> np.ndarray:
+    """Merge clusters holding one subject shot twice — rotated, or on a second camera.
+
+    Rotating the camera moves a photo further in embedding space than the
+    same-scene threshold allows, so the two framings split apart. A pair is
+    rejoined only when it is close in time, differs in framing, and the cluster
+    centroids are still within `threshold`.
+
+    Reaching for the other camera splits a subject the same way, and there the
+    framing usually does *not* change — a phone held portrait and a camera held
+    portrait — so framing alone can't be what licenses the merge. When `models`
+    names two different cameras, a same-framing pair is allowed to join inside
+    `cross_window_s` if its centroids are within the tighter `cross_threshold`.
+    Passing no `models` (or leaving `cross_window_s` at 0) keeps the old
+    framing-only behaviour.
+
+    Other people's cameras may join each other that way. Jason's photos never
+    join a guest cluster, even on a rotation: keep-best would then queue his
+    shots as extras in someone else's burst. His own two cameras of one subject
+    still merge. `own` is `own_flags`' verdict per photo; passing none skips the
+    split (unit tests, and a project with no device folders).
+
+    `threshold` is the loosest distance anywhere in the pipeline, so what a
+    merged group is allowed to span matters as much as the pairing rule. Merges
+    chain — A joins B, B joins C — and each link only has to be `window_s` from
+    the last, so capping the span at the max cluster gap let a chain walk across
+    a whole hour: on the Hoh trip that grew a 44-photo cluster of one viewpoint
+    into 74 photos spanning 33 minutes. The span is capped at `window_s`
+    instead, which is what "a re-shoot of the same subject" meant in the first
+    place.
+    """
+    groups: dict[int, list[int]] = {}
+    for i, lab in enumerate(labels):
+        groups.setdefault(int(lab), []).append(i)
+
+    cross_window_s = cross_window_s if models is not None else 0.0
+    info: dict[int, dict] = {}
+    for lab, idxs in groups.items():
+        ts = [timestamps[i] for i in idxs if timestamps[i] is not None]
+        kinds = {orientations[i] for i in idxs if orientations[i] in ("portrait", "landscape")}
+        # Without a timestamp there is no hint to merge on; without a known
+        # framing there is nothing to pair across.
+        if not ts or not kinds:
+            continue
+        centroid = embeddings[idxs].mean(axis=0)
+        centroid /= max(np.linalg.norm(centroid), 1e-8)
+        info[lab] = {
+            "idxs": idxs,
+            "t_min": min(ts),
+            "t_max": max(ts),
+            "kinds": kinds,
+            "models": {models[i] for i in idxs if models[i]} if models else set(),
+            "own": any(own[i] for i in idxs) if own is not None else None,
+            "centroid": centroid,
+        }
+
+    ordered = sorted(info, key=lambda lab: info[lab]["t_min"])
+    widest = max(window_s, cross_window_s)
+    candidates: list[tuple[float, int, int, bool]] = []
+    for pos, a in enumerate(ordered):
+        left = info[a]
+        for b in ordered[pos + 1:]:
+            right = info[b]
+            # `ordered` is sorted by t_min, so once one candidate is out of
+            # range every later one is too.
+            gap = right["t_min"] - left["t_max"]
+            if gap > widest:
+                break
+            # His photos never join a guest cluster. Other people's cameras may
+            # still join each other; his phone and camera may still join each
+            # other. The split is by folder, not model.
+            if (
+                left["own"] is not None
+                and right["own"] is not None
+                and left["own"] != right["own"]
+            ):
+                continue
+            # Two clusters count as different cameras only when both name one
+            # and the names don't overlap: an unknown model could be either.
+            cross = bool(
+                left["models"] and right["models"] and not (left["models"] & right["models"])
+            )
+            # Both re-shoot rules describe one person: turning the camera they
+            # are holding, or reaching for their second body. Inside the shared
+            # album a second camera is a second *person* — several people
+            # photographing one place, which is what built Hawaii's 38-photo
+            # Galaxy-plus-Xiaomi cluster out of two separate chains. Their own
+            # camera may still re-shoot and rotate; another model may not join
+            # it. (Two guests carrying the same model are indistinguishable
+            # here, and still merge.)
+            if cross and left["own"] is False:
+                continue
+            if gap > (cross_window_s if cross else window_s):
+                continue
+            same_framing = left["kinds"] == right["kinds"]
+            if same_framing and not cross:
+                continue
+            dist = 1.0 - float(left["centroid"] @ right["centroid"])
+            if dist <= (cross_threshold if same_framing else threshold):
+                candidates.append((dist, a, b, same_framing))
+
+    parent = {lab: lab for lab in info}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    span = {lab: (info[lab]["t_min"], info[lab]["t_max"]) for lab in info}
+    merged = 0
+    n_cross = 0
+    for _dist, a, b, same_framing in sorted(candidates):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            continue
+        lo = min(span[ra][0], span[rb][0])
+        hi = max(span[ra][1], span[rb][1])
+        # A chain of re-shoots is still one re-shoot's worth of time.
+        if max_span_s and max_span_s > 0 and hi - lo > max_span_s:
+            continue
+        parent[rb] = ra
+        span[ra] = (lo, hi)
+        merged += 1
+        n_cross += same_framing
+
+    if merged:
+        for lab in info:
+            root = find(lab)
+            if root != lab:
+                for i in info[lab]["idxs"]:
+                    labels[i] = root
+        detail = f" ({n_cross} of them same framing on a second camera)" if n_cross else ""
+        print(f"Merged {merged} re-shoot cluster pair(s) shot within {widest}s{detail}")
+    return labels
+
+
 def cluster_embeddings(
     embeddings: np.ndarray,
     timestamps: list[float | None],
+    orientations: list[str] | None = None,
     tight: float = TIGHT_THRESHOLD,
     loose: float = LOOSE_THRESHOLD,
     burst_window_s: float = BURST_WINDOW_S,
+    bracket_window_s: float = BRACKET_WINDOW_S,
+    bracket_threshold: float = BRACKET_THRESHOLD,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
+    orient_window_s: float = ORIENT_MERGE_WINDOW_S,
+    orient_threshold: float = ORIENT_MERGE_THRESHOLD,
     auto_loose: bool = False,
+    models: list[str | None] | None = None,
+    cross_window_s: float = CROSS_DEVICE_WINDOW_S,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
+    own: list[bool] | None = None,
 ) -> dict[int, list[int]]:
     """Two-stage clustering: burst pre-group, tight dedup inside parent groups."""
     n = len(embeddings)
@@ -371,21 +755,37 @@ def cluster_embeddings(
         sub_embs = embeddings[members]
         sub_labels = _agglomerative(sub_embs, tight)
 
-        # Fuse timestamp bursts: images within burst_window_s sharing parent get merged
+        # Fuse timestamp bursts: images within burst_window_s sharing parent
+        # get merged with no embedding check — that's a held shutter. A darker
+        # reshoot a few seconds later sits past tight and past that window, so
+        # a second, distance-gated pass covers it. Time-only at 6–12s chains
+        # a walk; the ceiling does not.
         if any(timestamps[i] is not None for i in members):
             ts = np.array([timestamps[i] if timestamps[i] is not None else np.nan for i in members])
             order = np.argsort(np.where(np.isnan(ts), np.inf, ts))
             current = None
             prev_t = None
+            prev_pos = None
             for pos in order:
                 t = ts[pos]
                 if np.isnan(t):
                     break
-                if current is None or (t - prev_t) > burst_window_s:
+                if current is None:
                     current = sub_labels[pos]
                 else:
-                    sub_labels[sub_labels == sub_labels[pos]] = current
+                    gap = float(t - prev_t)
+                    if gap <= burst_window_s:
+                        sub_labels[sub_labels == sub_labels[pos]] = current
+                    elif (
+                        bracket_window_s > 0
+                        and gap <= bracket_window_s
+                        and (1.0 - float(sub_embs[pos] @ sub_embs[prev_pos])) <= bracket_threshold
+                    ):
+                        sub_labels[sub_labels == sub_labels[pos]] = current
+                    else:
+                        current = sub_labels[pos]
                 prev_t = t
+                prev_pos = pos
 
         for sub in np.unique(sub_labels):
             idxs = members[sub_labels == sub]
@@ -419,6 +819,32 @@ def cluster_embeddings(
                 for i in new_split:
                     final_labels[i] = next_id
                 next_id += 1
+
+    # Stage 3b: a cluster holds one photographer. Stage 4 refuses to merge
+    # across that line; the stages above it do not know about folders or
+    # cameras at all, so on a group trip they still land someone else's frame
+    # in his cluster, or two guests' in one, as near-duplicates.
+    if own is not None:
+        final_labels = _split_by_photographer(final_labels, own, models)
+
+    # Stage 4: rejoin the same subject shot twice — rotated, or on the other camera
+    if orientations is not None and orient_window_s > 0:
+        widest = max(orient_window_s, cross_window_s if models else 0.0)
+        final_labels = _merge_reshoot_pairs(
+            embeddings,
+            timestamps,
+            orientations,
+            final_labels,
+            window_s=orient_window_s,
+            threshold=orient_threshold,
+            # Never wider than the gap stage 3 just enforced: a merge that
+            # re-joined two clusters it had split would undo that split.
+            max_span_s=(min(widest, max_gap_s) if max_gap_s and max_gap_s > 0 else widest),
+            models=models,
+            cross_window_s=cross_window_s,
+            cross_threshold=cross_threshold,
+            own=own,
+        )
 
     clusters: dict[int, list[int]] = {}
     for i, lab in enumerate(final_labels):
@@ -529,24 +955,67 @@ def _compute_scores_from_components(components: dict) -> list[float]:
     return combined.tolist()
 
 
-def _run_score_model(paths: list[str], device: str = DEVICE) -> dict[str, np.ndarray]:
-    """Batch-score images. Returns dict of raw component arrays."""
-    import pyiqa
-    import torchvision.transforms.functional as TF
+def _emit_thumbs(thumb_dir: Path, path: str, img) -> None:
+    """Write the webapp's grid and compare thumbnails for one scored photo.
 
-    metric_names = ["musiq", "nima", "clipiqa+", "laion_aes"]
+    Uses thumbs.py so the cache key and the resize/quality choices are the ones
+    the server will look for; a mismatch here would not fail anything, it would
+    just silently stop being a cache hit.
+
+    _load_img has already applied its own >4K downscale, which is well above
+    the widest thumbnail, and skipped exif_transpose because scoring does not
+    care about orientation. thumbs.encode applies it, so a portrait frame is
+    not cached sideways.
+    """
+    if img is None:
+        return
+    try:
+        src = Path(path)
+        st = src.stat()
+        for w in (thumbs.GRID_MAX_WIDTH, thumbs.COMPARE_WIDTH):
+            dest = thumbs.cache_file(thumb_dir, src, w, st=st)
+            if not dest.exists():
+                thumbs.write(dest, thumbs.encode(img, w))
+    except Exception as exc:
+        warnings.warn(f"Thumbnail failed {path}: {exc}")  # the webapp renders it on demand
+
+
+SCORE_EXTRA_KEYS = ["sharpness", "exposure_penalty", "face_bonus"]
+
+
+def _load_score_models(device: str = DEVICE) -> tuple[dict, object]:
+    """The IQA metrics that loaded, and the face detector (or None)."""
+    import pyiqa
+
     metrics: dict[str, object] = {}
-    for name in metric_names:
+    for name in ["musiq", "nima", "clipiqa+", "laion_aes"]:
         try:
             metrics[name] = pyiqa.create_metric(name, device=device)
         except Exception as exc:
             warnings.warn(f"Metric {name} unavailable ({exc}) — skipping")
+    return metrics, _load_face_detector()
 
-    detector = _load_face_detector()
+
+def _score_with_models(
+    paths: list[str],
+    metrics: dict,
+    detector,
+    device: str = DEVICE,
+    thumb_dir: Path | None = None,
+    desc: str | None = None,
+) -> dict[str, np.ndarray]:
+    """Batch-score images with loaded models. Returns dict of raw component arrays.
+
+    Writes the webapp's thumbnails as a side effect when thumb_dir is given:
+    scoring already decodes every photo off the NAS, which is the expensive
+    part, so the derivatives cost 147ms per photo on top of the 717ms already
+    being spent. Rendering them later from the webapp instead costs ~1310ms
+    per photo, and costs it while someone is waiting to look at them.
+    """
+    import torchvision.transforms.functional as TF
+
     n = len(paths)
-    raw: dict[str, list[float]] = {
-        k: [0.0] * n for k in list(metrics.keys()) + ["sharpness", "exposure_penalty", "face_bonus"]
-    }
+    raw: dict[str, list[float]] = {k: [0.0] * n for k in list(metrics.keys()) + SCORE_EXTRA_KEYS}
 
     def _load_img(p: str):
         try:
@@ -561,9 +1030,13 @@ def _run_score_model(paths: list[str], device: str = DEVICE) -> dict[str, np.nda
             warnings.warn(f"Open failed {p}: {exc}")
             return None
 
-    for batch_start in tqdm(range(0, n, SCORE_BATCH_SIZE), desc=f"Scoring images ({n} total)"):
+    for batch_start in tqdm(range(0, n, SCORE_BATCH_SIZE), desc=desc or f"Scoring images ({n} total)"):
         batch_end = min(batch_start + SCORE_BATCH_SIZE, n)
         imgs = [_load_img(paths[i]) for i in range(batch_start, batch_end)]
+
+        if thumb_dir is not None:
+            for i, img in zip(range(batch_start, batch_end), imgs):
+                _emit_thumbs(thumb_dir, paths[i], img)
 
         # Neural metrics: resize to SCORE_RESIZE for uniform batching
         tensors = [
@@ -606,10 +1079,6 @@ def _run_score_model(paths: list[str], device: str = DEVICE) -> dict[str, np.nda
             raw["exposure_penalty"][batch_start + i] = _exposure_penalty(img)
             raw["face_bonus"][batch_start + i] = _face_bonus(img, detector)
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     return {k: np.asarray(v, dtype=np.float32) for k, v in raw.items()}
 
 
@@ -617,58 +1086,74 @@ def score_images(
     paths: list[str],
     cache_path: Path,
     device: str = DEVICE,
+    thumb_dir: Path | None = None,
+    timestamps: list[float | None] | None = None,
+    extra_cache_paths: list[Path] | None = None,
 ) -> tuple[list[float], dict]:
-    """Compute or load cached scores. Incremental: only new paths are scored.
+    """Compute or load cached scores.
 
-    Cache stores raw components; scores recomputed on load so SCORE_WEIGHTS changes
+    Incremental: only photos missing from the cache are scored, one shooting
+    day at a time, and the cache is written after every day. The cache stores
+    raw components; scores are recomputed on load so SCORE_WEIGHTS changes
     invalidate nothing.
     """
-    paths_sidecar = cache_path.with_suffix(".paths.json")
+    def _load(f):
+        data = np.load(str(f))
+        return {k: data[k] for k in data.files}
 
-    if cache_path.exists() and paths_sidecar.exists():
-        cached_paths = json.loads(paths_sidecar.read_text())
-        cached_set = set(cached_paths)
-        new_paths = [p for p in paths if p not in cached_set]
+    cached = _load_path_cache(cache_path, paths, _load)
+    for extra in extra_cache_paths or []:
+        more = _load_path_cache(extra, paths, _load)
+        if not more:
+            continue
+        if cached is None:
+            cached = more
+        else:
+            for k, mapping in more.items():
+                dest = cached.setdefault(k, {})
+                for p, v in mapping.items():
+                    dest.setdefault(p, v)
+    have_all = cached is not None and all(p in next(iter(cached.values()), {}) for p in paths)
+    if have_all:
+        print(f"Loading cached scores ({len(paths)} paths)")
+        components = {k: np.array([v[p] for p in paths], dtype=np.float32) for k, v in cached.items()}
+        return _compute_scores_from_components(components), components
 
-        if cached_set <= set(paths):
-            data = np.load(str(cache_path))
-            old_components = {k: data[k] for k in data.files}
-            old_idx = {p: i for i, p in enumerate(cached_paths)}
+    metrics, detector = _load_score_models(device)
+    keys = list(metrics.keys()) + SCORE_EXTRA_KEYS
+    if cached is not None and set(cached) != set(keys):
+        cached = None  # metric added/removed → full recompute
+    done: dict[str, dict[str, float]] = cached or {k: {} for k in keys}
+    todo = [i for i, p in enumerate(paths) if p not in done[keys[0]]]
+    if cached:
+        print(f"Incremental scoring: {len(paths) - len(todo)} cached + {len(todo)} new")
 
-            if not new_paths:
-                print(f"Loading cached scores ({len(paths)} paths)")
-                components = {
-                    k: np.array([v[old_idx[p]] for p in paths], dtype=np.float32)
-                    for k, v in old_components.items()
-                }
-                return _compute_scores_from_components(components), components
+    chunks = _day_chunks(
+        [paths[i] for i in todo],
+        [timestamps[i] for i in todo] if timestamps is not None else None,
+    )
+    try:
+        for day, chunk in chunks:
+            new = _score_with_models(
+                chunk, metrics, detector, device, thumb_dir,
+                desc=f"Scoring {day} ({len(chunk)} images)",
+            )
+            for k in keys:
+                done[k].update(zip(chunk, new[k]))
+            have = [p for p in paths if p in done[keys[0]]]
+            _write_path_cache(
+                cache_path, have,
+                lambda f: np.savez(f, **{
+                    k: np.array([done[k][p] for p in have], dtype=np.float32) for k in keys
+                }),
+            )
+    finally:
+        del metrics, detector
+        _release_gpu()
 
-            print(f"Incremental scoring: {len(cached_paths)} cached + {len(new_paths)} new")
-            new_components = _run_score_model(new_paths, device)
-
-            if set(new_components.keys()) == set(old_components.keys()):
-                new_idx = {p: i for i, p in enumerate(new_paths)}
-                merged = {}
-                for k in old_components:
-                    arr = np.empty(len(paths), dtype=np.float32)
-                    for i, p in enumerate(paths):
-                        arr[i] = old_components[k][old_idx[p]] if p in old_idx else new_components[k][new_idx[p]]
-                    merged[k] = arr
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez(str(cache_path), **merged)
-                paths_sidecar.write_text(json.dumps(paths))
-                print(f"Updated scores cache → {len(paths)} total")
-                return _compute_scores_from_components(merged), merged
-            # Keys differ (metric added/removed) → fall through to full recompute
-
-    # Full recompute (also handles legacy cache without paths sidecar)
-    components = _run_score_model(paths, device)
-    scores = _compute_scores_from_components(components)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(str(cache_path), **components)
-    paths_sidecar.write_text(json.dumps(paths))
-    print(f"Saved scores to {cache_path}")
-    return scores, components
+    print(f"Saved scores to {cache_path}  ({len(paths)} total, {len(chunks)} day checkpoint(s))")
+    components = {k: np.array([done[k][p] for p in paths], dtype=np.float32) for k in keys}
+    return _compute_scores_from_components(components), components
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +1167,8 @@ def rank_and_save(
     output_dir: Path,
     timestamps: list[float | None] | None = None,
     components: dict | None = None,
+    motions: dict[str, str] | None = None,
+    models: list[str | None] | None = None,
 ) -> dict:
     results_clusters = []
     for cid in sorted(clusters.keys()):
@@ -706,6 +1193,12 @@ def rank_and_save(
             }
             if timestamps is not None and timestamps[idx] is not None:
                 entry["exif_timestamp"] = timestamps[idx]
+            # The Live Photo motion file, so the review views can badge the
+            # still and play it. Absent for every photo without one.
+            if motions and paths[idx] in motions:
+                entry["motion"] = motions[paths[idx]]
+            if models and models[idx]:
+                entry["model"] = models[idx]
             if components is not None:
                 entry["score_components"] = {
                     k: round(float(v[idx]), 4)
@@ -714,14 +1207,29 @@ def rank_and_save(
                 }
             image_entries.append(entry)
         best_score = scores[indices[ranked[0]]]
-        results_clusters.append({
+        cluster_ts = None
+        if timestamps is not None:
+            shot_at = [timestamps[i] for i in indices if timestamps[i] is not None]
+            cluster_ts = min(shot_at) if shot_at else None
+        entry_cluster: dict = {
             "cluster_id": int(cid),
             "cluster_score": round(float(best_score), 4),
             "best_image": paths[indices[ranked[0]]],
             "images": image_entries,
-        })
+        }
+        if cluster_ts is not None:
+            entry_cluster["cluster_timestamp"] = cluster_ts
+        results_clusters.append(entry_cluster)
 
-    results_clusters.sort(key=lambda c: c["cluster_score"], reverse=True)
+    # Chronological by first shot. Clusters with no EXIF have no place on the
+    # timeline, so they trail the rest ordered by score.
+    results_clusters.sort(
+        key=lambda c: (
+            c.get("cluster_timestamp") is None,
+            c.get("cluster_timestamp") or 0.0,
+            -c["cluster_score"],
+        )
+    )
 
     results = {"schema_version": 1, "clusters": results_clusters}
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -734,25 +1242,35 @@ def rank_and_save(
 # ---------------------------------------------------------------------------
 # Step 5: Video highlights (clipfarm suggest_clips over DINOv3 frame embeddings)
 # ---------------------------------------------------------------------------
-def _scan_video_paths(image_dir: str) -> list[str]:
+def _scan_video_paths(image_dir: str, subtrip: str | None = None) -> list[str]:
     root = Path(image_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Image directory not found: {root}")
+    extra = None
+    if subtrip:
+        from projects import unfiled_paths_for_subtrip
+        extra = unfiled_paths_for_subtrip(root, subtrip)
     root_resolved = root.resolve()
     paths = []
-    for p in root.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTENSIONS:
-            continue
-        rp = p.resolve()
-        # Skip <root>/clips/ — user-exported cuts (webapp /api/clips/export),
-        # not source footage. Only the top-level clips dir; a nested sub/clips/
-        # is treated as real footage.
-        try:
-            if rp.relative_to(root_resolved).parts[:1] == ("clips",):
+    for dirpath, names in media.walk_media(root, subtrip, extra_paths=extra):
+        # A Live Photo's motion file belongs to its still, not to video review.
+        motion = media.motion_names(dirpath, names)
+        for name in names:
+            if not media.is_video(name) or name in motion:
                 continue
-        except ValueError:
-            pass
-        paths.append(str(rp))
+            p = Path(dirpath, name)
+            if not p.is_file():
+                continue
+            rp = p.resolve()
+            # Skip <root>/clips/ — user-exported cuts (webapp /api/clips/export),
+            # not source footage. Only the top-level clips dir; a nested sub/clips/
+            # is treated as real footage.
+            try:
+                if rp.relative_to(root_resolved).parts[:1] == ("clips",):
+                    continue
+            except ValueError:
+                pass
+            paths.append(str(rp))
     return sorted(paths)
 
 
@@ -794,7 +1312,8 @@ def _make_video_frame_embedder(
     return embed_frames, release
 
 
-def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = False) -> None:
+def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = False,
+                             subtrip: str | None = None) -> None:
     """Compute suggested highlight clips for each video under image_dir.
 
     Writes output_dir/video_highlights.json:
@@ -806,7 +1325,7 @@ def compute_video_highlights(image_dir: str, output_dir: Path, force: bool = Fal
     rewritten atomically after each video so an interrupted run keeps progress.
     Requires clipfarm; if not installed the step is skipped.
     """
-    videos = _scan_video_paths(image_dir)
+    videos = _scan_video_paths(image_dir, subtrip)
 
     try:
         from clipfarm.lib import suggest_clips
@@ -897,36 +1416,70 @@ def run_pipeline(
     auto_loose: bool = False,
     flip_tta: bool = False,
     max_gap_s: float = MAX_CLUSTER_GAP_S,
-    video_highlights: bool = True,
+    orient_window_s: float = ORIENT_MERGE_WINDOW_S,
+    orient_threshold: float = ORIENT_MERGE_THRESHOLD,
+    cross_window_s: float = CROSS_DEVICE_WINDOW_S,
+    cross_threshold: float = CROSS_DEVICE_THRESHOLD,
+    video_highlights: bool = False,
     force_video_highlights: bool = False,
+    subtrip: str | None = None,
 ) -> dict:
     out = Path(output_dir)
     emb_cache = out / "embeddings_dinov3_mpcls_tta.npy"
     score_cache = out / "scores_ensemble.npz"
 
-    paths, timestamps = load_paths_and_timestamps(image_dir)
+    extra_emb: list[Path] = []
+    extra_score: list[Path] = []
+    if subtrip:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
+        from projects import project_output_dir, write_project_meta
+        parent = project_output_dir(Path(image_dir))
+        extra_emb = [parent / "embeddings_dinov3_mpcls_tta.npy"]
+        extra_score = [parent / "scores_ensemble.npz"]
+        write_project_meta(out, Path(image_dir), subtrip)
+
+    paths, timestamps, orientations, models = load_paths_and_meta(image_dir, subtrip)
 
     embeddings = compute_embeddings(
         paths,
         cache_path=emb_cache,
         batch_size=batch_size,
         flip_tta=flip_tta,
+        timestamps=timestamps,
+        extra_cache_paths=extra_emb or None,
     )
 
     clusters = cluster_embeddings(
         embeddings,
         timestamps,
+        orientations,
         tight=tight,
         loose=loose,
         max_gap_s=max_gap_s,
+        orient_window_s=orient_window_s,
+        orient_threshold=orient_threshold,
         auto_loose=auto_loose,
+        models=models,
+        cross_window_s=cross_window_s,
+        cross_threshold=cross_threshold,
+        own=own_flags([media.device_of(p, image_dir) for p in paths], models),
     )
 
-    scores, components = score_images(paths, cache_path=score_cache)
-    results = rank_and_save(paths, clusters, scores, embeddings, out, timestamps=timestamps, components=components)
+    scores, components = score_images(
+        paths, cache_path=score_cache, thumb_dir=out, timestamps=timestamps,
+        extra_cache_paths=extra_score or None,
+    )
+    motions = media.motion_map(paths)
+    if motions:
+        print(f"Paired {len(motions)} Live Photo motion file(s) with their stills")
+    results = rank_and_save(
+        paths, clusters, scores, embeddings, out,
+        timestamps=timestamps, components=components, motions=motions, models=models,
+    )
 
     if video_highlights:
-        compute_video_highlights(image_dir, out, force=force_video_highlights)
+        compute_video_highlights(image_dir, out, force=force_video_highlights,
+                                 subtrip=subtrip)
 
     return results
 
@@ -950,17 +1503,40 @@ def main():
     parser.add_argument("--no-flip-tta", action="store_true")
     parser.add_argument("--max-gap-s", type=float, default=MAX_CLUSTER_GAP_S,
                         help="Max EXIF seconds between images in same cluster (0 to disable)")
+    parser.add_argument("--orient-window-s", type=float, default=ORIENT_MERGE_WINDOW_S,
+                        help="Max EXIF seconds apart to merge a portrait/landscape "
+                             "re-shoot of the same subject (0 to disable)")
+    parser.add_argument("--orient-threshold", type=float, default=ORIENT_MERGE_THRESHOLD,
+                        help="Centroid cosine-dist ceiling for that merge")
+    parser.add_argument("--cross-window-s", type=float, default=CROSS_DEVICE_WINDOW_S,
+                        help="Max EXIF seconds apart to merge the same subject shot on "
+                             "two different cameras (0 to disable)")
+    parser.add_argument("--cross-threshold", type=float, default=CROSS_DEVICE_THRESHOLD,
+                        help="Centroid cosine-dist ceiling for a same-framing "
+                             "cross-camera merge")
+    # Off by default since 2026-09-10. The clipfarm 2D clip-suggestion step is
+    # the most expensive thing in the pipeline per unit of value: it decodes and
+    # DINOv3-embeds frames across every video in the folder, and its output has
+    # been accumulating a `video_highlights_cache` per project for suggestions
+    # nobody is acting on. `--no-video-highlights` is kept because scripts and
+    # muscle memory still pass it, and it still means what it says.
+    parser.add_argument("--video-highlights", action="store_true",
+                        help="Run the clipfarm video-highlights step (off by default)")
     parser.add_argument("--no-video-highlights", action="store_true",
-                        help="Skip the clipfarm video-highlights step")
+                        help="Skip the clipfarm video-highlights step (the default; "
+                             "kept so existing invocations stay valid)")
+    parser.add_argument("--subtrip", default=None,
+                        help="Numbered city folder (01_Hakodate) to scan under "
+                             "each camera, instead of the whole trip")
     parser.add_argument("--force-video-highlights", action="store_true",
-                        help="Recompute video highlights even for unchanged videos")
+                        help="Recompute video highlights even for unchanged videos "
+                             "(implies --video-highlights)")
     args = parser.parse_args()
 
     if args.output_dir is None:
-        import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp"))
         from projects import project_output_dir
-        args.output_dir = str(project_output_dir(Path(args.image_dir)))
+        args.output_dir = str(project_output_dir(Path(args.image_dir), args.subtrip))
         print(f"Output dir: {args.output_dir}")
 
     import random
@@ -976,8 +1552,14 @@ def main():
         auto_loose=args.auto_loose,
         flip_tta=not args.no_flip_tta,
         max_gap_s=args.max_gap_s,
-        video_highlights=not args.no_video_highlights,
+        orient_window_s=args.orient_window_s,
+        orient_threshold=args.orient_threshold,
+        cross_window_s=args.cross_window_s,
+        cross_threshold=args.cross_threshold,
+        video_highlights=((args.video_highlights or args.force_video_highlights)
+                          and not args.no_video_highlights),
         force_video_highlights=args.force_video_highlights,
+        subtrip=args.subtrip,
     )
     print("Pipeline complete")
 

@@ -1,36 +1,40 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GalleryPhoto, VideoHighlightsMap } from "../types";
+import type { GalleryPhoto, GridStatus, VideoHighlightsMap, VideoStatuses } from "../types";
+import { deviceOf, devicesIn } from "../device";
+import { TimelineDay } from "./TimelineDay";
+import { TimelineSidebar } from "./TimelineSidebar";
+import {
+  THUMB_W,
+  dateOf,
+  effectiveStatus,
+  matchesFilter,
+  type StatusFilter,
+  type VideoItem,
+} from "../timeline";
 
 interface Props {
   onError: (msg: string) => void;
   videos?: string[];
+  videoStatuses?: VideoStatuses;
   videoShotTimes?: Record<string, string | null>;
   highlights?: VideoHighlightsMap;
+  onVideosChanged?: () => void | Promise<void>;
 }
 
-type StatusFilter = "all" | "keep";
-
-// Status is conveyed by border colour alone, so tiles carry no text overlay and
-// can run large.
-const TILE_MIN_PX = 320;
-
-interface VideoItem {
-  path: string;
-  shot_at: string | null;
-}
-
-function effectiveStatus(photo: GalleryPhoto, overrides: Record<string, GalleryPhoto["status"]>): GalleryPhoto["status"] {
-  return overrides[photo.path] ?? photo.status;
-}
-
-function dateOf(shot_at: string | null): string {
-  if (!shot_at) return "Unknown";
-  return shot_at.slice(0, 10);
-}
-
-export function TimelineView({ onError, videos = [], videoShotTimes = {}, highlights = {} }: Props) {
+export function TimelineView({
+  onError,
+  videos = [],
+  videoStatuses = {},
+  videoShotTimes = {},
+  highlights = {},
+  onVideosChanged,
+}: Props) {
   const [photos, setPhotos] = useState<GalleryPhoto[]>([]);
-  const [overrides, setOverrides] = useState<Record<string, GalleryPhoto["status"]>>({});
+  // The project folder, so a trip opened as one project can say which camera
+  // folder each shot came from.
+  const [folder, setFolder] = useState<string | null>(null);
+  const [device, setDevice] = useState<string>("all");
+  const [overrides, setOverrides] = useState<Record<string, GridStatus>>({});
   const [selectedDate, setSelectedDate] = useState<string>("all");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -42,6 +46,7 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
       if (!res.ok) throw new Error(`Gallery fetch failed: ${res.status}`);
       const data = await res.json();
       setPhotos(data.photos ?? []);
+      setFolder(data.folder ?? null);
       setOverrides({});
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -52,18 +57,40 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
 
   useEffect(() => { fetchGallery(); }, [fetchGallery]);
 
-  // Preload next few photos when selectedDate changes
+  // Preload next few photos when the visible slice changes
   useEffect(() => {
-    const visible = photos.filter((p) => selectedDate === "all" || dateOf(p.shot_at) === selectedDate);
+    const visible = photos.filter(
+      (p) => (selectedDate === "all" || dateOf(p.shot_at) === selectedDate) && shown(p),
+    );
     for (const ph of visible.slice(0, 6)) {
       const el = new Image();
-      el.src = `/api/image?path=${encodeURIComponent(ph.path)}&w=600`;
+      el.src = `/api/image?path=${encodeURIComponent(ph.path)}&w=${THUMB_W}`;
     }
-  }, [selectedDate, photos]);
+    // `overrides` deliberately omitted: toggling a tile shouldn't refire preloads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, photos, filter]);
 
   const videoItems = useMemo<VideoItem[]>(
-    () => videos.map((p) => ({ path: p, shot_at: videoShotTimes[p] ?? null })),
-    [videos, videoShotTimes],
+    () => videos.map((p) => ({
+      path: p,
+      shot_at: videoShotTimes[p] ?? null,
+      status: videoStatuses[p] ?? "undecided",
+    })),
+    [videos, videoShotTimes, videoStatuses],
+  );
+
+  const devices = useMemo(
+    () => devicesIn([...photos.map((p) => p.path), ...videoItems.map((v) => v.path)], folder),
+    [photos, videoItems, folder],
+  );
+
+  // One predicate for every count and grid: a tile shows when its decision
+  // passes the keep/delete filter and it came from the chosen device.
+  const shown = useCallback(
+    (item: { path: string; status: GridStatus }) =>
+      matchesFilter(effectiveStatus(item, overrides), filter) &&
+      (device === "all" || deviceOf(item.path, folder) === device),
+    [overrides, filter, device, folder],
   );
 
   const dates = useMemo(() => {
@@ -101,56 +128,59 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
   const countByDate = useMemo(() => {
     const map: Record<string, number> = {};
     for (const [d, ps] of Object.entries(photosByDate)) {
-      map[d] = ps.filter((p) => {
-        const s = effectiveStatus(p, overrides);
-        return filter === "all" || s !== "delete";
-      }).length;
+      map[d] = ps.filter(shown).length;
     }
     for (const [d, vs] of Object.entries(videosByDate)) {
-      map[d] = (map[d] ?? 0) + vs.length;
+      map[d] = (map[d] ?? 0) + vs.filter(shown).length;
     }
     return map;
-  }, [photosByDate, videosByDate, overrides, filter]);
+  }, [photosByDate, videosByDate, shown]);
 
-  const toggle = (path: string) => {
+  const totalPhotoCount = useMemo(
+    () => photos.filter(shown).length,
+    [photos, shown],
+  );
+
+  // Under a narrow filter most days can be empty; don't list them.
+  const visibleDates = useMemo(
+    () =>
+      filter === "all" && device === "all"
+        ? dates
+        : dates.filter((d) => (countByDate[d] ?? 0) > 0),
+    [dates, countByDate, filter, device],
+  );
+
+  // Stable identity, or the memoised tiles re-render on every parent render.
+  const toggle = useCallback((path: string, current: GridStatus) => {
     setOverrides((prev) => {
-      const current = prev[path] ?? photos.find((p) => p.path === path)?.status ?? "undecided";
-      const next = current === "delete" ? "keep" : "delete";
-      return { ...prev, [path]: next };
+      const now = prev[path] ?? current;
+      return { ...prev, [path]: now === "delete" ? "keep" : "delete" };
     });
-  };
+  }, []);
 
   const confirmDay = async (date: string) => {
     setConfirming(date);
     try {
-      const dayPhotos = photosByDate[date] ?? [];
-      const clusterIds = new Set(dayPhotos.map((p) => p.cluster_id));
-      const deletePaths: string[] = [];
-      const singletonDecisions: { cluster_id: number; kept: string[]; deleted: string[] }[] = [];
-
-      for (const cid of clusterIds) {
-        const clusterPhotos = photos.filter((p) => p.cluster_id === cid);
-        const kept: string[] = [];
-        const deleted: string[] = [];
-        for (const ph of clusterPhotos) {
-          const s = effectiveStatus(ph, overrides);
-          if (s === "delete") {
-            deleted.push(ph.path);
-            deletePaths.push(ph.path);
-          } else {
-            kept.push(ph.path);
-          }
-        }
-        singletonDecisions.push({ cluster_id: cid, kept, deleted });
-      }
+      // Decisions are per photo, so confirming a day decides exactly that day's
+      // items — no need to drag in the rest of any cluster that straddles it.
+      // Videos are decided the same way, which is what puts a colour on their
+      // tiles here and drops them out of the video reviewer's queue.
+      const dayItems = [...(photosByDate[date] ?? []), ...(videosByDate[date] ?? [])];
+      const deletePaths = dayItems
+        .filter((p) => effectiveStatus(p, overrides) === "delete")
+        .map((p) => p.path);
 
       const res = await fetch("/api/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_paths: deletePaths, singleton_decisions: singletonDecisions }),
+        body: JSON.stringify({
+          delete_paths: deletePaths,
+          decided_paths: dayItems.map((p) => p.path),
+        }),
       });
       if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
       await fetchGallery();
+      await onVideosChanged?.();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -158,147 +188,61 @@ export function TimelineView({ onError, videos = [], videoShotTimes = {}, highli
     }
   };
 
-  const renderPhotoGrid = (gridPhotos: GalleryPhoto[]) => {
-    const visible = filter === "keep"
-      ? gridPhotos.filter((p) => effectiveStatus(p, overrides) !== "delete")
-      : gridPhotos;
-    if (visible.length === 0) return <p className="text-sm text-gray-400 py-4">No photos.</p>;
-    return (
-      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
-        {visible.map((ph) => {
-          const status = effectiveStatus(ph, overrides);
-          const borderClass = status === "keep" ? "border-green-400" : status === "delete" ? "border-red-400" : "border-gray-300";
-          return (
-            <div
-              key={ph.path}
-              className={`relative cursor-pointer rounded overflow-hidden border-4 transition-colors ${borderClass}`}
-              onClick={() => toggle(ph.path)}
-              title={`${ph.path.split("/").pop()} — ${status}`}
-            >
-              <img
-                src={`/api/image?path=${encodeURIComponent(ph.path)}&w=600`}
-                alt=""
-                className="w-full aspect-square object-cover bg-gray-100"
-                loading="lazy"
-              />
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  const renderVideoGrid = (dayVideos: VideoItem[]) => {
-    if (dayVideos.length === 0) return null;
-    return (
-      <div className="grid gap-2 mt-2" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_PX}px, 1fr))` }}>
-        {dayVideos.map((v) => {
-          const clipCount = highlights[v.path]?.clips.length ?? 0;
-          return (
-            <div key={v.path} className="relative rounded overflow-hidden border-4 border-blue-300 bg-gray-900" title={v.path.split("/").pop()}>
-              <video
-                src={`/api/video?path=${encodeURIComponent(v.path)}`}
-                className="w-full aspect-square object-cover"
-                preload="metadata"
-                muted
-              />
-              {clipCount > 0 && (
-                <span className="absolute top-1 right-1 bg-black/60 text-amber-300 text-xs rounded px-1">
-                  ✨ {clipCount}
-                </span>
-              )}
-              <span className="absolute bottom-0 left-0 right-0 bg-blue-500 text-white text-xs text-center py-0.5 opacity-90 truncate px-1">
-                ▶ {v.path.split("/").pop()}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  const renderDaySection = (date: string) => {
-    const dayPhotos = photosByDate[date] ?? [];
-    const dayVideos = videosByDate[date] ?? [];
-    const isConfirming = confirming === date;
-    const photoCount = dayPhotos.length;
-    const videoCount = dayVideos.length;
-    return (
-      <div key={date}>
-        <div className="flex items-center gap-3 mb-2 mt-4 first:mt-0">
-          <h2 className="text-sm font-semibold text-gray-700">{date}</h2>
-          {photoCount > 0 && <span className="text-xs text-gray-400">{photoCount} photo{photoCount !== 1 ? "s" : ""}</span>}
-          {videoCount > 0 && <span className="text-xs text-blue-400">{videoCount} video{videoCount !== 1 ? "s" : ""}</span>}
-          {photoCount > 0 && (
-            <button
-              onClick={() => confirmDay(date)}
-              disabled={isConfirming}
-              className="ml-auto px-3 py-1 text-xs font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-            >
-              {isConfirming ? "…" : "✓ Confirm Day"}
-            </button>
-          )}
-        </div>
-        {renderPhotoGrid(dayPhotos)}
-        {renderVideoGrid(dayVideos)}
-      </div>
-    );
-  };
+  const statusOf = useCallback(
+    (item: { path: string; status: GridStatus }) => effectiveStatus(item, overrides),
+    [overrides],
+  );
 
   if (loading) return <p className="text-sm text-gray-400 p-4">Loading…</p>;
   if (photos.length === 0 && videoItems.length === 0) return <p className="text-sm text-gray-400 p-4">No photos. Run pipeline first.</p>;
 
   return (
     <div className="flex" style={{ height: "calc(100vh - 2.25rem)" }}>
-      {/* Sidebar */}
-      <div className="w-44 shrink-0 border-r border-gray-200 overflow-y-auto bg-white">
-        {/* Filter toggle */}
-        <div className="px-2 pt-2 pb-1 border-b border-gray-100">
-          <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
-            <button
-              onClick={() => setFilter("all")}
-              className={`flex-1 py-1 transition-colors ${filter === "all" ? "bg-blue-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setFilter("keep")}
-              className={`flex-1 py-1 transition-colors ${filter === "keep" ? "bg-green-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
-            >
-              Keep only
-            </button>
-          </div>
-        </div>
+      <TimelineSidebar
+        filter={filter}
+        onFilter={setFilter}
+        devices={devices}
+        device={device}
+        onDevice={setDevice}
+        selectedDate={selectedDate}
+        onDate={setSelectedDate}
+        totalPhotoCount={totalPhotoCount}
+        visibleDates={visibleDates}
+        countByDate={countByDate}
+      />
 
-        <button
-          onClick={() => setSelectedDate("all")}
-          className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-            selectedDate === "all" ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-50"
-          }`}
-        >
-          All photos
-          <span className="ml-1 text-xs text-gray-400">({photos.length})</span>
-        </button>
-
-        {dates.map((d) => (
-          <button
-            key={d}
-            onClick={() => setSelectedDate(d)}
-            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
-              selectedDate === d ? "bg-blue-50 text-blue-700 font-medium" : "text-gray-500 hover:bg-gray-50"
-            }`}
-          >
-            {d}
-            <span className="ml-1 text-gray-400">({countByDate[d] ?? 0})</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Main */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {selectedDate === "all"
-          ? dates.map((d) => renderDaySection(d))
-          : renderDaySection(selectedDate)}
+          ? visibleDates.map((d) => (
+              <TimelineDay
+                key={d}
+                date={d}
+                dayPhotos={photosByDate[d] ?? []}
+                dayVideos={videosByDate[d] ?? []}
+                shown={shown}
+                statusOf={statusOf}
+                folder={folder}
+                highlights={highlights}
+                onToggle={toggle}
+                confirming={confirming === d}
+                onConfirm={confirmDay}
+              />
+            ))
+          : (
+              <TimelineDay
+                key={selectedDate}
+                date={selectedDate}
+                dayPhotos={photosByDate[selectedDate] ?? []}
+                dayVideos={videosByDate[selectedDate] ?? []}
+                shown={shown}
+                statusOf={statusOf}
+                folder={folder}
+                highlights={highlights}
+                onToggle={toggle}
+                confirming={confirming === selectedDate}
+                onConfirm={confirmDay}
+              />
+            )}
       </div>
     </div>
   );
