@@ -1,4 +1,5 @@
 import type { ProjectEntry } from "../types";
+import { Button } from "./ui";
 
 interface Props {
   selected: string;
@@ -33,30 +34,30 @@ export function PickerActionBar({
       {selectedRecent ? (
         <>
           {(selectedRecent.status === "ready" || selectedRecent.status === "stale") && (
-            <button
+            <Button
+              size="md"
               onClick={() => selectedRecent && onOpen(selectedRecent)}
               disabled={busy}
-              className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
             >
               Open
-            </button>
+            </Button>
           )}
-          <button
+          <Button
+            size="md"
             onClick={() => selectedRecent && onRun(selectedRecent.folder, selectedRecent.subtrip)}
             disabled={busy}
-            className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50 shrink-0"
           >
             {selectedRecent.status === "stale" ? "Re-run Pipeline" : "Run Pipeline"}
-          </button>
+          </Button>
         </>
       ) : (
-        <button
+        <Button
+          size="md"
           onClick={() => selected && onRun(selected)}
           disabled={busy}
-          className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 shrink-0"
         >
           Run Pipeline
-        </button>
+        </Button>
       )}
     </div>
   );

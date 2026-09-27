@@ -1,10 +1,15 @@
 import type { ProjectEntry, ProjectStatus } from "../types";
+import { Status } from "./ui";
 
-export const STATUS_BADGE: Record<ProjectStatus, { label: string; cls: string }> = {
-  ready:     { label: "Ready",     cls: "bg-green-100 text-green-700" },
-  stale:     { label: "Stale",     cls: "bg-yellow-100 text-yellow-700" },
-  never_run: { label: "Not run",   cls: "bg-gray-100 text-gray-500" },
-  running:   { label: "Running…",  cls: "bg-blue-100 text-blue-600" },
+/** Labels only. Colour lives on `Status`: green for a finished trip, grey
+ *  for every pipeline state. The old chips used yellow for stale, blue for
+ *  running and purple for done — favourite, "where you are", and a hue the
+ *  rest of the app does not use. */
+export const STATUS_LABEL: Record<ProjectStatus, string> = {
+  ready: "Ready",
+  stale: "Stale",
+  never_run: "Not run",
+  running: "Running…",
 };
 
 /** "~8 min", "~1.7 h" — the fit behind eta_s is ±30%, so no finer. */
@@ -17,13 +22,13 @@ export function formatEta(seconds: number): string {
 export function EtaTag({ etaS, pending }: { etaS: number | null; pending: number }) {
   if (etaS == null) return null;
   return (
-    <span
+    <Status
       data-testid="pipeline-eta"
       title={`Estimated pipeline time for ${pending} unprocessed photo${pending === 1 ? "" : "s"}`}
-      className="inline-block mt-0.5 text-[10px] leading-4 px-1.5 rounded bg-slate-100 text-slate-500"
+      className="inline-block mt-0.5"
     >
       ⏱ {formatEta(etaS)} · {pending} to process
-    </span>
+    </Status>
   );
 }
 

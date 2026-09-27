@@ -1,5 +1,6 @@
 import type { ProjectEntry } from "../types";
-import { EtaTag, STATUS_BADGE, projectKey } from "./picker";
+import { EtaTag, STATUS_LABEL, projectKey } from "./picker";
+import { Status } from "./ui";
 
 interface ProjectListProps {
   title: string;
@@ -21,9 +22,7 @@ export function ProjectList({ title, testId, projects, selected, onSelect, onOpe
       ) : (
         <ul className="max-h-[65vh] overflow-y-auto">
           {projects.map((p) => {
-            const badge = p.done_at
-              ? { label: "Done", cls: "bg-purple-100 text-purple-700" }
-              : STATUS_BADGE[p.status];
+            const label = p.done_at ? "Done" : STATUS_LABEL[p.status];
             const key = projectKey(p);
             const isSelected = selected === key;
             return (
@@ -43,9 +42,9 @@ export function ProjectList({ title, testId, projects, selected, onSelect, onOpe
                     )}
                     <EtaTag etaS={p.eta_s} pending={p.pending_count} />
                   </div>
-                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${badge.cls}`}>
-                    {badge.label}
-                  </span>
+                  <Status tone={p.done_at ? "done" : undefined} className="shrink-0">
+                    {label}
+                  </Status>
                 </button>
               </li>
             );
