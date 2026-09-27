@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { nextAfterConfirm } from "../decisions";
 import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
 import { ShortcutBar } from "./ui";
-import { VIDEO_CLIP_KEYS, VIDEO_EDIT_KEYS, VIDEO_KEYS, brief } from "../shortcuts";
+import { VIDEO_CLIP_KEYS, VIDEO_EDIT_KEYS, VIDEO_KEYS, brief, typingTarget } from "../shortcuts";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
 // still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
@@ -562,55 +562,45 @@ export function VideoView({
     return () => clearTimeout(t);
   }, [exportNote]);
 
-  useWindowKeydown((e) => {
-    if (
-      e.target instanceof HTMLInputElement ||
-      e.target instanceof HTMLSelectElement ||
-      e.target instanceof HTMLTextAreaElement ||
-      e.target instanceof HTMLButtonElement
-    ) return;
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (current) persist(current, favorites.includes(current) || (keeps[current] ?? true));
-      // justDecided only fills in once persist() hears back, so a quick
-      // second Enter would still see this clip as unreviewed and wrap back
-      // onto it. The ref is updated synchronously.
-      if (current) enteredRef.current.add(current);
-      const hop = nextAfterConfirm(
-        videos.length,
-        idx,
-        skipReviewed,
-        (i) => !reviewed(videos[i]) && !enteredRef.current.has(videos[i]),
-      );
-      if (hop === "advance") onAdvance?.();
-      else setIdx(hop);
-      return;
-    }
-    // 1–9: apply tag by slot (same convention as cluster rank keys).
-    if (/^[1-9]$/.test(e.key)) {
-      e.preventDefault();
-      // No favourite check: assignTag stars the clip itself. Requiring the star
-      // first made these keys a silent no-op, which reads as a broken feature.
-      if (!current || tagBusy) return;
-      const tag = videoTags.tags[parseInt(e.key, 10) - 1];
-      if (tag) {
-        setKeeps((prev) => ({ ...prev, [current]: true }));
-        assignTag(current, tag);
-      }
-      return;
-    }
-    switch (e.key) {
-      case "j":
-      case "ArrowDown":
+  useShortcuts(
+    [...VIDEO_KEYS, ...VIDEO_CLIP_KEYS, ...VIDEO_EDIT_KEYS],
+    {
+      "video-confirm": (e) => {
+        e.preventDefault();
+        if (current) persist(current, favorites.includes(current) || (keeps[current] ?? true));
+        // justDecided only fills in once persist() hears back, so a quick
+        // second Enter would still see this clip as unreviewed and wrap back
+        // onto it. The ref is updated synchronously.
+        if (current) enteredRef.current.add(current);
+        const hop = nextAfterConfirm(
+          videos.length,
+          idx,
+          skipReviewed,
+          (i) => !reviewed(videos[i]) && !enteredRef.current.has(videos[i]),
+        );
+        if (hop === "advance") onAdvance?.();
+        else setIdx(hop);
+      },
+      "video-tag-slot": (e) => {
+        e.preventDefault();
+        // No favourite check: assignTag stars the clip itself. Requiring the star
+        // first made these keys a silent no-op, which reads as a broken feature.
+        if (!current || tagBusy) return;
+        const tag = videoTags.tags[parseInt(e.key, 10) - 1];
+        if (tag) {
+          setKeeps((prev) => ({ ...prev, [current]: true }));
+          assignTag(current, tag);
+        }
+      },
+      "video-next": (e) => {
         e.preventDefault();
         setIdx((i) => Math.min(videos.length - 1, i + 1));
-        break;
-      case "k":
-      case "ArrowUp":
+      },
+      "video-prev": (e) => {
         e.preventDefault();
         setIdx((i) => Math.max(0, i - 1));
-        break;
-      case " ": {
+      },
+      "video-toggle": (e) => {
         e.preventDefault();
         const v = videos[idx];
         if (v && !favorites.includes(v)) {
@@ -618,92 +608,80 @@ export function VideoView({
           setKeeps((prev) => ({ ...prev, [v]: next }));
           persist(v, next);
         }
-        break;
-      }
-      case "s": {
+      },
+      "video-star": (e) => {
         e.preventDefault();
         if (onToggleFavorite && current) {
           if (!favorites.includes(current)) setKeeps((prev) => ({ ...prev, [current]: true }));
           onToggleFavorite(current).catch((err) => onError(String(err)));
         }
-        break;
-      }
-      case "t": {
+      },
+      "video-tag-cycle": (e) => {
         e.preventDefault();
-        if (!current || tagBusy) break;
+        if (!current || tagBusy) return;
         setKeeps((prev) => ({ ...prev, [current]: true }));
         assignTag(current, nextTag(videoTags.assignments[current] ?? null));
-        break;
-      }
-      case "l": {
+      },
+      "video-pause": (e) => {
         e.preventDefault();
         const el = videoRef.current;
-        if (!el) break;
+        if (!el) return;
         if (el.paused) el.play(); else el.pause();
-        break;
-      }
-      case "ArrowRight": {
+      },
+      "video-seek-fwd": (e) => {
         e.preventDefault();
         const el = videoRef.current;
-        if (!el) break;
+        if (!el) return;
         el.currentTime = Math.min(duration ?? el.duration, el.currentTime + 10);
-        break;
-      }
-      case "ArrowLeft": {
+      },
+      "video-seek-back": (e) => {
         e.preventDefault();
         const el = videoRef.current;
-        if (!el) break;
+        if (!el) return;
         el.currentTime = Math.max(0, el.currentTime - 10);
-        break;
-      }
-      case "n": {
-        if (clips.length === 0) break;
+      },
+      "video-marker-next": (e) => {
+        if (clips.length === 0) return;
         e.preventDefault();
         const el = videoRef.current;
-        if (!el) break;
+        if (!el) return;
         const next = clips.find((c) => c.start > el.currentTime);
         if (next) el.currentTime = next.start;
-        break;
-      }
-      case "p": {
-        if (clips.length === 0) break;
+      },
+      "video-marker-prev": (e) => {
+        if (clips.length === 0) return;
         e.preventDefault();
         const el = videoRef.current;
-        if (!el) break;
+        if (!el) return;
         const before = clips.filter((c) => c.start < el.currentTime - 1);
         if (before.length > 0) el.currentTime = before[before.length - 1].start;
-        break;
-      }
-      case "i": {
-        if (!canEdit) break;
+      },
+      "video-in": (e) => {
+        if (!canEdit) return;
         e.preventDefault();
         // With a clip selected, i trims its start (mirror of o); otherwise
         // it drops a fresh clip at the playhead.
         if (selected != null) setInPoint();
         else addClipAtPlayhead();
-        break;
-      }
-      case "o": {
-        if (!canEdit || selected == null) break;
+      },
+      "video-out": (e) => {
+        if (!canEdit || selected == null) return;
         e.preventDefault();
         setOutPoint();
-        break;
-      }
-      case "x":
-      case "Backspace": {
-        if (!canEdit || selected == null) break;
+      },
+      "video-clip-delete": (e) => {
+        if (!canEdit || selected == null) return;
         e.preventDefault();
         deleteClip(selected);
-        break;
-      }
-      case "u": {
-        if (!canEdit) break;
+      },
+      "video-undo": (e) => {
+        if (!canEdit) return;
         e.preventDefault();
         undoClipEdit();
-        break;
-      }
-    }
-  });
+      },
+    },
+    { ignore: (e) => typingTarget(e, true) },
+  );
 
   // Write one video's decision through as soon as it's made. Keeping it in
   // component state until a bulk confirm meant a reviewed video still read as

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useWindowKeydown } from "./hooks/useWindowKeydown";
+import { useShortcuts } from "./hooks/useWindowKeydown";
 import { isDecided } from "./decisions";
 import { ClusterView } from "./components/ClusterView";
 import { FavoritesView } from "./components/FavoritesView";
@@ -10,6 +10,7 @@ import { TimelineView } from "./components/TimelineView";
 import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
 import { Button, Divider, Status, Switch, Tab, TabCount } from "./components/ui";
+import { APP_KEYS, typingTarget } from "./shortcuts";
 import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
 
 export default function App() {
@@ -136,11 +137,10 @@ export default function App() {
     return () => clearTimeout(t);
   }, [error]);
 
-  useWindowKeydown((e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    if (e.key === "?") { e.preventDefault(); setShowHelp((s) => !s); }
-    if (e.key === "Escape") setShowHelp(false);
-  });
+  useShortcuts(APP_KEYS, {
+    "app-help": (e) => { e.preventDefault(); setShowHelp((s) => !s); },
+    "app-help-close": () => setShowHelp(false),
+  }, { ignore: typingTarget });
 
   // Blur on the way out: the views drive off window keydown and ignore events
   // aimed at a button, so leaving focus on the tab you just clicked makes the

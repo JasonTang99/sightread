@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useWindowKeydown } from "../hooks/useWindowKeydown";
+import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { isDecided, isDoomed, isWiped, nextAfterConfirm } from "../decisions";
 import { TagBar } from "./TagBar";
@@ -7,7 +7,7 @@ import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
 import { Divider, ShortcutBar } from "./ui";
-import { CLUSTER_KEYS, brief } from "../shortcuts";
+import { CLUSTER_KEYS, brief, typingTarget } from "../shortcuts";
 
 type ClusterFilter = "all" | "wiped";
 
@@ -253,89 +253,87 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
     }
   };
 
-  useWindowKeydown((e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
-    if (!cluster) return;
+  const focusImage = (next: number) => {
+    imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    setFocusedImg(next);
+  };
 
-    const focusImage = (next: number) => {
-      imgRefs.current[next]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      setFocusedImg(next);
-    };
+  const skipCluster = () => setIdx(Math.min(clusters.length - 1, clusterIdx + 1));
 
-    // 1–9: toggle image by rank
-    if (/^[1-9]$/.test(e.key)) {
-      const img = cluster.images.find((img) => img.rank === parseInt(e.key));
+  useShortcuts(CLUSTER_KEYS, {
+    "cluster-prev": (e) => {
+      e.preventDefault();
+      setIdx(Math.max(0, clusterIdx - 1));
+    },
+    "cluster-next": (e) => {
+      e.preventDefault();
+      skipCluster();
+    },
+    "cluster-skip": (e) => {
+      e.preventDefault();
+      skipCluster();
+    },
+    "cluster-focus-left": (e) => {
+      e.preventDefault();
+      if (cluster) focusImage(Math.max(0, focusedImg - 1));
+    },
+    "cluster-focus-right": (e) => {
+      e.preventDefault();
+      if (cluster) focusImage(Math.min(cluster.images.length - 1, focusedImg + 1));
+    },
+    "cluster-focus-down": (e) => {
+      e.preventDefault();
+      if (cluster) focusImage(Math.min(cluster.images.length - 1, focusedImg + cols));
+    },
+    "cluster-focus-up": (e) => {
+      e.preventDefault();
+      if (cluster) focusImage(Math.max(0, focusedImg - cols));
+    },
+    "cluster-toggle": (e) => {
+      e.preventDefault();
+      const img = cluster?.images[focusedImg];
+      if (img) toggle(img.path);
+    },
+    "cluster-keep-only": (e) => {
+      e.preventDefault();
+      const img = cluster?.images[focusedImg];
+      if (img) keepOnly(img.path);
+    },
+    "cluster-toggle-rank": (e) => {
+      const img = cluster?.images.find((img) => img.rank === parseInt(e.key));
       if (img) {
         e.preventDefault();
         toggle(img.path);
       }
-      return;
-    }
-
-    switch (e.key) {
-      case "ArrowLeft":
-        e.preventDefault();
-        setIdx(Math.max(0, clusterIdx - 1));
-        break;
-      case "ArrowRight":
-      case "b":
-        e.preventDefault();
-        setIdx(Math.min(clusters.length - 1, clusterIdx + 1));
-        break;
-      case "s":
-        e.preventDefault();
-        if (cluster.images[focusedImg]) star(cluster.images[focusedImg].path);
-        break;
-      case "t": {
-        e.preventDefault();
-        const img = cluster.images[focusedImg];
-        if (!img || tagBusy) break;
-        setKeeps((prev) => ({ ...prev, [img.path]: true }));
-        assignTag(img.path, nextTag(videoTags.assignments[img.path] ?? null));
-        break;
-      }
-      case "h":
-        e.preventDefault();
-        focusImage(Math.max(0, focusedImg - 1));
-        break;
-      case "l":
-        e.preventDefault();
-        focusImage(Math.min(cluster.images.length - 1, focusedImg + 1));
-        break;
-      case "j":
-        e.preventDefault();
-        focusImage(Math.min(cluster.images.length - 1, focusedImg + cols));
-        break;
-      case "k":
-        e.preventDefault();
-        focusImage(Math.max(0, focusedImg - cols));
-        break;
-      case " ": {
-        e.preventDefault();
-        const img = cluster.images[focusedImg];
-        if (!img) break;
-        if (e.shiftKey) keepOnly(img.path);
-        else toggle(img.path);
-        break;
-      }
-      case "K":
-        e.preventDefault();
-        keepBest();
-        break;
-      case "n":
-        e.preventDefault();
-        jumpToUnreviewed();
-        break;
-      case "u":
-        e.preventDefault();
-        onUndo().catch((err) => onError(err instanceof Error ? err.message : String(err)));
-        break;
-      case "Enter":
-        e.preventDefault();
-        if (!submitting) confirm();
-        break;
-    }
-  });
+    },
+    "cluster-keep-best": (e) => {
+      e.preventDefault();
+      keepBest();
+    },
+    "cluster-unreviewed": (e) => {
+      e.preventDefault();
+      jumpToUnreviewed();
+    },
+    "cluster-confirm": (e) => {
+      e.preventDefault();
+      if (!submitting) confirm();
+    },
+    "cluster-star": (e) => {
+      e.preventDefault();
+      if (cluster?.images[focusedImg]) star(cluster.images[focusedImg].path);
+    },
+    "cluster-tag": (e) => {
+      e.preventDefault();
+      const img = cluster?.images[focusedImg];
+      if (!img || tagBusy) return;
+      setKeeps((prev) => ({ ...prev, [img.path]: true }));
+      assignTag(img.path, nextTag(videoTags.assignments[img.path] ?? null));
+    },
+    "cluster-undo": (e) => {
+      e.preventDefault();
+      onUndo().catch((err) => onError(err instanceof Error ? err.message : String(err)));
+    },
+  }, { ignore: typingTarget, enabled: !!cluster });
 
   const filterToggle = (
     <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
