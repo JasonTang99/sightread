@@ -98,10 +98,6 @@ class TestNavigation:
             page_loaded.get_by_role("button", name="→", exact=True).click()
         expect(page_loaded.get_by_role("button", name="→", exact=True)).to_be_disabled()
 
-    def test_skip_advances_cluster(self, page_loaded: Page):
-        page_loaded.get_by_role("button", name="Skip").click()
-        expect(page_loaded.locator("select")).to_have_value("1")
-
 
 # ---------------------------------------------------------------------------
 # Keyboard navigation — ClusterView
@@ -231,20 +227,6 @@ class TestToggle:
 
 
 # ---------------------------------------------------------------------------
-# Keep Best
-# ---------------------------------------------------------------------------
-class TestKeepBest:
-    def test_keep_best_sets_rank1_green(self, page_loaded: Page):
-        page_loaded.locator("button.bg-green-50").first.click()  # rank-1 → delete
-        page_loaded.get_by_role("button", name="🏆 Best").click()
-        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
-
-    def test_keep_best_marks_others_red(self, page_loaded: Page):
-        page_loaded.get_by_role("button", name="🏆 Best").click()
-        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
-
-
-# ---------------------------------------------------------------------------
 # Confirm
 # ---------------------------------------------------------------------------
 class TestConfirm:
@@ -264,10 +246,6 @@ class TestConfirm:
         decisions = statuses(output_dir)
         assert decisions["demo_photos/DSCF4380.JPG"] == "kept"
         assert sum(1 for v in decisions.values() if v == "to_delete") == 2
-
-    def test_skip_does_not_write_delete_list(self, page_loaded: Page, output_dir):
-        page_loaded.get_by_role("button", name="Skip").click()
-        assert queued(output_dir) == []
 
 
 # ---------------------------------------------------------------------------
@@ -438,10 +416,6 @@ class TestCompletion:
 # Other keyboard bindings — ClusterView
 # ---------------------------------------------------------------------------
 class TestKeyboardNewBindings:
-    def test_b_skips_cluster(self, page_loaded: Page):
-        page_loaded.keyboard.press("b")
-        expect(page_loaded.locator("select")).to_have_value("1")
-
     def test_s_stars_focused_image(self, page_loaded: Page):
         # "s" no longer skips — it toggles favorite on the focused image,
         # which makes the ★ Favorites tab appear in the header.
@@ -456,13 +430,6 @@ class TestKeyboardNewBindings:
         settle(page_loaded)
         expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
         expect(page_loaded.get_by_text("★ Favorites (1)")).to_be_visible()
-
-    def test_shift_k_keep_best(self, page_loaded: Page):
-        page_loaded.keyboard.press("2")  # rank-2 → keep (2 green)
-        expect(page_loaded.locator("button.bg-green-50")).to_have_count(2)
-        page_loaded.keyboard.press("K")  # reset to rank-1 only
-        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
-        expect(page_loaded.locator("button.bg-red-50")).to_have_count(2)
 
     def test_digit_1_toggles_rank1(self, page_loaded: Page):
         expect(page_loaded.locator("button.bg-green-50").first).to_be_visible()
@@ -920,17 +887,21 @@ class TestSkipReviewed:
         page.reload()
         settle(page)
 
-    def test_absent_until_there_is_something_to_skip(self, page_loaded: Page, output_dir):
-        """A project with nothing decided has nothing to skip, and a control
-        that would do nothing is noise in a header this busy."""
-        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_count(0)
+    def test_visible_while_there_is_work(self, page_loaded: Page):
+        """The toggle stays in the header for the whole review pass."""
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_be_visible()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "false")
 
-        self._decide(output_dir, 0)
+    def test_stays_visible_when_turned_off(self, page_loaded: Page):
+        """localStorage may carry skip-reviewed on from another trip; turning
+        it off here must not remove the control."""
+        page_loaded.evaluate("() => localStorage.setItem('sightread:hideReviewed', '1')")
         page_loaded.reload()
         settle(page_loaded)
-
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
+        page_loaded.get_by_test_id("hide-reviewed").click()
         expect(page_loaded.get_by_test_id("hide-reviewed")).to_be_visible()
-        expect(page_loaded.get_by_text("Skip reviewed")).to_be_visible()
+        expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "false")
 
     def test_it_never_shrinks_the_tabs(self, page_loaded: Page, output_dir):
         """Filtering made every count drop on confirm and put decided work

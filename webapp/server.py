@@ -376,64 +376,6 @@ def confirm(req: ConfirmRequest):
     return {"ok": True}
 
 
-class AutoKeepBestRequest(BaseModel):
-    # Only sweep clusters whose best image scores at least this well; the rest
-    # are left for the human. None means every undecided cluster.
-    min_score: Optional[float] = None
-
-
-@app.post("/api/auto-keep-best")
-def auto_keep_best(req: AutoKeepBestRequest):
-    """Keep each undecided cluster's top-ranked image and queue the rest.
-
-    This is the choice the cluster view already pre-selects, applied in bulk to
-    the clusters nobody has looked at yet. It pushes a single undo entry for the
-    whole sweep — undoing a hundred clusters one confirm at a time would blow
-    past the ten-deep stack and strand most of it.
-
-    Singletons are excluded: there is no "best" among one image, so the same
-    action there would just be a blind delete.
-    """
-    ctx = _require_active()
-    results_path = ctx.output_dir / "results.json"
-    if not results_path.exists():
-        raise HTTPException(400, "Run pipeline first")
-    data = load_results(results_path)
-
-    with _curation_lock:
-        current = load_decisions(ctx.output_dir)
-        updates: dict[str, str | None] = {}
-        previous: dict[str, str | None] = {}
-        clusters_touched = 0
-        for cluster in data["clusters"]:
-            images = cluster["images"]
-            if len(images) < 2:
-                continue
-            # "Undecided" means untouched: a cluster the user has partly worked
-            # through is theirs, not the sweep's.
-            if any(img["path"] in current for img in images):
-                continue
-            if req.min_score is not None and max(img["score"] for img in images) < req.min_score:
-                continue
-            clusters_touched += 1
-            for img in images:
-                p = img["path"]
-                now = KEPT if img["rank"] == 1 else TO_DELETE
-                updates[p] = now
-                previous[p] = current.get(p)  # None — nothing decided here yet
-        if updates:
-            save_decisions(ctx.output_dir, updates)
-            _push_undo(ctx, previous)
-
-    kept = sum(1 for v in updates.values() if v == KEPT)
-    return {
-        "ok": True,
-        "clusters": clusters_touched,
-        "kept": kept,
-        "queued": len(updates) - kept,
-    }
-
-
 @app.post("/api/undo")
 def undo():
     ctx = _require_active()
@@ -1124,6 +1066,12 @@ def serve_video(path: str = Query(...), cached_only: bool = False):
         return FileResponse(cached, media_type="video/mp4", headers=_CACHE_HEADERS)
     if cached_only:
         raise HTTPException(404, "Not cached yet")
+    with _transcode_lock:
+        if abs_path in _transcode_failed:
+            raise HTTPException(
+                422,
+                "Cannot play this video — transcode failed; the file may be corrupt",
+            )
     return FileResponse(abs_path, headers=_CACHE_HEADERS)
 
 
