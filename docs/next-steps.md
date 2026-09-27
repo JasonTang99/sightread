@@ -452,7 +452,7 @@ a description of HEAD.
 ## 8a. UI cleanliness pass — branch `ui-cleanup`
 
 Branched off `mirror-aware-deletes` on 2026-09-20. The chrome work was four
-commits; the follow-ups below are three more. 107 Playwright and 383 Python
+commits; the follow-ups below are four more. 107 Playwright and 383 Python
 passing on each, type-check clean. Playwright was run with 3.11.15 first on
 PATH (`conftest` spawns `python3 -m uvicorn`; a 3.10.8 pyenv global fails all
 107 in fixture setup with a 30s server timeout).
@@ -493,6 +493,16 @@ PATH (`conftest` spawns `python3 -m uvicorn`; a 3.10.8 pyenv global fails all
   are unchanged.
 - **`787abd1` splits TimelineView** into sidebar, day section and memoised
   tiles. `content-visibility` stays on the day wrapper. Behaviour unchanged.
+- **Picker chrome uses `Button` and `Status`.** Open, Run Pipeline, Other
+  folder and Back were hand-rolled: a solid blue fill on Open/Run, and a
+  `border-gray-300` cousin of Button on the rest. Status chips were
+  green/yellow/grey/blue, plus purple for Done — yellow is favourite, blue is
+  "where you are", purple is unused elsewhere. The ETA tag was a slate chip.
+  They now use the shared `Button` (`size="md"`) and `Status` (green only
+  when the trip is finished; grey for Ready/Stale/Not run/Running and for
+  ETA). Labels, clicks, disabled-while-busy, double-click-to-open and the
+  browse toggle are unchanged. List rows and the folder-browser ✕/→ stayed
+  as they were — they are not chrome buttons.
 
 **Caught by screenshot, not by the suite.** A temporary Playwright test captured
 the header, cluster toolbar and overlay at 1440x900; that is how the crib was
@@ -503,18 +513,18 @@ any of this, so **look at it before believing it**. The test was not kept.
 **Follow-ups done 2026-09-26** (this session), with
 `PATH="$HOME/.pyenv/versions/3.11.15/bin:$PATH" python -m pytest tests`
 (383 passed) and the same PATH on `webapp/tests` (107 passed). `tsc -b` clean.
-No eslint config in the frontend; nothing else to lint.
+No eslint config in the frontend; nothing else to lint. The picker restyle
+above was the remaining code item; same PATH and counts again after it.
 
 **Still open on this branch:**
 
 1. ~~The bindings themselves are still a third copy.~~ Done in `07a55ef`.
-2. **The picker still has its own button and badge styling.** The split did not
-   restyle it; that is a look, and it needs a look before believing a shared
-   Button/Status swap. Timeline has nothing equivalent left.
+2. ~~The picker still has its own button and badge styling.~~ Done; see the
+   picker-chrome bullet above. Timeline has nothing equivalent left.
 3. ~~Run the Playwright suite with 3.11.15 first on PATH.~~ Done; 107 passed.
    The PATH prefix remains load-bearing for any later run from a 3.10.8 shell.
 4. **Not merged and not pushed.** `ui-cleanup` sits ahead of
-   `mirror-aware-deletes` by eleven commits.
+   `mirror-aware-deletes` by twelve commits.
 
 ## 8. A separate, unreviewed body of work
 

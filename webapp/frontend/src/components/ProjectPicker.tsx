@@ -5,6 +5,7 @@ import { PickerActionBar } from "./PickerActionBar";
 import { PipelineScreen } from "./PipelineScreen";
 import { ProjectList } from "./ProjectList";
 import { byTripThenName, projectKey } from "./picker";
+import { Button } from "./ui";
 
 export { tripKey } from "./picker";
 
@@ -152,12 +153,14 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           />
 
           {!browsing ? (
-            <button
-              onClick={() => { setBrowsing(true); browse(); }}
-              className="self-start px-3 py-1.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50"
-            >
-              Other folder…
-            </button>
+            <div className="self-start">
+              <Button
+                size="md"
+                onClick={() => { setBrowsing(true); browse(); }}
+              >
+                Other folder…
+              </Button>
+            </div>
           ) : (
             <FolderBrowser
               listing={listing}

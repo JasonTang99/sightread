@@ -1,4 +1,5 @@
 import type { JobStatus } from "../types";
+import { Button } from "./ui";
 
 interface Props {
   job: JobStatus;
@@ -31,12 +32,9 @@ export function PipelineScreen({ job, onBack }: Props) {
                 {job.lines.join("\n")}
               </pre>
             )}
-            <button
-              onClick={onBack}
-              className="px-3 py-1.5 text-sm border border-gray-300 text-gray-700 rounded hover:bg-gray-50"
-            >
+            <Button size="md" onClick={onBack}>
               Back
-            </button>
+            </Button>
           </>
         )}
       </div>
