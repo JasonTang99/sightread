@@ -171,6 +171,16 @@ decision. It is one field rather than several files because the earlier split â€
 keeping the three in agreement, and they drifted in practice: photos marked
 kept sat in the delete queue and would have been deleted.
 
+Each project's files sit in `~/.local/share/sightread/projects/<hash>/`, the
+hash taken from the folder path (`webapp/projects.py`). Several hash dirs can
+mention one trip (Hoh has three: two from early September with no
+`project.json`). The live one is the dir whose `project.json` names the folder, e.g.
+`grep -l Hoh_River ~/.local/share/sightread/projects/*/project.json`. To answer
+"is folder X in this project, and how much of it is reviewed?", count
+`results.json` images by subfolder and look each path up in `decisions.json`;
+on 2026-10-01 that showed the Hoh X-T5 frames were all there, just all
+already decided.
+
 Projects still on the old layout are converted the first time they are opened.
 The superseded files are renamed to `*.migrated` rather than removed. Conflicts
 resolve away from deletion: a star beats everything, and an explicit keep beats
