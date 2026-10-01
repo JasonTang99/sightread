@@ -1,80 +1,44 @@
 # sightread — next steps
 
-_Last updated: 2026-09-20._
+_Last updated: 2026-10-01._
 
 ## Done since the last update
 
-- **`_read_shot_time` read the wrong IFD** (`d7b7e98`). It now reads
-  `DateTimeOriginal` out of the EXIF sub-IFD and keeps `DateTime` (306) only as a
-  fallback, matching `scripts/pipeline.py:_parse_exif_timestamp`. The regression
-  fixture has to synthesise a photo whose 306 and 36867 disagree — no file in the
-  archive does, which is why the bug survived.
-- **The re-shoot merge now fires across cameras, not only across framings**
-  (`96d13df`). See §1 for what opening the `iphone/` + `xt5/` trips turned up.
-- **A trip adopts the review already done on its device folders** (`07b0288`).
-  Opening Japan pulled in 512 decisions, 53 video tags and 1 clip from the
-  `xt5/` project.
-- **The header says which trip is open, and skips what is decided**
-  (`dae874b`, `e45354a`, `11a9204`). On Japan the skip filter takes the queue
-  from 56/205/86 to 51/132/34.
-- **Cluster size is legible at a glance** (`bc49c69`, `d2b92dd`) — a coloured
-  badge on the bar, blue to three and red past twenty, with the picker no longer
-  repeating it.
-- **The LIVE badge's hover playback is under test** (`fe465b1`). Seven Playwright
-  tests, checked against two deliberate breakages of the component.
-- **Confirm no longer skips a cluster when hide-reviewed is on** (`9c3b49f`).
-  Enter used to advance by index *and* drop the row you just decided, so the
-  cluster that slid into its place was walked past. Landing is now by
-  `cluster_id`. Singles and videos still advance by index, but since `f5e50e1`
-  made skip-reviewed navigation-only nothing drops out of their lists, so the
-  index no longer slides — that half of the bug is gone rather than fixed.
-- **Every trip in the picker has a time estimate** (`185d959`, refit in
-  `cea0354` to 25 s + 0.74 s/photo + 0.016 s/MB). Over today's 25-trip batch it
-  landed within 10% on nearly every run; the misses were small trips, where the
-  fixed 25 s dominates (Revelstoke 65 s against 92 s).
-- **Embedding and scoring checkpoint after every shooting day** (`52a6cd3`), so
-  a GPU crash mid-Europe costs one day, not two hours.
-- **A partly decided cluster shows its per-photo decisions** (`dbc3a6e`) instead
-  of falling back to rank for every photo until the whole cluster is decided.
-- **The picker lists projects by trip date beside Recent, one entry per trip**
-  (`149239b`, `e83d51c`). Device folders roll up into their trip (42 entries to
-  36); a trip only ever run per device, like `2024_02_Korea/canon`, shows as the
-  trip. Browse sits behind "Other folder…" — it had been returning a 400 on
-  lynx because its default `/mnt/h0/Editing/imports` does not exist.
-- **Shift+Space keeps only the focused photo** (`bb02680`), was §7. Starred
-  photos stay kept.
-- **Shot-time cache is versioned** so a reader change cannot keep serving
-  DateTime (306) as if it were DateTimeOriginal. Old flat `shot_times.json`
-  files rebuild on the next gallery load. Was §6.
-- **Export the trip lives only on Finish.** The Favourites 📤 was leftover from
-  when that tab *was* the export; it still shipped the whole trip. Finish step 2
-  already did the job.
-- **Own-folder vs guest-folder merge** (`02e6c38`). Stage 4
-  will not join a cluster that has Jason's folders (`iphone/`, `xt5/`, `canon/`)
-  to a `google photos/` or `shared/` cluster. Guest–guest still merges; his
-  phone and camera of one subject still merge. Split is by folder, not EXIF
-  model. **Hawaii, Hoh and Yellowstone still need a recluster to pick the
-  folder split up** — their `results.json` predates it, so their cross-camera
-  clusters still mix `google photos/` with `iphone/`. Long runs; not done here.
-- **Exposure-bracket merge** after the 3 s burst (`02e6c38`). Consecutive
-  same-parent photos 3–12 s apart at cosine ≤ 0.12 join. Japan clusters 22/23
-  (Hakodate icy stairs, 6 s, ISO 800→400, cosine 0.093) were the prompt; an
-  ungated 6 s burst would have chained a 20-minute Koyasan walk.
-- **City subtrips** (`02e6c38`). A trip whose cameras use `NN_City` folders
-  (`01_Hakodate`) becomes one picker row per city instead of one 1,200-cluster
-  pile. See §7.
-- **Hawaii, Hoh, Yellowstone and Vegas are reclustered, and a cluster now holds
-  exactly one photographer** (`3ee68ab`, `8db52cf`). The four trips with a
-  shared album went through the pipeline from cached embeddings — no GPU,
-  5–23 s each. The own-vs-guest rule turned out to be enforced only in stage 4,
-  and once deleting from the album was confirmed wanted, the split had to go
-  per photographer rather than per owner. See §4.
-- **The two tests `02e6c38` left stale now pass** (`18bdedd`). That commit gave
-  `project_output_dir` a `subtrip` argument and `/api/state` a `display_name`,
-  but left `test_project_done` stubbing the first with a one-argument lambda
-  (TypeError on the re-run test) and `test_header_names_the_open_project`
-  expecting the old bare-path tooltip instead of `name\npath`. Suites are
-  372 Python and 107 Playwright, all passing.
+The 2026-09-20 list was pruned; those items are in `git log` by hash.
+
+- **One header row for all review chrome** (`a295524`, `185c253`). The
+  clusters tab had two stacked bars plus a progress line; singles and videos
+  each had a third. Now a 36 px row: home icon, project name, icon tabs with
+  counts, the skip switch, and a slot each view portals its own controls into
+  (tags, per-row, next-unreviewed on clusters; status pill, reviewed pill and
+  tags on videos). Undo/redo are Ctrl+Z / Ctrl+Shift+Z only, Enter is the only
+  confirm, and the progress meter, size badge, position counters, filter
+  toggle, shortcut cribs and the tag "+" are gone at Jason's request. Singles
+  lost its bulk "Confirm all" with them. Video play/pause moved from `l` to
+  `p`. UI tests read position from `data-index` on the view root now.
+- **Photos per row defaults per cluster** — 3 when every frame is portrait,
+  else 2, learnt from the decoded image so no re-run is needed. A manual pick
+  holds for that cluster only.
+- **Redo** (`320f0c9`). Undo snapshots what it overwrites; `/api/redo` puts it
+  back. Memory-only: a restart or a fresh confirm drops it.
+- **The clip editor is out of the Videos tab** (`185c253`), along with its
+  n/p/i/o/x/u keys and the export button, because clipfarm highlights are off
+  (§5). Server clip endpoints are untouched.
+- **Enter on the last video waits for its write before opening the timeline**
+  (`185c253`). The timeline refetched first and drew the clip undecided;
+  `test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline` failed 3/8
+  before, 0/8 after.
+- **Album duplicates are queued in the pipeline** (`5a15e3c`). A
+  `google photos/` or `shared/` photo that matches one of his folders on model,
+  DateTimeOriginal *and* SubSecTimeOriginal, and sits under 0.01 cosine, is left
+  out of review and marked `to_delete`. A guard only: all eight trips with a
+  guest folder were checked and none has one. The closest distinct
+  cross-folder frames sit at 0.03–0.04, Vegas IMG_9107/9108 share a second but
+  not a sub-second, and a guest's iPhone 17 Pro on Hawaii reuses his `IMG_946x`
+  numbers, which is why neither name nor second-level time is enough.
+- **`ui-cleanup` and `mirror-aware-deletes` are both merged into main**
+  (`68d62bd`); see §8 and §8a. Keep-best, auto-best and skip were removed
+  (`c742427`). Suites: 389 Python, 81 Playwright.
 
 ## 1. Where the seven 2026 trips landed
 
@@ -432,9 +396,8 @@ a description of HEAD.
 
 **First action next session:**
 
-1. Restart sightread. **Unblocked as of 2026-09-20:** nothing is listening on
-   8765 and no ffmpeg is running, so the old process is gone and there is
-   nothing left to wait for. Hard-refresh after.
+1. ~~Restart sightread.~~ **Done 2026-10-01** — running in tmux `fleet:0.5`
+   on the current main.
 2. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
    on picker load, and whether Canon photos showed up via time assignment.
    Half-answered: four Europe city dirs exist on disk (`01_Iceland`,
@@ -523,10 +486,19 @@ above was the remaining code item; same PATH and counts again after it.
    picker-chrome bullet above. Timeline has nothing equivalent left.
 3. ~~Run the Playwright suite with 3.11.15 first on PATH.~~ Done; 107 passed.
    The PATH prefix remains load-bearing for any later run from a 3.10.8 shell.
-4. **Not merged and not pushed.** `ui-cleanup` sits ahead of
-   `mirror-aware-deletes` by twelve commits.
+4. ~~**Not merged and not pushed.**~~ **Merged into main** (`68d62bd`). Main is
+   90 commits ahead of `origin/main` and nothing has been pushed; pushing needs
+   Jason's say-so. Much of this section's chrome (Status, Divider, the cribs on
+   clusters/singles/videos, the grouped header) was then removed again by the
+   one-row header on 2026-10-01.
 
 ## 8. A separate, unreviewed body of work
+
+**Abandoned as a plan, 2026-10-01.** All three threads landed on main as the
+single checkpoint `a002752` when `ui-cleanup` merged, and a dozen commits now
+build on them. Splitting it into three commits would mean rewriting main's
+history under those commits for tidiness alone, so it will not be done. Kept below as the
+description of what `a002752` contains.
 
 **Where it lives changed on 2026-09-20.** It is still uncommitted on
 `mirror-aware-deletes`, which has not moved from `f682a74`. It is *also*
@@ -569,8 +541,19 @@ commit each, which means hunk-level splitting of the three shared files.
 `dist/` was built on the 17th and matches this tree, so the running UI already
 reflects it.
 
-Hoh and Portugal still adopt on first open (§3) — Portugal arrives with 196
-`to_delete` already queued, worth knowing before the first Confirm. 30 old
-trips have no pipeline output and resuming costs the GPU back from Sigil (§2).
-`ui-cleanup` is unmerged and unpushed, eleven commits ahead (§8a). Remote curation
-stays gated on auth (`plan.md`). Clipfarm highlights stay off.
+## 9. Open threads from the one-row header
+
+- **The clip editor comes back only with clipping.** If clipfarm highlights
+  are turned back on (§5), restore `ClipEditor` and its keys from
+  `git show 185c253^:webapp/frontend/src/components/VideoView.tsx` and the
+  `VIDEO_CLIP_KEYS` / `VIDEO_EDIT_KEYS` lists from `185c253^:…/shortcuts.ts`.
+  Mind `p`: it is play/pause now, and was clip-marker-prev there.
+- **The duplicate guard covers stills only.** Album `.mp4`s are not compared
+  with his `.MOV`s. No case has been seen, so nothing is planned; the place to
+  add one is `find_duplicates` in `scripts/pipeline.py`.
+
+Portugal still adopts on first open (§3), arriving with 196 `to_delete`
+queued. Hoh has been opened, so its adoption is done. 30 old trips have no
+pipeline output and resuming costs the GPU back from Sigil (§2). Main is 90
+commits ahead of origin and unpushed. Remote curation stays gated on auth
+(`plan.md`). Clipfarm highlights stay off.
