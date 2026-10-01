@@ -199,6 +199,9 @@ async def _reject_non_local(request: Request, call_next):
 
 _active: ProjectContext | None = None
 _undo_stack: list[dict] = []
+# What undo took back, so Ctrl+Shift+Z can put it again. Memory-only: it is
+# only meaningful straight after an undo, and any fresh confirm drops it.
+_redo_stack: list[dict] = []
 
 # Every endpoint that mutates decisions.json or the undo stack does a
 # read-modify-write, so two overlapping requests can drop one side's edit entirely. Uvicorn runs sync handlers on a threadpool, and the
@@ -271,10 +274,12 @@ def _load_undo(ctx: ProjectContext) -> None:
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("Could not read undo stack from %s: %s", path, exc)
     _undo_stack[:] = entries[-_UNDO_DEPTH:]
+    _redo_stack.clear()
 
 
 def _clear_undo(ctx: ProjectContext) -> None:
     _undo_stack.clear()
+    _redo_stack.clear()
     _undo_file(ctx).unlink(missing_ok=True)
 
 
@@ -287,7 +292,15 @@ def _push_undo(ctx: ProjectContext, previous: dict[str, str | None]) -> None:
     _undo_stack.append({"previous": dict(previous)})
     if len(_undo_stack) > _UNDO_DEPTH:
         _undo_stack.pop(0)
+    # A new decision branches history; what was undone cannot be redone on top.
+    _redo_stack.clear()
     _save_undo(ctx)
+
+
+def _snapshot(ctx: ProjectContext, paths) -> dict[str, str | None]:
+    """Each path's current status, None for undecided — the shape undo stores."""
+    current = load_decisions(ctx.output_dir)
+    return {p: current.get(p) for p in paths}
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +347,7 @@ def get_state():
         "singleton_delete_threshold": SINGLETON_DELETE_THRESHOLD,
         "pending_delete_count": len(paths_with_status(decisions, TO_DELETE)),
         "undo_available": len(_undo_stack) > 0,
+        "redo_available": len(_redo_stack) > 0,
         "photo_decisions": decisions,
         "favorites": paths_with_status(decisions, FAVORITE),
         "done_at": is_done(ctx.output_dir),
@@ -383,6 +397,22 @@ def undo():
         if not _undo_stack:
             raise HTTPException(400, "Nothing to undo")
         entry = _undo_stack.pop()
+        _redo_stack.append({"previous": _snapshot(ctx, entry["previous"])})
+        save_decisions(ctx.output_dir, entry["previous"])
+        _save_undo(ctx)
+    return {"ok": True}
+
+
+@app.post("/api/redo")
+def redo():
+    ctx = _require_active()
+    with _curation_lock:
+        if not _redo_stack:
+            raise HTTPException(400, "Nothing to redo")
+        entry = _redo_stack.pop()
+        _undo_stack.append({"previous": _snapshot(ctx, entry["previous"])})
+        if len(_undo_stack) > _UNDO_DEPTH:
+            _undo_stack.pop(0)
         save_decisions(ctx.output_dir, entry["previous"])
         _save_undo(ctx)
     return {"ok": True}
@@ -1348,6 +1378,7 @@ if os.getenv("SIGHTREAD_TEST"):
             _clear_undo(_active)
         else:
             _undo_stack.clear()
+            _redo_stack.clear()
         _invalidate_picker_details()
         return {"ok": True}
 

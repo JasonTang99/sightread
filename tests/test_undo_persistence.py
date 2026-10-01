@@ -28,6 +28,7 @@ def api(tmp_path, monkeypatch):
         server, "_active", ProjectContext(folder=folder, output_dir=output_dir)
     )
     monkeypatch.setattr(server, "_undo_stack", [])
+    monkeypatch.setattr(server, "_redo_stack", [])
     return TestClient(server.app, base_url="http://localhost"), folder, output_dir
 
 
@@ -126,3 +127,32 @@ class TestPersistence:
         assert not (output_dir / server.UNDO_FILENAME).exists()
         _restart(output_dir)
         assert server._undo_stack == []
+
+
+class TestRedo:
+    def test_redo_puts_back_what_undo_took(self, api):
+        client, folder, output_dir = api
+        a, b = _photos(folder, "a.jpg", "b.jpg")
+        client.post("/api/confirm", json={"delete_paths": [b], "decided_paths": [a, b]})
+        client.post("/api/undo")
+        assert load_decisions(output_dir) == {}
+
+        assert client.post("/api/redo").status_code == 200
+
+        assert load_decisions(output_dir) == {a: KEPT, b: TO_DELETE}
+        # And the redone step is undoable again.
+        assert client.post("/api/undo").status_code == 200
+        assert load_decisions(output_dir) == {}
+
+    def test_nothing_to_redo_is_a_400(self, api):
+        client, _, _ = api
+        assert client.post("/api/redo").status_code == 400
+
+    def test_a_fresh_confirm_drops_the_redo(self, api):
+        client, folder, _ = api
+        a, b = _photos(folder, "a.jpg", "b.jpg")
+        client.post("/api/confirm", json={"delete_paths": [], "decided_paths": [a]})
+        client.post("/api/undo")
+        client.post("/api/confirm", json={"delete_paths": [], "decided_paths": [b]})
+
+        assert client.post("/api/redo").status_code == 400
