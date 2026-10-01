@@ -17,7 +17,7 @@
  * className grab-bag. A prop that is a class string is the duplication coming
  * back through the front door.
  */
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 import type { Shortcut } from "../shortcuts";
 
 /** The one accent. `tone` exists for the three places that carry meaning. */
@@ -190,6 +190,21 @@ export function Switch({
         />
       </button>
     </span>
+  );
+}
+
+/** A source checkbox. Compact enough to sit in the one header row.
+ *  The label text is the accessible name tests click by. */
+export function Check({
+  checked,
+  label,
+  ...rest
+}: { checked: boolean; label: string } & InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <label className="flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap select-none">
+      <input type="checkbox" checked={checked} className="h-3 w-3" {...rest} />
+      {label}
+    </label>
   );
 }
 

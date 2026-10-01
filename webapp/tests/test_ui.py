@@ -984,3 +984,68 @@ class TestPhotosPerRow:
         page_loaded.keyboard.press("ArrowRight")
         at_cluster(page_loaded, 1)
         expect(self._per_row(page_loaded, 3)).to_have_attribute("aria-pressed", "true")
+
+
+# ---------------------------------------------------------------------------
+# Source filter — one camera folder at a time
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def two_source_project(tmp_path, webapp_server):
+    """Two camera folders, so the header has a real choice to remember.
+
+    The shared fixture is relative paths under one demo folder, which is a
+    single source and hides the control.
+    """
+    folder = tmp_path / "Hoh"
+    folder.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+
+    def img(path: str, rank: int = 1) -> dict:
+        return {"path": path, "score": 0.5, "centrality": 1.0, "rank": rank}
+
+    iphone_a = str(folder / "iphone" / "a.JPG")
+    iphone_b = str(folder / "iphone" / "b.JPG")
+    xt5_c = str(folder / "xt5" / "c.JPG")
+    xt5_d = str(folder / "xt5" / "d.JPG")
+    xt5_e = str(folder / "xt5" / "e.JPG")
+    (out / "results.json").write_text(json.dumps({"clusters": [
+        {"cluster_id": 1, "best_image": iphone_a, "images": [img(iphone_a, 1), img(iphone_b, 2)]},
+        {"cluster_id": 2, "best_image": xt5_c, "images": [img(xt5_c, 1), img(xt5_d, 2)]},
+        {"cluster_id": 3, "best_image": xt5_e, "images": [img(xt5_e)]},
+    ]}))
+    requests.post(
+        f"{BASE_URL}/api/_test_set_project",
+        json={"folder": str(folder), "output_dir": str(out)},
+    )
+    return folder
+
+
+class TestSourceFilter:
+    def _open(self, page: Page) -> None:
+        page.goto(BASE_URL)
+        settle(page)
+
+    def test_every_source_starts_checked(self, page_loaded: Page, two_source_project):
+        self._open(page_loaded)
+        expect(page_loaded.get_by_role("checkbox", name="iphone")).to_be_checked()
+        expect(page_loaded.get_by_role("checkbox", name="xt5")).to_be_checked()
+        expect(tab(page_loaded, "Clusters (0/2)")).to_be_visible()
+        expect(tab(page_loaded, "Singles (0/1)")).to_be_visible()
+
+    def test_unchecking_a_source_shrinks_the_tab_counts(self, page_loaded: Page, two_source_project):
+        self._open(page_loaded)
+        page_loaded.get_by_role("checkbox", name="xt5").click()
+        expect(page_loaded.get_by_role("checkbox", name="xt5")).not_to_be_checked()
+        expect(page_loaded.get_by_role("checkbox", name="iphone")).to_be_checked()
+        expect(tab(page_loaded, "Clusters (0/1)")).to_be_visible()
+        expect(tab(page_loaded, "Singles (0/1)")).to_have_count(0)
+
+    def test_the_choice_survives_a_reload(self, page_loaded: Page, two_source_project):
+        self._open(page_loaded)
+        page_loaded.get_by_role("checkbox", name="xt5").click()
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(page_loaded.get_by_role("checkbox", name="xt5")).not_to_be_checked()
+        expect(page_loaded.get_by_role("checkbox", name="iphone")).to_be_checked()
+        expect(tab(page_loaded, "Clusters (0/1)")).to_be_visible()

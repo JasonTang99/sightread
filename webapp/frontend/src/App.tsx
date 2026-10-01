@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useShortcuts } from "./hooks/useWindowKeydown";
 import { isDecided } from "./decisions";
+import { sourceOf, sourcesIn } from "./device";
 import { ClusterView } from "./components/ClusterView";
 import { FavoritesView } from "./components/FavoritesView";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -9,9 +10,42 @@ import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
 import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
-import { Icon, Switch, Tab, TabCount } from "./components/ui";
+import { Check, Icon, Switch, Tab, TabCount } from "./components/ui";
 import { APP_KEYS, typingTarget } from "./shortcuts";
-import type { AppState, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
+import type { AppState, Cluster, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
+
+// Unchecked source names for one project. Missing or unreadable storage
+// means every source stays on — the same default as a first visit.
+function sourcesStorageKey(folder: string, subtrip?: string | null): string {
+  return `sightread:sources:${subtrip ? `${folder}#${subtrip}` : folder}`;
+}
+
+function readOffSources(folder: string, subtrip?: string | null): string[] {
+  try {
+    const raw = localStorage.getItem(sourcesStorageKey(folder, subtrip));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.some((s) => typeof s !== "string")) return [];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
+function writeOffSources(folder: string, subtrip: string | null | undefined, off: string[]) {
+  try {
+    localStorage.setItem(sourcesStorageKey(folder, subtrip), JSON.stringify(off));
+  } catch {
+    // private window, or site data blocked — the choice still holds this visit
+  }
+}
+
+// Sources the user left on. An empty result is not a choice: stored data
+// that would turn every source off is ignored, and so is unchecking the last.
+function sourcesOn(sources: string[], off: string[]): Set<string> {
+  const on = sources.filter((s) => !off.includes(s));
+  return new Set(on.length === 0 ? sources : on);
+}
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -41,6 +75,10 @@ export default function App() {
       return false;
     }
   });
+  // Override of the stored source filter for the project in `key`. Absent
+  // means "read localStorage", so the first render that knows the folder
+  // already has the choice the landing tab needs.
+  const [sourceChoice, setSourceChoice] = useState<{ key: string; off: string[] } | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -90,6 +128,37 @@ export default function App() {
     if (projectOpen && tab === "timeline") refetchVideos();
   }, [projectOpen, tab, refetchVideos]);
 
+  const folder = state?.folder;
+  const subtrip = state?.subtrip ?? null;
+  const sourceKey = folder ? sourcesStorageKey(folder, subtrip) : "";
+  const storedOff = sourceChoice && sourceChoice.key === sourceKey
+    ? sourceChoice.off
+    : (folder ? readOffSources(folder, subtrip) : []);
+  const rawClusters = state?.clusters ?? [];
+  const rawSingles = state?.singletons ?? [];
+  const decisions = state?.photo_decisions ?? {};
+  const sources = sourcesIn(
+    [
+      ...rawClusters.flatMap((c) => c.images.map((img) => img.path)),
+      ...rawSingles.flatMap((c) => c.images.map((img) => img.path)),
+      ...videos,
+    ],
+    folder,
+  );
+  const onSources = sourcesOn(sources, storedOff);
+  // One source is not a choice. Fewer than two and the checkboxes stay hidden,
+  // and the lists below are the whole project.
+  const sourceFilterOn = sources.length >= 2;
+  const inOnSource = (path: string) => onSources.has(sourceOf(path, folder));
+  const keepCluster = (c: Cluster) => !sourceFilterOn || c.images.some((img) => inOnSource(img.path));
+  // Skip-reviewed does not filter. It used to, and the tabs shrank under you
+  // on every confirm. The source checkboxes do: a cluster stays whole when
+  // any frame is in a checked source, and is dropped only when none are.
+  const clusterList = sourceFilterOn ? rawClusters.filter(keepCluster) : rawClusters;
+  const singleList = sourceFilterOn ? rawSingles.filter(keepCluster) : rawSingles;
+  const sourceVideos = sourceFilterOn ? videos.filter(inOnSource) : videos;
+  const reviewableVideos = sourceVideos.filter((v) => videoStatuses[v] !== "delete");
+
   // Pick the landing tab once, on the first load of a project: whatever still
   // needs triage, and only the timeline once clusters, singles *and* videos are
   // all decided. Videos used to be left out, so reloading mid-way through the
@@ -97,7 +166,8 @@ export default function App() {
   // Deliberately does not re-run on later state changes; confirming a cluster
   // in the middle of the pile shouldn't yank you off the tab you're working
   // in. Enter on the *last* cluster/single/video is the explicit hop — see
-  // `advanceTab`.
+  // `advanceTab`. The lists are the source-filtered ones, so a camera you
+  // turned off is not where you land.
   const landedRef = useRef(false);
   useEffect(() => {
     if (!state || state.no_project || landedRef.current) return;
@@ -105,15 +175,12 @@ export default function App() {
     // before it arrives would read every video as undecided.
     if (!videosLoaded) return;
     landedRef.current = true;
-    const decisions = state.photo_decisions ?? {};
-    const clusters = state.clusters ?? [];
-    const singletons = state.singletons ?? [];
-    if (clusters.length + singletons.length === 0) return;  // nothing curated yet
-    if (clusters.some((c) => !isDecided(c, decisions))) return;  // stay on clusters
-    if (singletons.some((c) => !isDecided(c, decisions))) { setTab("singles"); return; }
-    const videosPending = videos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
+    if (rawClusters.length + rawSingles.length === 0) return;  // nothing curated yet
+    if (clusterList.some((c) => !isDecided(c, decisions))) return;  // stay on clusters
+    if (singleList.some((c) => !isDecided(c, decisions))) { setTab("singles"); return; }
+    const videosPending = reviewableVideos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
     setTab(videosPending ? "videos" : "timeline");
-  }, [state, videosLoaded, videos, videoStatuses]);
+  }, [state, videosLoaded, videos, videoStatuses, rawClusters, rawSingles, clusterList, singleList, reviewableVideos, decisions]);
 
   // A different project gets its own landing decision.
   useEffect(() => { landedRef.current = false; }, [state?.no_project]);
@@ -209,20 +276,12 @@ export default function App() {
     return <ProjectPicker onProjectOpened={reload} />;
   }
 
-  const decisions = state.photo_decisions ?? {};
-  // "Skip reviewed" does not filter these lists. It used to, and the tabs
-  // shrank under you: counts dropped on every confirm and arrowing back to
-  // something already decided was impossible. Everything stays browsable;
-  // the toggle only changes where confirm lands (see the views).
-  const clusterList = state.clusters ?? [];
-  const singleList = state.singletons ?? [];
   const hasClusters = clusterList.length > 0;
   const hasSingles = singleList.length > 0;
-  const hasUnconfirmedSingles = singleList.some((c) => !isDecided(c, decisions));
   // The video reviewer works through footage that isn't marked for deletion
   // yet; the timeline shows everything, marked included, so it can colour a
-  // tile by its decision the way it does for photos.
-  const reviewableVideos = videos.filter((v) => videoStatuses[v] !== "delete");
+  // tile by its decision the way it does for photos. `reviewableVideos` is
+  // already limited to the checked sources.
   const hasVideos = reviewableVideos.length > 0;
   // Reviewed/total on the three review tabs. Clusters and singles are
   // decided per cluster; a video counts once its status is set and is
@@ -245,7 +304,7 @@ export default function App() {
   const goToNextUnconfirmed = () => {
     if (clusterList.some((c) => !isDecided(c, decisions))) { setTab("clusters"); return; }
     if (singleList.some((c) => !isDecided(c, decisions))) { setTab("singles"); return; }
-    const videosPending = videos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
+    const videosPending = reviewableVideos.some((v) => (videoStatuses[v] ?? "undecided") === "undecided");
     if (videosPending) { setTab("videos"); return; }
     setTab("timeline");
   };
@@ -264,7 +323,16 @@ export default function App() {
     if (i >= 0 && i < visible.length - 1) setTab(visible[i + 1]);
   };
 
-  const hasReviewables = clusterList.length + singleList.length + videos.length > 0;
+  const hasReviewables = clusterList.length + singleList.length + sourceVideos.length > 0;
+
+  const toggleSource = (name: string) => {
+    if (!folder || !sourceFilterOn) return;
+    if (onSources.has(name) && onSources.size === 1) return;
+    const offNow = sources.filter((s) => !onSources.has(s));
+    const next = onSources.has(name) ? [...offNow, name] : offNow.filter((s) => s !== name);
+    setSourceChoice({ key: sourceKey, off: next });
+    writeOffSources(folder, subtrip, next);
+  };
 
   return (
     <div>
@@ -332,6 +400,22 @@ export default function App() {
           </Tab>
         </nav>
 
+        {sourceFilterOn && (
+          <div className="self-center flex items-center gap-2" role="group" aria-label="Sources">
+            {sources.map((name) => (
+              <Check
+                key={name}
+                checked={onSources.has(name)}
+                label={name}
+                onChange={(e) => {
+                  e.currentTarget.blur();
+                  toggleSource(name);
+                }}
+              />
+            ))}
+          </div>
+        )}
+
         {/* Skipping what is already decided: confirm jumps over it. */}
         {hasReviewables && (
           <span className="self-center">
@@ -396,7 +480,7 @@ export default function App() {
             onToggleFavorite={toggleFavorite}
             onAdvance={advanceTab}
           />
-        ) : !hasClusters && !hasUnconfirmedSingles ? (
+        ) : rawClusters.length === 0 && !rawSingles.some((c) => !isDecided(c, decisions)) ? (
           <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">
             <p className="text-2xl mb-2">🎉</p>
             <p className="text-gray-700 font-medium">All done!</p>
