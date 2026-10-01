@@ -270,7 +270,7 @@ export function VideoView({
   const [selected, setSelected] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
-  const { assignTag, addTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
+  const { assignTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
     videoTags,
     onVideoTagsChange,
     favorites,
@@ -818,7 +818,6 @@ export function VideoView({
             if (tag !== null) setKeeps((prev) => ({ ...prev, [current]: true }));
             assignTag(current, tag);
           }}
-          onAdd={addTag}
         />
         {/* The clip-marker and in/out keys only exist when there is something
             to step through or the clip can be edited, so the crib grows and

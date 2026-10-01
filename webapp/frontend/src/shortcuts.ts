@@ -30,6 +30,8 @@ export interface Chord {
   digit?: boolean;
   /** When set, require this Shift state. When omitted, Shift is ignored. */
   shift?: boolean;
+  /** When true, require Ctrl (or Cmd). When omitted, Ctrl is ignored. */
+  ctrl?: boolean;
 }
 
 export interface Bind {
@@ -311,6 +313,18 @@ export const FAVORITES_KEYS: Shortcut[] = [
 export const APP_KEYS: Shortcut[] = [
   { keys: "?", what: "toggle this help", bind: [{ id: "app-help", chords: [{ key: "?" }] }] },
   { keys: "Esc", what: "close help", bind: [{ id: "app-help-close", chords: [{ key: "Escape" }] }] },
+  {
+    keys: "Ctrl+Z",
+    what: "undo last confirm",
+    bind: [{ id: "app-undo", chords: [{ key: "z", ctrl: true, shift: false }] }],
+  },
+  {
+    keys: "Ctrl+Shift+Z",
+    what: "redo",
+    // Shift turns the key into "Z" on most layouts, but not every browser
+    // agrees, so both spellings count.
+    bind: [{ id: "app-redo", chords: [{ key: "Z", ctrl: true, shift: true }, { key: "z", ctrl: true, shift: true }] }],
+  },
 ];
 
 export function brief(...lists: Shortcut[][]): Shortcut[] {
@@ -324,6 +338,7 @@ export function chordMatch(e: KeyboardEvent, c: Chord): boolean {
     return false;
   }
   if (c.shift !== undefined && e.shiftKey !== c.shift) return false;
+  if (c.ctrl && !(e.ctrlKey || e.metaKey)) return false;
   return true;
 }
 

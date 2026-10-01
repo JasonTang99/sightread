@@ -77,6 +77,11 @@ export function HelpOverlay({ onClose }: Props) {
           <span>toggles this help ·</span>
           <Kbd>Esc</Kbd>
           <span>closes it</span>
+          <span>·</span>
+          <Kbd>Ctrl+Z</Kbd>
+          <span>undo ·</span>
+          <Kbd>Ctrl+Shift+Z</Kbd>
+          <span>redo</span>
         </p>
       </div>
     </div>

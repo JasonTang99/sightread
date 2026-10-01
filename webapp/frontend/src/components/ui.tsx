@@ -29,17 +29,23 @@ const TAB_TONE: Record<Tone, string> = {
   star: "border-yellow-500 text-yellow-600",
 };
 
+/** A header tab. Icon-only to keep the header to one short row, so the
+ *  name lives in `label`: it is the tooltip and the accessible name, which
+ *  is what tests address tabs by — `get_by_role("button", name="Videos (1)")`. */
 export function Tab({
   active,
   tone = "accent",
+  label,
   children,
   ...rest
-}: { active: boolean; tone?: Tone; children: ReactNode } & ButtonHTMLAttributes<HTMLButtonElement>) {
+}: { active: boolean; tone?: Tone; label: string; children: ReactNode } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button
       {...rest}
+      aria-label={label}
+      title={label}
       aria-current={active ? "page" : undefined}
-      className={`px-3 py-1 text-sm border-b-2 -mb-px transition-colors ${
+      className={`px-2 flex items-center gap-1 text-sm border-b-2 transition-colors ${
         active
           ? TAB_TONE[tone]
           : "border-transparent text-gray-500 hover:text-gray-800"
@@ -50,15 +56,61 @@ export function Tab({
   );
 }
 
-/** A count beside a tab label. Quieter than the label, and not a second
- *  colour: the number is never the thing you are looking for first.
- *
- *  No margin, and callers write the separating space into the JSX text. The
- *  tabs are addressed by their rendered label — `get_by_text("Clusters (3)")`,
- *  `get_by_role("button", name="Videos (1)")` — and a margin instead of a real
- *  space renders "Clusters(3)", which matches neither. */
+const ICON_PATHS: Record<string, ReactNode> = {
+  home: <path d="M3 10.5 12 3l9 7.5M5 9v11h5v-6h4v6h5V9" />,
+  clusters: (
+    <>
+      <rect x="7" y="3" width="14" height="14" rx="2" />
+      <path d="M3 7v12a2 2 0 0 0 2 2h12" />
+    </>
+  ),
+  singles: (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-5-5L5 21" />
+    </>
+  ),
+  videos: (
+    <>
+      <rect x="2" y="5" width="14" height="14" rx="2" />
+      <path d="m22 8-6 4 6 4V8z" />
+    </>
+  ),
+  favorites: <path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z" />,
+  timeline: (
+    <>
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+    </>
+  ),
+  finish: <path d="M4 22V4m0 0h13l-2 4 2 4H4" />,
+  unreviewed: <path d="M5 12h12m-5-6 6 6-6 6M21 5v14" />,
+};
+
+/** Line icons, stroked in the current text colour. Inline rather than a
+ *  package: seven glyphs do not justify a dependency. */
+export function Icon({ name, className = "w-4 h-4" }: { name: keyof typeof ICON_PATHS; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={className}
+    >
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
+
+/** A count beside a tab icon. Quieter than the icon, and not a second
+ *  colour: the number is never the thing you are looking for first. */
 export function TabCount({ children }: { children: ReactNode }) {
-  return <span className="text-gray-400 tabular-nums">({children})</span>;
+  return <span className="text-xs text-gray-400 tabular-nums">{children}</span>;
 }
 
 export function Button({
@@ -74,30 +126,6 @@ export function Button({
     >
       {children}
     </button>
-  );
-}
-
-/** Passive information. Grey by default; `tone` only where it carries meaning.
- *
- *  `className` is appended rather than accepted and dropped. Spreading `rest`
- *  and then writing `className=` after it silently discards whatever the
- *  caller passed, which is how the progress readout lost its flex layout the
- *  first time this was wired up — it rendered, it just stacked. */
-export function Status({
-  tone,
-  className = "",
-  children,
-  ...rest
-}: { tone?: "done"; children: ReactNode } & React.HTMLAttributes<HTMLSpanElement>) {
-  return (
-    <span
-      {...rest}
-      className={`text-xs tabular-nums ${
-        tone === "done" ? "text-green-600" : "text-gray-400"
-      } ${className}`}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -140,12 +168,14 @@ export function Pill({
 export function Switch({
   checked,
   label,
+  compact = false,
   ...rest
-}: { checked: boolean; label: string } & ButtonHTMLAttributes<HTMLButtonElement>) {
+}: { checked: boolean; label: string; compact?: boolean } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <span className="flex items-center gap-1.5">
-      <span className="text-xs text-gray-500">{label}</span>
+      {!compact && <span className="text-xs text-gray-500">{label}</span>}
       <button
+        aria-label={label}
         {...rest}
         role="switch"
         aria-checked={checked}
@@ -204,11 +234,4 @@ export function ShortcutBar({ items }: { items: Shortcut[] }) {
       </span>
     </span>
   );
-}
-
-/** A thin rule between groups in a single-row header. Cheaper than a border
- *  on every child and it survives items appearing and disappearing, which
- *  most of the header's contents do. */
-export function Divider() {
-  return <span aria-hidden className="w-px h-4 bg-gray-200 shrink-0" />;
 }
