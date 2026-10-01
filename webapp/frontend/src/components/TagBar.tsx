@@ -9,7 +9,6 @@ interface Props {
   untaggedTitle: string;
   emptyBadgeTitle?: string;
   onAssign: (tag: string | null) => void;
-  onAdd: () => void;
 }
 
 export function TagBar({
@@ -23,7 +22,6 @@ export function TagBar({
   untaggedTitle,
   emptyBadgeTitle,
   onAssign,
-  onAdd,
 }: Props) {
   return (
     <>
@@ -81,13 +79,6 @@ export function TagBar({
             </button>
           );
         })}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onAdd}
-          className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
-          title="Add tag"
-        >+</button>
       </div>
     </>
   );

@@ -9,7 +9,7 @@ import { SingletonsView } from "./components/SingletonsView";
 import { TimelineView } from "./components/TimelineView";
 import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
-import { Button, Divider, Status, Switch, Tab, TabCount } from "./components/ui";
+import { Icon, Switch, Tab, TabCount } from "./components/ui";
 import { APP_KEYS, typingTarget } from "./shortcuts";
 import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
 
@@ -18,7 +18,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"clusters" | "singles" | "videos" | "favorites" | "timeline" | "finish">("clusters");
-  const [undoing, setUndoing] = useState(false);
+  const undoingRef = useRef(false);
+  // The header slot the review views portal their own controls into, so the
+  // whole chrome is one row. State rather than a ref: the views only render
+  // into it once it exists.
+  const [controlsEl, setControlsEl] = useState<HTMLDivElement | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [videos, setVideos] = useState<string[]>([]);
   const [videoStatuses, setVideoStatuses] = useState<VideoStatuses>({});
@@ -140,7 +144,9 @@ export default function App() {
   useShortcuts(APP_KEYS, {
     "app-help": (e) => { e.preventDefault(); setShowHelp((s) => !s); },
     "app-help-close": () => setShowHelp(false),
-  }, { ignore: typingTarget });
+    "app-undo": (e) => { e.preventDefault(); handleUndo(); },
+    "app-redo": (e) => { e.preventDefault(); handleRedo(); },
+  }, { ignore: typingTarget, enabled: projectOpen });
 
   // Blur on the way out: the views drive off window keydown and ignore events
   // aimed at a button, so leaving focus on the tab you just clicked makes the
@@ -171,19 +177,26 @@ export default function App() {
     }
   }, [reload, videos]);
 
-  const handleUndo = async () => {
-    setUndoing(true);
+  // Undo and redo are keys only now. Holding Ctrl+Z must not stack up
+  // requests, and an empty stack is a no-op rather than an error banner:
+  // there is no disabled button left to say so.
+  const step = async (kind: "undo" | "redo") => {
+    if (undoingRef.current) return;
+    undoingRef.current = true;
     try {
-      const res = await fetch("/api/undo", { method: "POST" });
-      if (!res.ok) throw new Error(`Undo failed: ${res.status}`);
+      const res = await fetch(`/api/${kind}`, { method: "POST" });
+      if (res.status === 400) return;
+      if (!res.ok) throw new Error(`${kind === "undo" ? "Undo" : "Redo"} failed: ${res.status}`);
       await reload();
       await refetchVideos();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setUndoing(false);
+      undoingRef.current = false;
     }
   };
+  const handleUndo = () => step("undo");
+  const handleRedo = () => step("redo");
 
   const handleChangeProject = async () => {
     setState(null);
@@ -249,44 +262,31 @@ export default function App() {
     if (i >= 0 && i < visible.length - 1) setTab(visible[i + 1]);
   };
 
-  // Session progress across everything that needs a decision. Clusters and
-  // singles count as one unit each — that is how they are reviewed — and every
-  // video counts, pending deletes included, since a delete mark is a decision.
-  const totalUnits = clusterList.length + singleList.length + videos.length;
-  const reviewedUnits =
-    clusterList.filter((c) => isDecided(c, decisions)).length +
-    singleList.filter((c) => isDecided(c, decisions)).length +
-    videos.filter(
-      (v) =>
-        justDecidedVideos.has(v) ||
-        (videoStatuses[v] && videoStatuses[v] !== "undecided"),
-    ).length;
+  const hasReviewables = clusterList.length + singleList.length + videos.length > 0;
 
   return (
     <div>
       {showHelp && <HelpOverlay onClose={() => setShowHelp(false)} />}
-      {/* Three groups, left to right: where you are, where you can go, and
-          how the session is doing. They used to be one undivided run of up to
-          thirteen items — back button, project name, six tabs, a switch, a
-          progress bar, two counts and Undo — so the eye had no way to tell
-          navigation from status from action. The dividers do that work; the
-          items inside each group are unchanged in meaning. */}
-      <header className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-3">
+      {/* One row, and only what is used while reviewing: the photos get the
+          height. Undo/redo are Ctrl+Z / Ctrl+Shift+Z, Enter confirms, and the
+          progress readouts went — the tab counts carry the same news. The
+          right-hand slot belongs to the open view (ClusterView's per-row and
+          next-unreviewed, the tag chips), portalled in so its state stays in
+          the view. */}
+      <header className="bg-white border-b border-gray-200 px-2 h-9 flex items-stretch gap-2">
         <button
           onClick={handleChangeProject}
-          className="text-xs text-gray-400 hover:text-blue-600 transition-colors border border-gray-200 rounded px-2 py-0.5 hover:border-blue-400"
-          title="Back to project picker"
+          className="px-1 text-gray-400 hover:text-blue-600 transition-colors"
+          aria-label="Back to projects"
+          title="Back to projects"
         >
-          ← Projects
+          <Icon name="home" />
         </button>
-        {/* Which project this is. Every other project affordance is a verb —
-            the picker button, the finish panel — so with several trips half
-            reviewed there was nothing on screen that simply said where you
-            are. The folder name is what the picker lists; the full path is in
-            the tooltip, since trips from different drives can share a name. */}
+        {/* The folder name is what the picker lists; the full path is in the
+            tooltip, since trips from different drives can share a name. */}
         {state.folder && (
           <span
-            className="text-sm text-gray-900 font-semibold truncate max-w-[16rem]"
+            className="self-center text-sm text-gray-900 font-semibold truncate max-w-[12rem]"
             title={state.display_name ? `${state.display_name}\n${state.folder}` : state.folder}
             data-testid="project-name"
           >
@@ -294,101 +294,66 @@ export default function App() {
           </span>
         )}
 
-        <Divider />
-
-        <nav className="flex items-center self-stretch" aria-label="Review sections">
+        <nav className="flex items-stretch" aria-label="Review sections">
           {hasClusters && (
-            <Tab active={tab === "clusters"} onClick={selectTab("clusters")}>
-              Clusters <TabCount>{clusterList.length}</TabCount>
+            <Tab active={tab === "clusters"} label={`Clusters (${clusterList.length})`} onClick={selectTab("clusters")}>
+              <Icon name="clusters" /> <TabCount>{clusterList.length}</TabCount>
             </Tab>
           )}
           {hasSingles && (
-            <Tab active={tab === "singles"} onClick={selectTab("singles")}>
-              Singles <TabCount>{singleList.length}</TabCount>
+            <Tab active={tab === "singles"} label={`Singles (${singleList.length})`} onClick={selectTab("singles")}>
+              <Icon name="singles" /> <TabCount>{singleList.length}</TabCount>
             </Tab>
           )}
           {hasVideos && (
-            <Tab active={tab === "videos"} onClick={selectTab("videos")}>
-              Videos <TabCount>{reviewableVideos.length}</TabCount>
+            <Tab active={tab === "videos"} label={`Videos (${reviewableVideos.length})`} onClick={selectTab("videos")}>
+              <Icon name="videos" /> <TabCount>{reviewableVideos.length}</TabCount>
             </Tab>
           )}
           {hasFavorites && (
-            <Tab active={tab === "favorites"} tone="star" onClick={selectTab("favorites")}>
-              ★ Favorites <TabCount>{favorites.length}</TabCount>
+            <Tab active={tab === "favorites"} tone="star" label={`Favorites (${favorites.length})`} onClick={selectTab("favorites")}>
+              <Icon name="favorites" /> <TabCount>{favorites.length}</TabCount>
             </Tab>
           )}
-          <Tab active={tab === "timeline"} onClick={selectTab("timeline")}>
-            Timeline
+          <Tab active={tab === "timeline"} label="Timeline" onClick={selectTab("timeline")}>
+            <Icon name="timeline" />
           </Tab>
           <Tab
             active={tab === "finish"}
             tone="done"
+            label={state.done_at ? "Finish ✓" : "Finish"}
             onClick={selectTab("finish")}
             data-testid="finish-tab"
           >
-            Finish{state.done_at ? " ✓" : ""}
+            <Icon name="finish" />
+            {state.done_at && <span className="text-xs">✓</span>}
           </Tab>
         </nav>
 
-        <div className="ml-auto flex items-center gap-2">
-          {/* Skipping what is already decided: confirm jumps over it. Shown
-              once something is decided, since before that it would do nothing. */}
-          {totalUnits > 0 ? (
+        {/* Skipping what is already decided: confirm jumps over it. */}
+        {hasReviewables && (
+          <span className="self-center">
             <Switch
+              compact
               checked={hideReviewed}
               label="Skip reviewed"
-              onClick={() => {
+              onClick={(e) => {
+                e.currentTarget.blur();
                 const next = !hideReviewed;
                 setHideReviewed(next);
                 if (next) goToNextUnconfirmed();
               }}
               title={
                 hideReviewed
-                  ? "Confirm jumps to the next thing still needing a decision — click to step one at a time"
-                  : "Make confirm jump past clusters, singles and videos that have already been decided"
+                  ? "Skip reviewed: on — confirm jumps to the next thing still needing a decision"
+                  : "Skip reviewed: off — confirm steps one at a time"
               }
               data-testid="hide-reviewed"
             />
-          ) : null}
+          </span>
+        )}
 
-          {(totalUnits > 0 || state.pending_delete_count > 0 || state.done_at) && <Divider />}
-
-          {/* Progress, the delete queue and the finished flag are one readout,
-              not three loose greys next to a button. Spelling out "pending
-              delete" costs nothing here and "12 pending" never said pending
-              what. */}
-          {totalUnits > 0 && (
-            <Status
-              className="flex items-center gap-1.5"
-              title="Clusters, singles and videos that have been decided"
-              data-testid="session-progress"
-            >
-              <span className="w-16 h-1 bg-gray-100 rounded-full overflow-hidden" aria-hidden>
-                <span
-                  className="block h-full bg-blue-500 transition-all duration-300"
-                  style={{ width: `${(reviewedUnits / totalUnits) * 100}%` }}
-                />
-              </span>
-              {reviewedUnits}/{totalUnits} reviewed
-            </Status>
-          )}
-          {state.pending_delete_count > 0 && (
-            <Status title="Marked for deletion — nothing leaves disk until you apply deletes in the Finish tab">
-              {state.pending_delete_count} pending delete
-            </Status>
-          )}
-          {state.done_at && (
-            <Status tone="done" title={state.done_at}>
-              Trip finished
-            </Status>
-          )}
-
-          <Divider />
-
-          <Button onClick={handleUndo} disabled={!state.undo_available || undoing}>
-            {undoing ? "…" : "↶ Undo"}
-          </Button>
-        </div>
+        <div ref={setControlsEl} className="flex-1 min-w-0 flex items-center justify-end gap-3" />
       </header>
 
       <main className="px-2 pt-2">
@@ -453,10 +418,11 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} onAdvance={advanceTab} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView controlsEl={controlsEl} folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} onAdvance={advanceTab} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView
+                controlsEl={controlsEl}
                 folder={state.folder}
                 singletons={singleList}
                 skipReviewed={hideReviewed}

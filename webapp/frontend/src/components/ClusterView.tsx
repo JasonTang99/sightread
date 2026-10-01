@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
-import { isDecided, isDoomed, isWiped, nextAfterConfirm } from "../decisions";
+import { isDecided, isDoomed, nextAfterConfirm } from "../decisions";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
 import { deviceOf } from "../device";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
-import { Divider, ShortcutBar } from "./ui";
-import { CLUSTER_KEYS, brief, typingTarget } from "../shortcuts";
-
-type ClusterFilter = "all" | "wiped";
+import { Icon } from "./ui";
+import { CLUSTER_KEYS, typingTarget } from "../shortcuts";
 
 interface Props {
+  // The app header's slot for this view's controls.
+  controlsEl: HTMLElement | null;
   // The project folder, so a tile can name the camera folder it came from.
   folder?: string;
   clusters: Cluster[];
@@ -30,49 +31,38 @@ interface Props {
   onVideoTagsChange?: (tags: VideoTagsState) => void;
 }
 
-// A cluster's size, as colour. The thresholds come from the archive: most
-// clusters are a pair or a trio, anything past about eight is a burst — the
-// Hoh trip's 44-photo viewpoint and Hawaii's 47-frame pineapple sequence are
-// the shape this is warning about.
-function sizeClass(n: number): string {
-  if (n >= 20) return "bg-red-100 text-red-800 ring-1 ring-red-300";
-  if (n >= 8) return "bg-orange-100 text-orange-800";
-  if (n >= 4) return "bg-amber-100 text-amber-800";
-  return "bg-blue-50 text-blue-700";
-}
-
 function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
-export function ClusterView({ folder, clusters: allClusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
-  const [filter, setFilter] = useState<ClusterFilter>("all");
+export function ClusterView({ controlsEl, folder, clusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [idx, setIdx] = useState(() => {
-    const first = allClusters.findIndex((c) => !isDecided(c, decisions));
+    const first = clusters.findIndex((c) => !isDecided(c, decisions));
     return first === -1 ? 0 : first;
   });
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
-  const [cols, setCols] = useState(2);
+  // Photos per row. Each cluster starts at its own default — three when every
+  // frame is portrait, since two tall frames side by side leave most of the
+  // width empty — and a pick from the header holds for that cluster only.
+  const [colsOverride, setColsOverride] = useState<number | null>(null);
+  // Portrait or not, per path, learnt from the decoded image. The pipeline
+  // knows framing but does not ship it, and this way existing projects work
+  // without a re-run. The preload below fills it for the next clusters, so
+  // the default is usually settled before you arrive.
+  const [portrait, setPortrait] = useState<Record<string, boolean>>({});
+  const notePortrait = (path: string, el: HTMLImageElement) => {
+    if (!el.naturalWidth) return;
+    const tall = el.naturalHeight > el.naturalWidth;
+    setPortrait((prev) => (prev[path] === tall ? prev : { ...prev, [path]: tall }));
+  };
   const [submitting, setSubmitting] = useState(false);
   const [focusedImg, setFocusedImg] = useState(0);
   const imgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const keepsByClusterRef = useRef<Record<number, Record<string, boolean>>>({});
   // Where confirm lands, by id: the list is rebuilt when the refresh comes
-  // back (and can change shape under the fully-deleted filter), so an index
-  // taken before it may no longer point at the same cluster.
+  // back, so an index taken before it may no longer point at the same
+  // cluster.
   const landOnRef = useRef<number | "stay" | undefined>(undefined);
-
-  const wipedCount = useMemo(
-    () => allClusters.filter((c) => isWiped(c, decisions)).length,
-    [allClusters, decisions],
-  );
-  const clusters = useMemo(
-    () => (filter === "wiped" ? allClusters.filter((c) => isWiped(c, decisions)) : allClusters),
-    [allClusters, decisions, filter],
-  );
-
-  // Filtering rebuilds the list under the cursor; start over at the top.
-  useEffect(() => { setIdx(0); }, [filter]);
 
   const clusterIdx = Math.min(idx, clusters.length - 1);
   const cluster = clusters[clusterIdx];
@@ -82,6 +72,7 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
     for (const c of clusters.slice(clusterIdx + 1, clusterIdx + 3)) {
       for (const img of c.images) {
         const el = new Image();
+        el.onload = () => notePortrait(img.path, el);
         el.src = imgUrl(img.path);
       }
     }
@@ -106,6 +97,7 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
       setKeeps(init);
     }
     setFocusedImg(0);
+    setColsOverride(null);
   }, [cluster?.cluster_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Remember selections per cluster so navigating back restores them
@@ -157,7 +149,10 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
     );
   };
 
-  const { assignTag, addTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
+  const allPortrait = !!cluster && cluster.images.every((img) => portrait[img.path]);
+  const cols = colsOverride ?? (allPortrait ? 3 : 2);
+
+  const { assignTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
     videoTags,
     onVideoTagsChange,
     favorites,
@@ -171,8 +166,8 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
   }, [cluster?.cluster_id, focusedImg]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const undecidedCount = useMemo(
-    () => allClusters.filter((c) => !isDecided(c, decisions)).length,
-    [allClusters, decisions],
+    () => clusters.filter((c) => !isDecided(c, decisions)).length,
+    [clusters, decisions],
   );
 
   // Skipping leaves gaps behind you, and past a hundred clusters finding them
@@ -297,163 +292,67 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
     },
   }, { ignore: typingTarget, enabled: !!cluster });
 
-  const filterToggle = (
-    <div className="flex rounded overflow-hidden border border-gray-200 text-xs">
-      <button
-        onClick={() => setFilter("all")}
-        className={`px-2 py-1 transition-colors ${filter === "all" ? "bg-blue-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
-      >
-        All ({allClusters.length})
-      </button>
-      <button
-        onClick={() => setFilter("wiped")}
-        className={`px-2 py-1 transition-colors ${filter === "wiped" ? "bg-red-600 text-white" : "text-gray-500 hover:bg-gray-50"}`}
-        title="Clusters where every image was marked for deletion"
-      >
-        Fully deleted ({wipedCount})
-      </button>
-    </div>
-  );
-
   if (!cluster) {
-    return (
-      <div className="space-y-2">
-        <div className="bg-white border border-gray-200 rounded px-3 py-2 flex items-center gap-3">
-          {filterToggle}
-        </div>
-        <p className="text-sm text-gray-500 px-1">
-          {filter === "wiped" ? "No clusters had every image deleted." : "No clusters remaining."}
-        </p>
-      </div>
-    );
+    return <p className="text-sm text-gray-500 px-1">No clusters remaining.</p>;
   }
 
-  const bestScore = Math.max(...cluster.images.map((img) => img.score));
-  const nKeep = cluster.images.filter((img) => isKeptOf(img.path, img.rank)).length;
-  const nDelete = cluster.images.length - nKeep;
   const focused = cluster.images[Math.min(focusedImg, cluster.images.length - 1)];
   const focusedTag = focused ? videoTags.assignments[focused.path] ?? null : null;
+  const bestScore = Math.max(...cluster.images.map((img) => img.score));
 
-  return (
-    <div className="space-y-2">
-      {/* Combined bar */}
-      <div className="bg-white border border-gray-200 rounded px-3 py-2 flex items-center gap-3 flex-wrap">
-        {filterToggle}
-        <button
-          onClick={() => setIdx(Math.max(0, clusterIdx - 1))}
-          disabled={clusterIdx === 0}
-          className="px-2 py-1 text-sm border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
-        >
-          ←
-        </button>
-        <select
-          value={clusterIdx}
-          onChange={(e) => setIdx(Number(e.target.value))}
-          className="px-2 py-1 border border-gray-200 rounded text-sm bg-white text-gray-700"
-        >
-          {/* Position only: the badge beside it already says how big the
-              selected cluster is, and saying it twice just made the bar
-              longer. */}
-          {clusters.map((c, i) => (
-            <option key={c.cluster_id} value={i}>
-              {i + 1}/{clusters.length}
-            </option>
-          ))}
-        </select>
-        {/* How many photos you are deciding between. It was only legible
-            inside the dropdown's own label, which is the one place you cannot
-            read it while looking at the photos. Colour carries the size,
-            because a 44-photo burst is a different job from a pair and you
-            want to know which one you just landed on before you start. */}
-        <span
-          className={`px-2 py-1 rounded text-sm font-semibold whitespace-nowrap ${sizeClass(cluster.images.length)}`}
-          title={`${cluster.images.length} photos in this cluster`}
-          data-testid="cluster-size"
-        >
-          {cluster.images.length} photo{cluster.images.length === 1 ? "" : "s"}
-        </span>
-        <button
-          onClick={() => setIdx(Math.min(clusters.length - 1, clusterIdx + 1))}
-          disabled={clusterIdx >= clusters.length - 1}
-          className="px-2 py-1 text-sm border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
-        >
-          →
-        </button>
-
-        <Divider />
-
-        <span className="text-xs text-gray-500">
-          {nDelete > 0
-            ? <>keep <strong>{nKeep}</strong> · trash <strong className="text-red-500">{nDelete}</strong></>
-            : <>keep all <strong>{nKeep}</strong></>}
-        </span>
-
-        <span className="text-xs text-gray-500">
-          {undecidedCount} of {allClusters.length} left
-        </span>
-
-        {focused && <Divider />}
-
-        <ShortcutBar items={brief(CLUSTER_KEYS)} />
-        {focused && (
-          <TagBar
-            tags={videoTags.tags}
-            currentTag={focusedTag}
-            isFavorited={favSet.has(focused.path)}
-            busy={tagBusy}
-            flash={tagFlash}
-            showSlotKeys={false}
-            untaggedLabel="no tag"
-            untaggedTitle="No tag → trip root"
-            emptyBadgeTitle="Exports to trip root"
-            onAssign={(tag) => {
-              if (tag !== null) setKeeps((prev) => ({ ...prev, [focused.path]: true }));
-              assignTag(focused.path, tag);
-            }}
-            onAdd={addTag}
-          />
-        )}
-
-        <div className="ml-auto flex items-center gap-2">
-          <div className="flex items-center gap-1">
-            {[2, 3, 4].map((n) => (
-              <button
-                key={n}
-                onClick={() => setCols(n)}
-                className={`w-6 h-6 text-xs rounded ${
-                  cols === n ? "bg-blue-100 text-blue-700 font-medium" : "text-gray-400 hover:bg-gray-100"
-                }`}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
-          <Divider />
-          <button
-            onClick={jumpToUnreviewed}
-            disabled={undecidedCount === 0}
-            className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40"
-            title="Jump to the next cluster with no decision (n)"
-          >
-            → Unreviewed
-          </button>
-          <button
-            onClick={confirm}
-            disabled={submitting}
-            className="px-3 py-1 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-          >
-            {submitting ? "…" : "✓ Confirm"}
-          </button>
-        </div>
-      </div>
-
-      {/* Progress */}
-      <div className="w-full bg-gray-100 rounded-full h-0.5" data-testid="cluster-progress">
-        <div
-          className="bg-blue-500 h-0.5 rounded-full transition-all duration-300"
-          style={{ width: `${((clusterIdx + 1) / clusters.length) * 100}%` }}
+  const controls = (
+    <>
+      {focused && (
+        <TagBar
+          tags={videoTags.tags}
+          currentTag={focusedTag}
+          isFavorited={favSet.has(focused.path)}
+          busy={tagBusy}
+          flash={tagFlash}
+          showSlotKeys={false}
+          untaggedLabel="no tag"
+          untaggedTitle="No tag → trip root"
+          emptyBadgeTitle="Exports to trip root"
+          onAssign={(tag) => {
+            if (tag !== null) setKeeps((prev) => ({ ...prev, [focused.path]: true }));
+            assignTag(focused.path, tag);
+          }}
         />
+      )}
+      <div className="flex items-center gap-0.5 shrink-0" role="group" aria-label="Photos per row">
+        {[2, 3, 4].map((n) => (
+          <button
+            key={n}
+            onClick={(e) => { e.currentTarget.blur(); setColsOverride(n); }}
+            aria-pressed={cols === n}
+            aria-label={`${n} photos per row`}
+            title={`${n} photos per row`}
+            className={`w-6 h-6 text-xs rounded ${
+              cols === n ? "bg-blue-100 text-blue-700 font-medium" : "text-gray-400 hover:bg-gray-100"
+            }`}
+          >
+            {n}
+          </button>
+        ))}
       </div>
+      <button
+        onClick={(e) => { e.currentTarget.blur(); jumpToUnreviewed(); }}
+        disabled={undecidedCount === 0}
+        aria-label="Next unreviewed"
+        title={`Jump to the next cluster with no decision (n) — ${undecidedCount} left`}
+        className="flex items-center gap-1 px-1.5 py-0.5 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40 shrink-0"
+      >
+        <Icon name="unreviewed" className="w-3.5 h-3.5" />
+        <span className="tabular-nums">{undecidedCount}</span>
+      </button>
+    </>
+  );
+
+  // Position and size are no longer on screen; the attributes keep them
+  // addressable for the UI tests without spending header width on them.
+  return (
+    <div data-testid="cluster-view" data-index={clusterIdx} data-size={cluster.images.length}>
+      {controlsEl && createPortal(controls, controlsEl)}
 
       {/* Image grid */}
       <div
@@ -495,8 +394,9 @@ export function ClusterView({ folder, clusters: allClusters, decisions, skipRevi
                 </span>
                 <img
                   src={imgUrl(img.path)}
+                  onLoad={(e) => notePortrait(img.path, e.currentTarget)}
                   alt=""
-                  className="w-full object-contain bg-gray-50 max-h-[calc(100vh-9rem)]"
+                  className="w-full object-contain bg-gray-50 max-h-[calc(100vh-5.5rem)]"
                   loading="lazy"
                   decoding="async"
                 />

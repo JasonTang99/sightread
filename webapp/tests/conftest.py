@@ -202,7 +202,7 @@ def page_loaded(browser, webapp_server):
     page = ctx.new_page()
     _track_api_requests(page)
     page.goto(webapp_server)
-    page.wait_for_selector("select", timeout=10_000)
+    page.wait_for_selector("[data-testid=cluster-view]", timeout=10_000)
     yield page
     page.close()
     ctx.close()  # ensures all in-flight requests are flushed before reset_state sees clean slate

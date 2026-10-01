@@ -63,14 +63,6 @@ export function useMediaTags(
     [apply, favorites, onToggleFavorite, onError, emptyFlash],
   );
 
-  const addTag = useCallback(async () => {
-    const name = window.prompt("Tag name (export subfolder):");
-    if (!name?.trim()) return;
-    const next = [...videoTags.tags];
-    if (!next.includes(name.trim())) next.push(name.trim());
-    await apply({ tags: next });
-  }, [apply, videoTags.tags]);
-
   const nextTag = useCallback(
     (cur: string | null): string | null => {
       const { tags } = videoTags;
@@ -83,5 +75,5 @@ export function useMediaTags(
     [videoTags],
   );
 
-  return { assignTag, addTag, nextTag, busy, flash, clearFlash: () => setFlash(null) };
+  return { assignTag, nextTag, busy, flash, clearFlash: () => setFlash(null) };
 }
