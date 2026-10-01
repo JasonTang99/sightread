@@ -1,6 +1,6 @@
 import type { ProjectEntry } from "../types";
 import { EtaTag, STATUS_LABEL, projectKey } from "./picker";
-import { Status } from "./ui";
+import { Pill } from "./ui";
 
 interface ProjectListProps {
   title: string;
@@ -42,9 +42,9 @@ export function ProjectList({ title, testId, projects, selected, onSelect, onOpe
                     )}
                     <EtaTag etaS={p.eta_s} pending={p.pending_count} />
                   </div>
-                  <Status tone={p.done_at ? "done" : undefined} className="shrink-0">
+                  <Pill tone={p.done_at ? "done" : p.status}>
                     {label}
-                  </Status>
+                  </Pill>
                 </button>
               </li>
             );

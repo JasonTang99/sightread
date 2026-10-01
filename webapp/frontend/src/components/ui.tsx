@@ -9,7 +9,9 @@
  * "where you are", and nothing else. Green, yellow and red mean finished,
  * favourite and destructive — never decoration. Everything that is merely
  * information is grey. Counting utilities across the components before this
- * pass: five accent hues in the tab strip alone.
+ * pass: five accent hues in the tab strip alone. Exception: picker status
+ * pills (`Pill`) — green ready, yellow stale, grey not-run, blue running,
+ * purple done — and the slate ETA chip. A trip list is scanned by state.
  *
  * These deliberately take `children` and a few booleans rather than a
  * className grab-bag. A prop that is a class string is the duplication coming
@@ -94,6 +96,33 @@ export function Status({
         tone === "done" ? "text-green-600" : "text-gray-400"
       } ${className}`}
     >
+      {children}
+    </span>
+  );
+}
+
+/** Picker status label and ETA tag. The colour-rule exception: these stay
+ *  filled pills so a list of trips can be scanned by state. `className` is
+ *  appended, same reason as `Status`. */
+export type PillTone = "ready" | "stale" | "never_run" | "running" | "done" | "eta";
+
+const PILL_CLASS: Record<PillTone, string> = {
+  ready: "text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-green-100 text-green-700",
+  stale: "text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-yellow-100 text-yellow-700",
+  never_run: "text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-gray-100 text-gray-500",
+  running: "text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-blue-100 text-blue-600",
+  done: "text-xs px-1.5 py-0.5 rounded font-medium shrink-0 bg-purple-100 text-purple-700",
+  eta: "inline-block mt-0.5 text-[10px] leading-4 px-1.5 rounded bg-slate-100 text-slate-500",
+};
+
+export function Pill({
+  tone,
+  className = "",
+  children,
+  ...rest
+}: { tone: PillTone; children: ReactNode } & React.HTMLAttributes<HTMLSpanElement>) {
+  return (
+    <span {...rest} className={`${PILL_CLASS[tone]} ${className}`}>
       {children}
     </span>
   );

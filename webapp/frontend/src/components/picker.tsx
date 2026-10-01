@@ -1,10 +1,7 @@
 import type { ProjectEntry, ProjectStatus } from "../types";
-import { Status } from "./ui";
+import { Pill } from "./ui";
 
-/** Labels only. Colour lives on `Status`: green for a finished trip, grey
- *  for every pipeline state. The old chips used yellow for stale, blue for
- *  running and purple for done — favourite, "where you are", and a hue the
- *  rest of the app does not use. */
+/** Labels only. Colour and pill shape live on `Pill`. */
 export const STATUS_LABEL: Record<ProjectStatus, string> = {
   ready: "Ready",
   stale: "Stale",
@@ -22,13 +19,13 @@ export function formatEta(seconds: number): string {
 export function EtaTag({ etaS, pending }: { etaS: number | null; pending: number }) {
   if (etaS == null) return null;
   return (
-    <Status
+    <Pill
+      tone="eta"
       data-testid="pipeline-eta"
       title={`Estimated pipeline time for ${pending} unprocessed photo${pending === 1 ? "" : "s"}`}
-      className="inline-block mt-0.5"
     >
       ⏱ {formatEta(etaS)} · {pending} to process
-    </Status>
+    </Pill>
   );
 }
 
