@@ -102,6 +102,19 @@ SCORE_RESIZE = 512           # resize to this before neural metrics
 _EXIF_DATETIME_TAG = next(k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal")
 _EXIF_ORIENTATION_TAG = 0x0112
 _EXIF_MODEL_TAG = 0x0110
+_EXIF_SUBSEC_TAG = next(k for k, v in ExifTags.TAGS.items() if v == "SubsecTimeOriginal")
+
+# The same frame in two folders: a shared album's copy of a shot that is also
+# in iphone/ or xt5/. No trip had one when this was written (all eight with a
+# guest folder were checked), so this is a guard, and it is strict on purpose.
+# Two near misses from the archive set the rules. Vegas IMG_9107 (album) and
+# IMG_9108 (iphone/) share model and second but not the sub-second: two
+# frames. Hawaii's album holds a guest's iPhone 17 Pro whose IMG_946x numbers
+# collide with his own, so filenames prove nothing. A copy must match model,
+# DateTimeOriginal *and* SubSecTimeOriginal, and look the same: recompression
+# moves the embedding well under this, while the closest distinct frames
+# across folders in the archive sit at 0.03-0.04.
+DUPLICATE_MAX_DIST = 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +524,79 @@ def own_flags(devices: list[str], models: list[str | None] | None = None) -> lis
     own_models = {m for m, own in zip(models, by_folder) if own and m}
     return [own or (m in own_models if m else False)
             for own, m in zip(by_folder, models)]
+
+
+def _subsec_instant(path: str) -> str | None:
+    """DateTimeOriginal with its sub-second, or None when either is missing."""
+    try:
+        with Image.open(path) as img:
+            ifd = img.getexif().get_ifd(ExifTags.IFD.Exif)
+    except Exception:
+        return None
+    when, sub = ifd.get(_EXIF_DATETIME_TAG), ifd.get(_EXIF_SUBSEC_TAG)
+    if not when or not sub:
+        return None
+    return f"{str(when).strip()}.{str(sub).strip()}"
+
+
+def find_duplicates(
+    paths: list[str],
+    timestamps: list[float | None],
+    models: list[str | None],
+    devices: list[str],
+    embeddings: np.ndarray,
+) -> dict[int, int]:
+    """Album copies of his own frames, as {copy index: original index}.
+
+    Only a guest-folder photo can be the copy and only one of his folders
+    holds the original, so his own camera folders are never touched. The
+    second-resolution timestamp and model narrow it to a handful of pairs
+    before any file is reopened for the sub-second; see DUPLICATE_MAX_DIST
+    for why all three checks are needed.
+    """
+    own_folder = [d not in media.OTHER_PEOPLE_DEVICES for d in devices]
+    by_shot: dict[tuple[float, str], list[int]] = {}
+    for j, (t, m) in enumerate(zip(timestamps, models)):
+        if own_folder[j] and t is not None and m:
+            by_shot.setdefault((t, m), []).append(j)
+    if not by_shot:
+        return {}
+    unit = embeddings / np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-8)
+    dups: dict[int, int] = {}
+    for i, (t, m) in enumerate(zip(timestamps, models)):
+        if own_folder[i] or t is None or not m:
+            continue
+        originals = by_shot.get((t, m))
+        if not originals:
+            continue
+        instant = _subsec_instant(paths[i])
+        if instant is None:
+            continue
+        for j in originals:
+            if _subsec_instant(paths[j]) != instant:
+                continue
+            if 1.0 - float(unit[i] @ unit[j]) > DUPLICATE_MAX_DIST:
+                continue
+            dups[i] = j
+            break
+    return dups
+
+
+def queue_duplicates(output_dir: Path, copies: list[str]) -> int:
+    """Mark album copies for deletion; returns how many were newly queued.
+
+    Queued, not unlinked: the delete still goes through the Finish tab, which
+    checks the mirror first, and Ctrl+Z / restore can take it back. A photo
+    that already has a decision keeps it — a star on the album copy wins.
+    utils is stdlib plus media, the same light weight as the imports above.
+    """
+    from utils import TO_DELETE, load_decisions, save_decisions
+
+    current = load_decisions(output_dir)
+    fresh = {p: TO_DELETE for p in copies if p not in current}
+    if fresh:
+        save_decisions(output_dir, fresh)
+    return len(fresh)
 
 
 def _split_by_photographer(
@@ -1449,6 +1535,22 @@ def run_pipeline(
         extra_cache_paths=extra_emb or None,
     )
 
+    devices = [media.device_of(p, image_dir) for p in paths]
+    dups = find_duplicates(paths, timestamps, models, devices, embeddings)
+    if dups:
+        for i, j in sorted(dups.items()):
+            print(f"Duplicate: {paths[i]} is a copy of {paths[j]}")
+        copies = [paths[i] for i in sorted(dups)]
+        keep = [k for k in range(len(paths)) if k not in dups]
+        paths = [paths[k] for k in keep]
+        timestamps = [timestamps[k] for k in keep]
+        orientations = [orientations[k] for k in keep]
+        models = [models[k] for k in keep]
+        devices = [devices[k] for k in keep]
+        embeddings = embeddings[keep]
+        queued = queue_duplicates(out, copies)
+        print(f"Left {len(copies)} duplicate(s) out of review; {queued} newly queued for deletion")
+
     clusters = cluster_embeddings(
         embeddings,
         timestamps,
@@ -1462,7 +1564,7 @@ def run_pipeline(
         models=models,
         cross_window_s=cross_window_s,
         cross_threshold=cross_threshold,
-        own=own_flags([media.device_of(p, image_dir) for p in paths], models),
+        own=own_flags(devices, models),
     )
 
     scores, components = score_images(
