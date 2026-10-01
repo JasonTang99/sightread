@@ -400,46 +400,46 @@ export default function App() {
           </Tab>
         </nav>
 
-        {sourceFilterOn && (
-          <div className="self-center flex items-center gap-2" role="group" aria-label="Sources">
-            {sources.map((name) => (
-              <Check
-                key={name}
-                checked={onSources.has(name)}
-                label={name}
-                onChange={(e) => {
+        {/* Sources, the open view's tags, then Skip reviewed. The flexible
+            slot pushes that group to the far right and stays one row. */}
+        <div className="flex-1 min-w-0 flex items-center justify-end gap-3">
+          {sourceFilterOn && (
+            <div className="flex items-center gap-2 shrink-0" role="group" aria-label="Sources">
+              {sources.map((name) => (
+                <Check
+                  key={name}
+                  checked={onSources.has(name)}
+                  label={name}
+                  onChange={(e) => {
+                    e.currentTarget.blur();
+                    toggleSource(name);
+                  }}
+                />
+              ))}
+            </div>
+          )}
+          <div ref={setControlsEl} className="flex items-center justify-end gap-3 min-w-0" />
+          {hasReviewables && (
+            <span className="shrink-0">
+              <Switch
+                checked={hideReviewed}
+                label="Skip reviewed"
+                onClick={(e) => {
                   e.currentTarget.blur();
-                  toggleSource(name);
+                  const next = !hideReviewed;
+                  setHideReviewed(next);
+                  if (next) goToNextUnconfirmed();
                 }}
+                title={
+                  hideReviewed
+                    ? "Skip reviewed: on — confirm jumps to the next thing still needing a decision"
+                    : "Skip reviewed: off — confirm steps one at a time"
+                }
+                data-testid="hide-reviewed"
               />
-            ))}
-          </div>
-        )}
-
-        {/* Skipping what is already decided: confirm jumps over it. */}
-        {hasReviewables && (
-          <span className="self-center">
-            <Switch
-              compact
-              checked={hideReviewed}
-              label="Skip reviewed"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                const next = !hideReviewed;
-                setHideReviewed(next);
-                if (next) goToNextUnconfirmed();
-              }}
-              title={
-                hideReviewed
-                  ? "Skip reviewed: on — confirm jumps to the next thing still needing a decision"
-                  : "Skip reviewed: off — confirm steps one at a time"
-              }
-              data-testid="hide-reviewed"
-            />
-          </span>
-        )}
-
-        <div ref={setControlsEl} className="flex-1 min-w-0 flex items-center justify-end gap-3" />
+            </span>
+          )}
+        </div>
       </header>
 
       <main className="px-2 pt-2">
