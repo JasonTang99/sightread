@@ -239,7 +239,7 @@ export function SingletonsView({
           corner="bottom-2 left-2"
         />
         {current.motion && (
-          <LiveMotion key={current.path} motion={current.motion} fit="contain" corner="top-2 left-2" />
+          <LiveMotion key={`motion:${current.path}`} motion={current.motion} fit="contain" corner="top-2 left-2" />
         )}
       </div>
     </div>
