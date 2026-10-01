@@ -1048,8 +1048,12 @@ def get_gallery():
     return {"photos": all_photos, "folder": str(ctx.folder)}
 
 
-@app.get("/api/video")
-def serve_video(path: str = Query(...), cached_only: bool = False):
+# HEAD is listed on purpose. FastAPI does not add it to a GET route, and an
+# unmatched HEAD falls through to the static mount, which answers 404. The
+# player probes with HEAD before mounting <video> and treats that 404 as final,
+# so the first open shows "Not Found" even though the source file is there.
+@app.api_route("/api/video", methods=["GET", "HEAD"])
+def serve_video(request: Request, path: str = Query(...), cached_only: bool = False):
     ctx = _require_active()
     abs_path = _resolve_project_path(ctx, path)
     if not _in_allowed_dirs(abs_path, ctx):
@@ -1057,10 +1061,12 @@ def serve_video(path: str = Query(...), cached_only: bool = False):
     if not abs_path.exists():
         raise HTTPException(404, "Not found")
     # Serve the browser-playable 1440p transcode if it's been pre-baked (see
-    # video.py / the convert_videos script). Falls back to the (silent, 4K,
-    # full-bitrate) original otherwise — unless the caller only wants the cache
-    # (e.g. background preloads, which shouldn't pull a ~190Mbps original just
-    # to warm the browser's buffer).
+    # video.py / the convert_videos script). GET falls back to the original
+    # otherwise — unless the caller only wants the cache (background preloads,
+    # which shouldn't pull a ~190Mbps original just to warm the browser's
+    # buffer). HEAD does not fall back: the player would mount that original,
+    # the browser would fail it (HEVC, LPCM, no faststart), and the probe
+    # would not retry. 503 means "still transcoding".
     cached = video_cache_path(ctx.output_dir, abs_path)
     if cached.exists():
         return FileResponse(cached, media_type="video/mp4", headers=_CACHE_HEADERS)
@@ -1072,6 +1078,13 @@ def serve_video(path: str = Query(...), cached_only: bool = False):
                 422,
                 "Cannot play this video — transcode failed; the file may be corrupt",
             )
+    if request.method == "HEAD":
+        _transcode_executor.submit(_transcode_bg, abs_path, cached)
+        raise HTTPException(
+            503,
+            "Transcoding",
+            headers={"Cache-Control": "no-store", "Retry-After": "2"},
+        )
     return FileResponse(abs_path, headers=_CACHE_HEADERS)
 
 

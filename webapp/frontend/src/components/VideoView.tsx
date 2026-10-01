@@ -352,6 +352,10 @@ export function VideoView({
 
   // Probe /api/video before mounting <video>. A corrupt original (no moov atom)
   // and a failed transcode both look like a generic element error otherwise.
+  // HEAD, not GET: a miss must not download the file. 503 is "still
+  // transcoding" and is polled; 422 and a missing source file are final.
+  // no-store so a 503, or a 404 left over from before HEAD reached this
+  // route, is not reused for the next probe.
   useEffect(() => {
     if (!current) return;
     let cancelled = false;
@@ -360,7 +364,7 @@ export function VideoView({
     const basename = current.split("/").pop() ?? current;
 
     const probe = async () => {
-      const res = await fetch(url, { method: "HEAD" });
+      const res = await fetch(url, { method: "HEAD", cache: "no-store" });
       if (cancelled) return;
       if (res.ok) {
         setVideoStatus(null);
@@ -369,13 +373,13 @@ export function VideoView({
       }
       if (res.status === 503) {
         setVideoSrc(null);
-        setVideoStatus("Preparing video…");
+        setVideoStatus("Transcoding…");
         timer = setTimeout(probe, 2000);
         return;
       }
       let detail = res.statusText;
       try {
-        const body = await fetch(url).then((r) => r.json());
+        const body = await fetch(url, { cache: "no-store" }).then((r) => r.json());
         if (typeof body.detail === "string") detail = body.detail;
       } catch {
         /* non-JSON error body */
