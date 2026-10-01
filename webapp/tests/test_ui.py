@@ -522,10 +522,10 @@ class TestTimelineVideos:
         page_loaded.get_by_role("button", name="Videos (1)").click()
         page_loaded.keyboard.press(" ")
         settle(page_loaded)
-        expect(page_loaded.get_by_text("Delete", exact=True)).to_be_visible()
+        expect(page_loaded.get_by_test_id("video-status")).to_have_text("Delete")
         page_loaded.keyboard.press("s")
         settle(page_loaded)
-        expect(page_loaded.get_by_text("Keep", exact=True)).to_be_visible()
+        expect(page_loaded.get_by_test_id("video-status")).to_have_text("★ Favorite")
         assert video in requests.get(f"{BASE_URL}/api/state").json()["favorites"]
 
     def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
@@ -919,7 +919,7 @@ class TestEnterAdvancesTab:
         page_loaded.goto(BASE_URL)
         settle(page_loaded)
         page_loaded.get_by_role("button", name="Videos (1)").click()
-        expect(page_loaded.get_by_text("1 / 1")).to_be_visible()
+        expect(page_loaded.get_by_test_id("video-view")).to_have_attribute("data-index", "0")
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         expect(page_loaded.get_by_role("button", name="Timeline")).to_have_class(

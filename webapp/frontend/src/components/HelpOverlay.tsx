@@ -3,8 +3,6 @@ import {
   CLUSTER_KEYS,
   FAVORITES_KEYS,
   SINGLES_KEYS,
-  VIDEO_CLIP_KEYS,
-  VIDEO_EDIT_KEYS,
   VIDEO_KEYS,
   type Shortcut,
 } from "../shortcuts";
@@ -20,7 +18,7 @@ interface Props {
 const SECTIONS: [string, Shortcut[]][] = [
   ["Clusters", CLUSTER_KEYS],
   ["Singles", SINGLES_KEYS],
-  ["Videos", [...VIDEO_KEYS, ...VIDEO_CLIP_KEYS, ...VIDEO_EDIT_KEYS]],
+  ["Videos", VIDEO_KEYS],
   ["Favorites", FAVORITES_KEYS],
 ];
 

@@ -209,11 +209,11 @@ export const VIDEO_KEYS: Shortcut[] = [
     bind: [{ id: "video-toggle", chords: [{ key: " " }] }],
   },
   {
-    keys: "l",
+    keys: "p",
     what: "play / pause",
     brief: true,
     short: "pause",
-    bind: [{ id: "video-pause", chords: [{ key: "l" }] }],
+    bind: [{ id: "video-pause", chords: [{ key: "p" }] }],
   },
   {
     keys: "s",
@@ -238,45 +238,6 @@ export const VIDEO_KEYS: Shortcut[] = [
     brief: true,
     short: "confirm",
     bind: [{ id: "video-confirm", chords: [{ key: "Enter" }] }],
-  },
-];
-
-/** Only shown once the clip has suggested or user clips to step through. */
-export const VIDEO_CLIP_KEYS: Shortcut[] = [
-  {
-    keys: "n / p",
-    what: "next / prev clip marker",
-    brief: true,
-    short: "markers",
-    bind: [
-      { id: "video-marker-next", chords: [{ key: "n" }] },
-      { id: "video-marker-prev", chords: [{ key: "p" }] },
-    ],
-  },
-];
-
-/** Only shown when the clip can be edited. */
-export const VIDEO_EDIT_KEYS: Shortcut[] = [
-  {
-    keys: "i / o",
-    what: "set clip in / out",
-    brief: true,
-    short: "in / out",
-    bind: [
-      { id: "video-in", chords: [{ key: "i" }] },
-      { id: "video-out", chords: [{ key: "o" }] },
-    ],
-  },
-  {
-    keys: "x",
-    what: "delete selected clip",
-    // Backspace was never written down; it has always done the same as x.
-    bind: [{ id: "video-clip-delete", chords: [{ key: "x" }, { key: "Backspace" }] }],
-  },
-  {
-    keys: "u",
-    what: "undo",
-    bind: [{ id: "video-undo", chords: [{ key: "u" }] }],
   },
 ];
 

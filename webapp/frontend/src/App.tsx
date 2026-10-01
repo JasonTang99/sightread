@@ -11,7 +11,7 @@ import { FinishTripPanel } from "./components/FinishTripPanel";
 import { VideoView } from "./components/VideoView";
 import { Icon, Switch, Tab, TabCount } from "./components/ui";
 import { APP_KEYS, typingTarget } from "./shortcuts";
-import type { AppState, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
+import type { AppState, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "./types";
 
 export default function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -28,7 +28,6 @@ export default function App() {
   const [videoStatuses, setVideoStatuses] = useState<VideoStatuses>({});
   const [videoShotTimes, setVideoShotTimes] = useState<Record<string, string | null>>({});
   const [videoHighlights, setVideoHighlights] = useState<VideoHighlightsMap>({});
-  const [videoUserClips, setVideoUserClips] = useState<UserClipsMap>({});
   const [videoTags, setVideoTags] = useState<VideoTagsState>({ tags: [], assignments: {} });
   const [videosLoaded, setVideosLoaded] = useState(false);
   // Skip what has already been decided. A trip opened after its camera folder
@@ -42,11 +41,6 @@ export default function App() {
       return false;
     }
   });
-  // persist() writes a video decision without refetching /api/videos, because
-  // a refetch would drop delete-marked clips from the Videos tab and break
-  // space-toggle. The header still has to count those, so this set covers the
-  // gap until the next successful refetch (timeline, undo, bulk confirm).
-  const [justDecidedVideos, setJustDecidedVideos] = useState<Set<string>>(new Set());
 
   const reload = useCallback(async () => {
     try {
@@ -72,9 +66,7 @@ export default function App() {
       setVideoStatuses(d.statuses ?? {});
       setVideoShotTimes(d.shot_times ?? {});
       setVideoHighlights(d.highlights ?? {});
-      setVideoUserClips(d.user_clips ?? {});
       setVideoTags(d.video_tags ?? { tags: [], assignments: {} });
-      setJustDecidedVideos(new Set());
     } catch {
       /* video list is non-critical */
     } finally {
@@ -172,7 +164,6 @@ export default function App() {
     // status map patched because persist() is what usually writes it, and a
     // refetch would drop delete-marked neighbours from the Videos tab.
     if (data.favorited && videos.includes(path)) {
-      setJustDecidedVideos((prev) => new Set(prev).add(path));
       setVideoStatuses((prev) => ({ ...prev, [path]: "keep" }));
     }
   }, [reload, videos]);
@@ -201,7 +192,6 @@ export default function App() {
   const handleChangeProject = async () => {
     setState(null);
     setVideos([]);
-    setJustDecidedVideos(new Set());
     setTab("clusters");
     landedRef.current = false;
     setLoading(false);
@@ -383,21 +373,16 @@ export default function App() {
           <FavoritesView favorites={favorites} onToggleFavorite={toggleFavorite} onRefresh={reload} onError={setError} />
         ) : tab === "videos" ? (
           <VideoView
+            controlsEl={controlsEl}
             videos={reviewableVideos}
             skipReviewed={hideReviewed}
             statuses={videoStatuses}
-            highlights={videoHighlights}
-            userClips={videoUserClips}
             videoTags={videoTags}
             onVideoTagsChange={setVideoTags}
             onError={setError}
             favorites={favorites}
             onToggleFavorite={toggleFavorite}
-            onConfirmed={async () => { await reload(); await refetchVideos(); }}
             onAdvance={advanceTab}
-            onPersisted={(path) =>
-              setJustDecidedVideos((prev) => new Set(prev).add(path))
-            }
           />
         ) : !hasClusters && !hasUnconfirmedSingles ? (
           <div className="bg-white rounded border border-gray-200 px-6 py-12 text-center">

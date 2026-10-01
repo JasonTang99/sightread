@@ -1,172 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { nextAfterConfirm } from "../decisions";
-import type { UserClip, UserClipsMap, VideoHighlightsMap, VideoStatuses, VideoTagsState } from "../types";
-import { ShortcutBar } from "./ui";
-import { VIDEO_CLIP_KEYS, VIDEO_EDIT_KEYS, VIDEO_KEYS, brief, typingTarget } from "../shortcuts";
+import type { VideoStatuses, VideoTagsState } from "../types";
+import { VIDEO_KEYS, typingTarget } from "../shortcuts";
 
 // Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
 // still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
 // reading as "not exported".
 const UNTAGGED_LABEL = "untagged";
-
-const MIN_CLIP_LEN = 0.5;
-const NEW_CLIP_LEN = 4;
-
-function fmtTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-/** A clip on the strip: user clips are bare {start,end}; suggestions carry a score. */
-type EditableClip = { start: number; end: number; score?: number };
-
-const toUserClip = (c: EditableClip): UserClip => ({ start: c.start, end: c.end });
-
-interface ClipEditorProps {
-  clips: EditableClip[];
-  duration: number;
-  playhead: number;
-  /** true once the list is user-owned (blue); false = untouched suggestions (amber). */
-  owned: boolean;
-  selected: number | null;
-  onSelect: (i: number | null) => void;
-  onSeek: (time: number) => void;
-  /** Drag about to start: snapshot the pre-drag list for undo. */
-  onDragStart: () => void;
-  /** Live edge-drag update: replace clip i, seek video to the dragged edge. No sorting. */
-  onDragClip: (i: number, clip: UserClip, edgeTime: number) => void;
-  /** Drag finished: commit (sort + persist). */
-  onDragEnd: () => void;
-  onDelete: (i: number) => void;
-}
-
-function ClipEditor({ clips, duration, playhead, owned, selected, onSelect, onSeek, onDragStart, onDragClip, onDragEnd, onDelete }: ClipEditorProps) {
-  const stripRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{ idx: number; edge: "start" | "end"; rect: DOMRect } | null>(null);
-  const maxScore = Math.max(0, ...clips.map((c) => c.score ?? 0));
-
-  const handleDown = (e: React.PointerEvent<HTMLDivElement>, idx: number, edge: "start" | "end") => {
-    e.stopPropagation();
-    e.preventDefault();
-    const rect = stripRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return;
-    onDragStart();
-    dragRef.current = { idx, edge, rect };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    onSelect(idx);
-  };
-
-  const handleMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const c = clips[d.idx];
-    if (!c) return;
-    let t = ((e.clientX - d.rect.left) / d.rect.width) * duration;
-    if (d.edge === "start") t = Math.min(t, c.end - MIN_CLIP_LEN);
-    else t = Math.max(t, c.start + MIN_CLIP_LEN);
-    t = Math.min(duration, Math.max(0, t));
-    onDragClip(d.idx, d.edge === "start" ? { start: t, end: c.end } : { start: c.start, end: t }, t);
-  };
-
-  const handleUp = () => {
-    if (!dragRef.current) return;
-    dragRef.current = null;
-    onDragEnd();
-  };
-
-  return (
-    <div
-      className="shrink-0 bg-gray-950 px-3 py-2 select-none"
-      onClick={() => onSelect(null)}
-    >
-      <div
-        ref={stripRef}
-        className="relative h-6 w-full rounded-md bg-white/[0.07] shadow-[inset_0_1px_2px_rgba(0,0,0,0.6)] touch-none cursor-pointer"
-        onClick={(e) => {
-          const rect = stripRef.current?.getBoundingClientRect();
-          if (!rect || rect.width <= 0) return;
-          const t = Math.min(duration, Math.max(0, ((e.clientX - rect.left) / rect.width) * duration));
-          onSeek(t);
-        }}
-      >
-        {[0.25, 0.5, 0.75].map((f) => (
-          <div
-            key={f}
-            className="absolute top-1 bottom-1 w-px bg-white/10 pointer-events-none"
-            style={{ left: `${f * 100}%` }}
-          />
-        ))}
-        {clips.length === 0 && (
-          <span className="absolute inset-0 flex items-center justify-center text-[10px] tracking-wide text-gray-500 pointer-events-none">
-            no clips — press i to add one at the playhead
-          </span>
-        )}
-        {clips.map((c, i) => {
-          // Clamp to [0, 1]: the media's real duration can be shorter than the
-          // duration the pipeline analyzed, which would push segments past 100%.
-          const startFrac = Math.min(1, Math.max(0, c.start / duration));
-          const endFrac = Math.min(1, Math.max(startFrac, c.end / duration));
-          if (endFrac <= startFrac) return null;
-          const isSel = i === selected;
-          return (
-            <div
-              key={i}
-              className={`group absolute -top-0.5 -bottom-0.5 rounded cursor-pointer transition-[filter] hover:brightness-110 ${
-                owned
-                  ? "bg-gradient-to-b from-sky-300 to-sky-500"
-                  : "bg-gradient-to-b from-amber-300 to-amber-500"
-              } ${isSel ? "ring-2 ring-white shadow-lg z-10" : "ring-1 ring-black/30"}`}
-              style={{
-                left: `${startFrac * 100}%`,
-                width: `${(endFrac - startFrac) * 100}%`,
-                minWidth: "10px",
-                opacity: owned ? 1 : 0.5 + 0.5 * (maxScore > 0 ? (c.score ?? 0) / maxScore : 1),
-              }}
-              title={`${fmtTime(c.start)}–${fmtTime(c.end)}${c.score != null ? ` · score ${c.score.toFixed(2)}` : ""}`}
-              onClick={(e) => { e.stopPropagation(); onSelect(i); onSeek(Math.max(0, c.start)); }}
-            >
-              <div
-                className="absolute inset-y-0 left-0 w-2 rounded-l cursor-ew-resize flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()}
-                onPointerDown={(e) => handleDown(e, i, "start")}
-                onPointerMove={handleMove}
-                onPointerUp={handleUp}
-                onPointerCancel={handleUp}
-              >
-                <div className={`h-3 w-0.5 rounded-full bg-black/40 transition-opacity ${isSel ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} />
-              </div>
-              <div
-                className="absolute inset-y-0 right-0 w-2 rounded-r cursor-ew-resize flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()}
-                onPointerDown={(e) => handleDown(e, i, "end")}
-                onPointerMove={handleMove}
-                onPointerUp={handleUp}
-                onPointerCancel={handleUp}
-              >
-                <div className={`h-3 w-0.5 rounded-full bg-black/40 transition-opacity ${isSel ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} />
-              </div>
-              {isSel && (
-                <button
-                  className="absolute top-1/2 -translate-y-1/2 right-3 z-20 w-4 h-4 rounded-full bg-black/50 text-white text-[10px] leading-none flex items-center justify-center hover:bg-black/80 shadow"
-                  title="Delete clip (x)"
-                  onClick={(e) => { e.stopPropagation(); onDelete(i); }}
-                >×</button>
-              )}
-            </div>
-          );
-        })}
-        <div
-          className="absolute -top-1 -bottom-1 w-0.5 -translate-x-1/2 rounded-full bg-white shadow-[0_0_4px_rgba(255,255,255,0.9)] pointer-events-none z-20"
-          style={{ left: `${Math.min(100, Math.max(0, (playhead / duration) * 100))}%` }}
-        />
-      </div>
-    </div>
-  );
-}
 
 /** Off-screen buffer warmer for a neighbouring video.
  *
@@ -194,6 +38,8 @@ function PreloadVideo({ src }: { src: string }) {
 }
 
 interface Props {
+  // The app header's slot for this view's controls.
+  controlsEl: HTMLElement | null;
   videos: string[];
   // Server-side decision per video. "reviewed" means exactly this, not a
   // browser-local memory of having pressed enter — see the note on `reviewed`.
@@ -201,15 +47,8 @@ interface Props {
   // Enter jumps to the next unreviewed clip instead of the next one.
   skipReviewed?: boolean;
   onError: (msg: string) => void;
-  onConfirmed: () => Promise<void>;
-  // Header session-progress reads App videoStatuses, which persist() does not
-  // refetch (a refetch would drop delete-marked clips from this tab). Tell
-  // App the path so the counter can bump without changing the working set.
-  onPersisted: (path: string) => void;
   favorites?: string[];
   onToggleFavorite?: (path: string) => Promise<void>;
-  highlights?: VideoHighlightsMap;
-  userClips?: UserClipsMap;
   videoTags?: VideoTagsState;
   onVideoTagsChange?: (tags: VideoTagsState) => void;
   // Enter on the last clip (or last still-pending, with skip on) opens the
@@ -218,16 +57,13 @@ interface Props {
 }
 
 export function VideoView({
+  controlsEl,
   videos,
   statuses = {},
   skipReviewed = false,
   onError,
-  onConfirmed,
-  onPersisted,
   favorites = [],
   onToggleFavorite,
-  highlights = {},
-  userClips = {},
   videoTags = { tags: [], assignments: {} },
   onVideoTagsChange,
   onAdvance,
@@ -250,26 +86,14 @@ export function VideoView({
       justDecided.has(path) || (path in statuses && statuses[path] !== "undecided"),
     [statuses, justDecided],
   );
-  const [submitting, setSubmitting] = useState(false);
   // Clips confirmed with Enter this session, ahead of persist() coming back.
   const enteredRef = useRef<Set<string>>(new Set());
   // Browsers block autoplay *with sound* until the user interacts with the page.
   // Start muted so the clip always plays, then unmute on the first gesture.
   const [soundOn, setSoundOn] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  // Duration from the video element once loadedmetadata fires; null until then.
-  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
-  const [playhead, setPlayhead] = useState(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoStatus, setVideoStatus] = useState<string | null>(null);
-  // Working clip lists edited this session, keyed by path. Takes precedence
-  // over server user_clips, which takes precedence over suggested highlights.
-  // A null entry means "reverted to suggestions" — it masks a stale server
-  // user_clips prop until the parent refetches.
-  const [localClips, setLocalClips] = useState<Record<string, UserClip[] | null>>({});
-  const [selected, setSelected] = useState<number | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [exportNote, setExportNote] = useState<string | null>(null);
   const { assignTag, nextTag, busy: tagBusy, flash: tagFlash, clearFlash } = useMediaTags(
     videoTags,
     onVideoTagsChange,
@@ -285,15 +109,6 @@ export function VideoView({
   }, [idx]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const current: string | undefined = videos[Math.min(idx, videos.length - 1)];
-  const suggested = (current && highlights[current]?.clips) || [];
-  const localEntry = current ? localClips[current] : undefined;
-  const ownedList =
-    localEntry === null ? undefined : localEntry ?? (current ? userClips[current]?.clips : undefined);
-  const owned = ownedList !== undefined;
-  const clips: EditableClip[] = ownedList ?? suggested;
-  const duration = mediaDuration ?? (current ? highlights[current]?.duration ?? null : null);
-  const canEdit = current != null && duration != null && duration > 0;
-
   // Track the previously-shown video so a `videos` prop change (e.g. after
   // confirm shrinks the list, or a same-length refetch swaps paths) doesn't
   // wipe every keep/delete decision or knock idx off the video the user was
@@ -343,9 +158,6 @@ export function VideoView({
 
   // Reset per-video playback state when switching videos (element remounts via key).
   useEffect(() => {
-    setMediaDuration(null);
-    setPlayhead(0);
-    setSelected(null);
     setVideoSrc(null);
     setVideoStatus(null);
   }, [current]);
@@ -421,205 +233,14 @@ export function VideoView({
     };
   }, [current]);
 
-  // --- Clip persistence: debounce a PUT per video path after any change. ---
-  const putTimers = useRef<Record<string, number>>({});
-  const pendingPuts = useRef<Record<string, UserClip[]>>({});
-
-  const doPut = useCallback(async (path: string, clipList: UserClip[]) => {
-    try {
-      const res = await fetch("/api/clips", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, clips: clipList.map(toUserClip) }),
-        // Survives page unload — without this, a PUT in flight when the tab
-        // closes gets aborted and the edit is silently lost.
-        keepalive: true,
-      });
-      if (!res.ok) throw new Error(`Save clips failed: ${res.status}`);
-    } catch (e) {
-      // Keep local state so the user's edits survive; they retry on next change.
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  }, [onError]);
-
-  const schedulePut = useCallback((path: string, clipList: UserClip[]) => {
-    pendingPuts.current[path] = clipList;
-    if (putTimers.current[path] != null) window.clearTimeout(putTimers.current[path]);
-    putTimers.current[path] = window.setTimeout(() => {
-      delete putTimers.current[path];
-      const c = pendingPuts.current[path];
-      delete pendingPuts.current[path];
-      if (c) doPut(path, c);
-    }, 600);
-  }, [doPut]);
-
-  const flushPuts = useCallback(async () => {
-    const entries = Object.entries(pendingPuts.current);
-    for (const [path] of entries) {
-      if (putTimers.current[path] != null) window.clearTimeout(putTimers.current[path]);
-      delete putTimers.current[path];
-    }
-    pendingPuts.current = {};
-    await Promise.all(entries.map(([p, c]) => doPut(p, c)));
-  }, [doPut]);
-
-  // A still-debounced clip edit (up to 600ms unfired) would otherwise be lost
-  // if the tab closes or this view unmounts before the timer fires.
-  useEffect(() => {
-    window.addEventListener("pagehide", flushPuts);
-    return () => {
-      window.removeEventListener("pagehide", flushPuts);
-      flushPuts();
-    };
-  }, [flushPuts]);
-
-  // --- Clip editing. First edit of any kind materializes the working list. ---
-  // One-entry-per-action undo stack, per video path. A null snapshot means the
-  // video was still on untouched suggestions, so undoing past the first edit
-  // reverts it all the way back to the amber suggestion list.
-  const clipHistoryRef = useRef<Record<string, (UserClip[] | null)[]>>({});
-
-  const pushHistory = (path: string, snapshot: UserClip[] | null) => {
-    const stack = clipHistoryRef.current[path] ?? (clipHistoryRef.current[path] = []);
-    stack.push(snapshot);
-    if (stack.length > 20) stack.shift();
-  };
-
-  /** What to record before an edit: the owned list, or null if still on suggestions. */
-  const snapshotClips = (): UserClip[] | null => (owned ? clips.map(toUserClip) : null);
-
-  const revertToSuggestions = async (path: string) => {
-    // Cancel any queued PUT so it can't resurrect the entry after the DELETE.
-    if (putTimers.current[path] != null) window.clearTimeout(putTimers.current[path]);
-    delete putTimers.current[path];
-    delete pendingPuts.current[path];
-    setLocalClips((prev) => ({ ...prev, [path]: null }));
-    try {
-      const res = await fetch(`/api/clips?path=${encodeURIComponent(path)}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(`Revert clips failed: ${res.status}`);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const undoClipEdit = () => {
-    if (!current) return;
-    const stack = clipHistoryRef.current[current];
-    if (!stack || stack.length === 0) return;
-    const prev = stack.pop()!;
-    setSelected(null);
-    if (prev === null) revertToSuggestions(current);
-    else applyClips(prev);
-  };
-
-  const applyClips = (next: UserClip[]) => {
-    if (!current) return;
-    setLocalClips((prev) => ({ ...prev, [current]: next }));
-    schedulePut(current, next);
-  };
-
-  /** Sort by start, keep `keep` (a member of `list`) selected, persist. */
-  const commitClips = (list: UserClip[], keep: UserClip | null) => {
-    const sorted = [...list].sort((a, b) => a.start - b.start);
-    setSelected(keep ? sorted.indexOf(keep) : null);
-    applyClips(sorted);
-  };
-
-  const addClipAtPlayhead = () => {
-    if (!canEdit || duration == null || !current) return;
-    pushHistory(current, snapshotClips());
-    const t = Math.max(0, Math.min(videoRef.current?.currentTime ?? playhead, duration - MIN_CLIP_LEN));
-    const clip: UserClip = { start: t, end: Math.min(t + NEW_CLIP_LEN, duration) };
-    commitClips([...clips.map(toUserClip), clip], clip);
-  };
-
-  const setInPoint = () => {
-    if (!canEdit || duration == null || selected == null || !current) return;
-    const cur = clips[selected];
-    const t = Math.max(0, videoRef.current?.currentTime ?? playhead);
-    if (!cur || t >= cur.end) return;
-    pushHistory(current, snapshotClips());
-    const list = clips.map(toUserClip);
-    const updated: UserClip = { start: t, end: cur.end };
-    list[selected] = updated;
-    commitClips(list, updated);
-  };
-
-  const setOutPoint = () => {
-    if (!canEdit || duration == null || selected == null || !current) return;
-    const cur = clips[selected];
-    const t = Math.min(videoRef.current?.currentTime ?? playhead, duration);
-    if (!cur || t <= cur.start) return;
-    pushHistory(current, snapshotClips());
-    const list = clips.map(toUserClip);
-    const updated: UserClip = { start: cur.start, end: t };
-    list[selected] = updated;
-    commitClips(list, updated);
-  };
-
-  const deleteClip = (i: number) => {
-    if (!canEdit || i < 0 || i >= clips.length || !current) return;
-    pushHistory(current, snapshotClips());
-    const list = clips.map(toUserClip);
-    list.splice(i, 1);
-    setSelected(null);
-    applyClips(list);
-  };
-
-  const beginDrag = () => {
-    if (!current) return;
-    pushHistory(current, snapshotClips());
-  };
-
-  const handleDragClip = (i: number, clip: UserClip, edgeTime: number) => {
-    const list = clips.map(toUserClip);
-    if (!list[i]) return;
-    list[i] = clip;
-    applyClips(list);
-    // Scrub feedback: follow the dragged edge in the video.
-    const el = videoRef.current;
-    if (el) el.currentTime = edgeTime;
-  };
-
-  const handleDragEnd = () => {
-    const list = clips.map(toUserClip);
-    commitClips(list, selected != null ? list[selected] ?? null : null);
-  };
-
-  const exportClips = async () => {
-    if (!current || exporting || clips.length === 0) return;
-    setExporting(true);
-    setExportNote(null);
-    try {
-      await flushPuts();
-      const res = await fetch("/api/clips/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: current, mode: "reencode" }),
-      });
-      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-      const d = await res.json();
-      const n = (d.files ?? []).length;
-      setExportNote(`✓ exported ${n} file${n === 1 ? "" : "s"}`);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!exportNote) return;
-    const t = setTimeout(() => setExportNote(null), 5000);
-    return () => clearTimeout(t);
-  }, [exportNote]);
-
   useShortcuts(
-    [...VIDEO_KEYS, ...VIDEO_CLIP_KEYS, ...VIDEO_EDIT_KEYS],
+    VIDEO_KEYS,
     {
       "video-confirm": (e) => {
         e.preventDefault();
-        if (current) persist(current, favorites.includes(current) || (keeps[current] ?? true));
+        const saved = current
+          ? persist(current, favorites.includes(current) || (keeps[current] ?? true))
+          : Promise.resolve();
         // justDecided only fills in once persist() hears back, so a quick
         // second Enter would still see this clip as unreviewed and wrap back
         // onto it. The ref is updated synchronously.
@@ -630,7 +251,9 @@ export function VideoView({
           skipReviewed,
           (i) => !reviewed(videos[i]) && !enteredRef.current.has(videos[i]),
         );
-        if (hop === "advance") onAdvance?.();
+        // The next tab is usually the timeline, which refetches statuses as it
+        // opens. Leaving before the write lands drew this clip as undecided.
+        if (hop === "advance") saved.then(() => onAdvance?.());
         else setIdx(hop);
       },
       "video-tag-slot": (e) => {
@@ -684,52 +307,13 @@ export function VideoView({
         e.preventDefault();
         const el = videoRef.current;
         if (!el) return;
-        el.currentTime = Math.min(duration ?? el.duration, el.currentTime + 10);
+        el.currentTime = Math.min(el.duration, el.currentTime + 10);
       },
       "video-seek-back": (e) => {
         e.preventDefault();
         const el = videoRef.current;
         if (!el) return;
         el.currentTime = Math.max(0, el.currentTime - 10);
-      },
-      "video-marker-next": (e) => {
-        if (clips.length === 0) return;
-        e.preventDefault();
-        const el = videoRef.current;
-        if (!el) return;
-        const next = clips.find((c) => c.start > el.currentTime);
-        if (next) el.currentTime = next.start;
-      },
-      "video-marker-prev": (e) => {
-        if (clips.length === 0) return;
-        e.preventDefault();
-        const el = videoRef.current;
-        if (!el) return;
-        const before = clips.filter((c) => c.start < el.currentTime - 1);
-        if (before.length > 0) el.currentTime = before[before.length - 1].start;
-      },
-      "video-in": (e) => {
-        if (!canEdit) return;
-        e.preventDefault();
-        // With a clip selected, i trims its start (mirror of o); otherwise
-        // it drops a fresh clip at the playhead.
-        if (selected != null) setInPoint();
-        else addClipAtPlayhead();
-      },
-      "video-out": (e) => {
-        if (!canEdit || selected == null) return;
-        e.preventDefault();
-        setOutPoint();
-      },
-      "video-clip-delete": (e) => {
-        if (!canEdit || selected == null) return;
-        e.preventDefault();
-        deleteClip(selected);
-      },
-      "video-undo": (e) => {
-        if (!canEdit) return;
-        e.preventDefault();
-        undoClipEdit();
       },
     },
     { ignore: (e) => typingTarget(e, true) },
@@ -739,7 +323,7 @@ export function VideoView({
   // component state until a bulk confirm meant a reviewed video still read as
   // undecided everywhere else — the timeline drew it grey, and a reload lost
   // the review entirely.
-  const persist = (path: string, keep: boolean) => {
+  const persist = (path: string, keep: boolean): Promise<void> =>
     fetch("/api/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -748,31 +332,8 @@ export function VideoView({
       .then((res) => {
         if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
         setJustDecided((prev) => new Set(prev).add(path));
-        onPersisted(path);
       })
       .catch((e) => onError(e instanceof Error ? e.message : String(e)));
-  };
-
-  const confirm = async () => {
-    setSubmitting(true);
-    try {
-      const deletePaths = videos.filter((v) => !favorites.includes(v) && !(keeps[v] ?? true));
-      const res = await fetch("/api/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Send the keeps too, not just the deletes: an unrecorded keep is
-        // indistinguishable from unreviewed footage, which is what left the
-        // timeline unable to colour a video tile.
-        body: JSON.stringify({ delete_paths: deletePaths, decided_paths: videos }),
-      });
-      if (!res.ok) throw new Error(`Confirm failed: ${res.status}`);
-      await onConfirmed();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   if (videos.length === 0 || !current) {
     return <p className="text-sm text-gray-500 p-4">No videos found in this folder.</p>;
@@ -782,83 +343,49 @@ export function VideoView({
   const isKept = isFavorited || (keeps[current] ?? true);
   const currentTag = videoTags.assignments[current] ?? null;
   const name = current.split("/").pop() ?? current;
-  const nDelete = videos.filter((v) => !favorites.includes(v) && !(keeps[v] ?? true)).length;
 
   return (
-    <div className="-mx-2 -mt-2 flex flex-col" style={{ height: "calc(100vh - 2.25rem)" }}>
-      {/* Toolbar */}
-      <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center flex-wrap gap-3 shrink-0">
-        <span className="text-xs text-gray-500 tabular-nums">{Math.min(idx, videos.length - 1) + 1} / {videos.length}</span>
-        <span className="text-xs text-gray-600 truncate max-w-xs">{name}</span>
-        <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${isKept ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-          {isKept ? "Keep" : "Delete"}
-        </span>
-        {reviewed(current) && (
-          <span className="text-xs font-medium px-2 py-0.5 rounded shrink-0 bg-blue-50 text-blue-600" title="Reviewed (enter)">
-            ✓ reviewed
+    <div
+      className="-mx-2 -mt-2 flex flex-col"
+      style={{ height: "calc(100vh - 2.25rem)" }}
+      data-testid="video-view"
+      data-index={Math.min(idx, videos.length - 1)}
+    >
+      {controlsEl && createPortal(
+        <>
+          <span
+            className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${
+              isFavorited
+                ? "bg-yellow-100 text-yellow-700"
+                : isKept
+                  ? "bg-green-100 text-green-700"
+                  : "bg-red-100 text-red-700"
+            }`}
+            data-testid="video-status"
+          >
+            {isFavorited ? "★ Favorite" : isKept ? "Keep" : "Delete"}
           </span>
-        )}
-        <button
-          onClick={() => {
-            if (!isFavorited) setKeeps((prev) => ({ ...prev, [current]: true }));
-            onToggleFavorite?.(current).catch((e) => onError(String(e)));
-          }}
-          className={`text-base leading-none shrink-0 transition-colors ${isFavorited ? "text-yellow-400" : "text-gray-300 hover:text-yellow-400"}`}
-          title="Toggle favorite (s) — stars keep"
-        >★</button>
-        <TagBar
-          tags={videoTags.tags}
-          currentTag={currentTag}
-          isFavorited={isFavorited}
-          busy={tagBusy}
-          flash={tagFlash}
-          untaggedLabel={UNTAGGED_LABEL}
-          untaggedTitle="No tag → …/untagged/"
-          onAssign={(tag) => {
-            if (tag !== null) setKeeps((prev) => ({ ...prev, [current]: true }));
-            assignTag(current, tag);
-          }}
-        />
-        {/* The clip-marker and in/out keys only exist when there is something
-            to step through or the clip can be edited, so the crib grows and
-            shrinks with the toolbar rather than naming keys that do nothing. */}
-        <ShortcutBar
-          items={brief(
-            VIDEO_KEYS,
-            clips.length > 0 ? VIDEO_CLIP_KEYS : [],
-            canEdit ? VIDEO_EDIT_KEYS : [],
+          {reviewed(current) && (
+            <span className="text-xs font-medium px-2 py-0.5 rounded shrink-0 bg-blue-50 text-blue-600" title="Reviewed (enter)">
+              ✓ reviewed
+            </span>
           )}
-        />
-        <div className="ml-auto flex items-center gap-2 shrink-0">
-          {exportNote && <span className="text-xs text-emerald-600">{exportNote}</span>}
-          {canEdit && (
-            <>
-              <button
-                onClick={addClipAtPlayhead}
-                className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50"
-                title="Add a 4s clip at the playhead (i, with no clip selected)"
-              >＋ clip</button>
-              <button
-                onClick={exportClips}
-                disabled={clips.length === 0 || exporting}
-                className="px-2 py-1 text-xs border border-gray-200 rounded text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
-                title="Export clips as files (re-encode)"
-              >
-                {exporting && <span className="inline-block w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />}
-                {exporting ? "Exporting…" : `✂ Export ${clips.length} clip${clips.length === 1 ? "" : "s"}`}
-              </button>
-            </>
-          )}
-          {nDelete > 0 && <span className="text-xs text-gray-400">{nDelete} → trash</span>}
-          <button onClick={confirm} disabled={submitting}
-            title={nDelete === 0
-              ? "Record every video in this list as kept"
-              : `Move ${nDelete} video${nDelete === 1 ? "" : "s"} to trash, keep the rest`}
-            className="px-3 py-1 text-sm font-medium bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-            {submitting ? "…" : "✓ Confirm"}
-          </button>
-        </div>
-      </div>
+          <TagBar
+            tags={videoTags.tags}
+            currentTag={currentTag}
+            isFavorited={isFavorited}
+            busy={tagBusy}
+            flash={tagFlash}
+            untaggedLabel={UNTAGGED_LABEL}
+            untaggedTitle="No tag → …/untagged/"
+            onAssign={(tag) => {
+              if (tag !== null) setKeeps((prev) => ({ ...prev, [current]: true }));
+              assignTag(current, tag);
+            }}
+          />
+        </>,
+        controlsEl,
+      )}
 
       {/* Full-viewport video */}
       <div
@@ -876,11 +403,6 @@ export function VideoView({
           loop
           muted={!soundOn}
           className="w-full h-full object-contain"
-          onLoadedMetadata={(e) => {
-            const d = e.currentTarget.duration;
-            if (Number.isFinite(d) && d > 0) setMediaDuration(d);
-          }}
-          onTimeUpdate={(e) => setPlayhead(e.currentTarget.currentTime)}
           onError={() => onError(`Failed to load video: ${name}`)}
         />
         ) : (
@@ -902,23 +424,6 @@ export function VideoView({
           ))}
       </div>
 
-      {/* Clip editor strip — below the video, mirroring the scrubber above it.
-          Amber = untouched suggestions, blue = user-owned clip list. */}
-      {canEdit && duration != null && (
-        <ClipEditor
-          clips={clips}
-          duration={duration}
-          playhead={playhead}
-          owned={owned}
-          selected={selected}
-          onSelect={setSelected}
-          onSeek={(t) => { const el = videoRef.current; if (el) el.currentTime = t; }}
-          onDragStart={beginDrag}
-          onDragClip={handleDragClip}
-          onDragEnd={handleDragEnd}
-          onDelete={deleteClip}
-        />
-      )}
     </div>
   );
 }
