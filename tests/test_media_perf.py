@@ -8,6 +8,7 @@ import json
 import concurrent.futures
 import os
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -147,8 +148,58 @@ def test_serve_video_returns_422_after_transcode_failed(api, monkeypatch):
         resp = client.get("/api/video", params={"path": str(src)})
         assert resp.status_code == 422
         assert "corrupt" in resp.json()["detail"].lower()
+        # The player probes with HEAD. A GET-only route misses, and HEAD then
+        # falls through to the static mount's 404 instead of this 422.
+        head = client.head("/api/video", params={"path": str(src)})
+        assert head.status_code == 422
     finally:
         server._transcode_failed.discard(src)
+
+
+def test_head_probe_waits_while_transcode_is_running(api, monkeypatch):
+    """First open probes with HEAD and must wait, not fail, until the cache exists.
+
+    HEAD on a GET-only route does not match, so it falls through to the static
+    mount and comes back 404 Not Found. The player treats that as final. 503
+    means the transcode is still running; 200 is only the finished cache.
+    """
+    client, folder, output_dir = api
+    src = folder / "clip.MOV"
+    src.write_bytes(b"not a video")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked(_s, dest):
+        started.set()
+        release.wait(timeout=5)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"cached-mp4")
+
+    monkeypatch.setattr(server, "transcode_for_web", blocked)
+    server._transcode_failed.discard(src.resolve())
+    try:
+        missing = client.head("/api/video", params={"path": str(folder / "nope.MOV")})
+        assert missing.status_code == 404
+
+        head = client.head("/api/video", params={"path": str(src)})
+        assert head.status_code == 503, head.status_code
+        assert started.wait(timeout=5)
+        assert client.head("/api/video", params={"path": str(src)}).status_code == 503
+        # Neighbour preloads must keep skipping an uncached file, not download it.
+        pre = client.get("/api/video", params={"path": str(src), "cached_only": "1"})
+        assert pre.status_code == 404
+
+        release.set()
+        assert _wait_for(lambda: (output_dir / "video_cache").exists() and any(
+            (output_dir / "video_cache").glob("*.mp4")
+        ))
+        ready = client.get("/api/video", params={"path": str(src)})
+        assert ready.status_code == 200
+        assert ready.content == b"cached-mp4"
+        assert client.head("/api/video", params={"path": str(src)}).status_code == 200
+    finally:
+        release.set()
+        server._transcode_failed.discard(src.resolve())
 
 
 def _wait_for(pred, timeout=5.0):
