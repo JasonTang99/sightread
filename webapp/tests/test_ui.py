@@ -76,10 +76,16 @@ class TestPageLoad:
         expect(page_loaded.get_by_test_id("project-name")).to_have_text(project_folder.name)
 
     def test_cluster_tab_visible(self, page_loaded: Page):
-        expect(tab(page_loaded, f"Clusters ({_cluster_count()})")).to_be_visible()
+        expect(tab(page_loaded, f"Clusters (0/{_cluster_count()})")).to_be_visible()
 
     def test_singles_tab_visible(self, page_loaded: Page):
-        expect(tab(page_loaded, f"Singles ({_singleton_count()})")).to_be_visible()
+        expect(tab(page_loaded, f"Singles (0/{_singleton_count()})")).to_be_visible()
+
+    def test_confirming_a_cluster_bumps_the_reviewed_count(self, page_loaded: Page):
+        expect(tab(page_loaded, f"Clusters (0/{_cluster_count()})")).to_be_visible()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        expect(tab(page_loaded, f"Clusters (1/{_cluster_count()})")).to_be_visible()
 
 
 
@@ -275,7 +281,7 @@ class TestUndo:
 # ---------------------------------------------------------------------------
 class TestSingles:
     def _open_singles(self, page: Page) -> None:
-        tab(page, f"Singles ({_singleton_count()})").click()
+        tab(page, f"Singles (0/{_singleton_count()})").click()
         at_single(page, 0)
 
     def test_lowest_score_first_marked_delete(self, page_loaded: Page):
@@ -503,7 +509,7 @@ class TestTimelineVideos:
         """Marks used to live only in component state until a bulk confirm."""
         out, video = video_project
         page_loaded.goto(BASE_URL)
-        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.get_by_role("button", name="Videos (0/1)").click()
         page_loaded.keyboard.press(" ")
         settle(page_loaded)
         assert queued(out) == [video]
@@ -511,7 +517,7 @@ class TestTimelineVideos:
     def test_enter_records_a_keep_immediately(self, page_loaded: Page, video_project):
         out, video = video_project
         page_loaded.goto(BASE_URL)
-        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.get_by_role("button", name="Videos (0/1)").click()
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         assert statuses(out).get(video) == "kept"
@@ -519,7 +525,7 @@ class TestTimelineVideos:
     def test_starring_a_delete_marked_video_keeps_it(self, page_loaded: Page, video_project):
         out, video = video_project
         page_loaded.goto(BASE_URL)
-        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.get_by_role("button", name="Videos (0/1)").click()
         page_loaded.keyboard.press(" ")
         settle(page_loaded)
         expect(page_loaded.get_by_test_id("video-status")).to_have_text("Delete")
@@ -531,7 +537,7 @@ class TestTimelineVideos:
     def test_a_video_kept_in_the_reviewer_shows_green_in_the_timeline(self, page_loaded: Page, video_project):
         out, video = video_project
         page_loaded.goto(BASE_URL)
-        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.get_by_role("button", name="Videos (0/1)").click()
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
         page_loaded.get_by_role("button", name="Timeline").click()
@@ -815,8 +821,8 @@ class TestSkipReviewed:
         settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
         expect(page_loaded.get_by_test_id("hide-reviewed")).to_have_attribute("aria-checked", "true")
-        expect(tab(page_loaded, f"Clusters ({_cluster_count()})")).to_be_visible()
-        expect(tab(page_loaded, f"Singles ({_singleton_count()})")).to_be_visible()
+        expect(tab(page_loaded, f"Clusters (1/{_cluster_count()})")).to_be_visible()
+        expect(tab(page_loaded, f"Singles (1/{_singleton_count()})")).to_be_visible()
 
     def test_the_choice_survives_a_reload(self, page_loaded: Page, output_dir):
         """It is a way of working, not a per-visit decision."""
@@ -839,7 +845,7 @@ class TestSkipReviewed:
         settle(page_loaded)
         cluster_size(page_loaded, 4)
         at_cluster(page_loaded, 2)
-        expect(tab(page_loaded, f"Clusters ({_cluster_count() + 1})")).to_be_visible()
+        expect(tab(page_loaded, f"Clusters (2/{_cluster_count() + 1})")).to_be_visible()
 
         # The decided one is still there to go back to.
         page_loaded.keyboard.press("ArrowLeft")
@@ -874,7 +880,7 @@ class TestSkipReviewed:
         save_decisions(output_dir, {"demo_photos/extra_single.JPG": "kept"})
         self._skip_on(page_loaded)
 
-        tab(page_loaded, f"Singles ({_singleton_count() + 1})").click()
+        tab(page_loaded, f"Singles (1/{_singleton_count() + 1})").click()
         at_single(page_loaded, 0)
         page_loaded.keyboard.press("Enter")
         at_single(page_loaded, 2)
@@ -887,7 +893,7 @@ class TestSkipReviewed:
         page_loaded.goto(BASE_URL)
         settle(page_loaded)
         page_loaded.get_by_test_id("hide-reviewed").click()
-        expect(page_loaded.get_by_role("button", name="Videos (1)")).to_be_visible()
+        expect(page_loaded.get_by_role("button", name="Videos (1/1)")).to_be_visible()
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +910,7 @@ class TestEnterAdvancesTab:
 
     def test_enter_on_the_last_single_opens_the_next_tab(self, page_loaded: Page):
         """No videos in the fixture, so singles' next tab is the timeline."""
-        tab(page_loaded, f"Singles ({_singleton_count()})").click()
+        tab(page_loaded, f"Singles (0/{_singleton_count()})").click()
         at_single(page_loaded, 0)
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)
@@ -918,7 +924,7 @@ class TestEnterAdvancesTab:
     def test_enter_on_the_last_video_opens_the_timeline(self, page_loaded: Page, video_project):
         page_loaded.goto(BASE_URL)
         settle(page_loaded)
-        page_loaded.get_by_role("button", name="Videos (1)").click()
+        page_loaded.get_by_role("button", name="Videos (0/1)").click()
         expect(page_loaded.get_by_test_id("video-view")).to_have_attribute("data-index", "0")
         page_loaded.keyboard.press("Enter")
         settle(page_loaded)

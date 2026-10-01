@@ -31,7 +31,7 @@ const TAB_TONE: Record<Tone, string> = {
 
 /** A header tab. Icon-only to keep the header to one short row, so the
  *  name lives in `label`: it is the tooltip and the accessible name, which
- *  is what tests address tabs by — `get_by_role("button", name="Videos (1)")`. */
+ *  is what tests address tabs by — `get_by_role("button", name="Videos (0/1)")`. */
 export function Tab({
   active,
   tone = "accent",

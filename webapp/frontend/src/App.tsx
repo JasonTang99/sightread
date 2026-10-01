@@ -224,6 +224,18 @@ export default function App() {
   // tile by its decision the way it does for photos.
   const reviewableVideos = videos.filter((v) => videoStatuses[v] !== "delete");
   const hasVideos = reviewableVideos.length > 0;
+  // Reviewed/total on the three review tabs. Clusters and singles are
+  // decided per cluster; a video counts once its status is set and is
+  // anything other than undecided. Favorites stays a plain count.
+  const reviewedClusters = clusterList.filter((c) => isDecided(c, decisions)).length;
+  const reviewedSingles = singleList.filter((c) => isDecided(c, decisions)).length;
+  const reviewedVideos = reviewableVideos.filter((v) => {
+    const status = videoStatuses[v];
+    return status !== undefined && status !== "undecided";
+  }).length;
+  const clusterProgress = `${reviewedClusters}/${clusterList.length}`;
+  const singleProgress = `${reviewedSingles}/${singleList.length}`;
+  const videoProgress = `${reviewedVideos}/${reviewableVideos.length}`;
   const favorites = state.favorites ?? [];
   const hasFavorites = favorites.length > 0;
 
@@ -286,18 +298,18 @@ export default function App() {
 
         <nav className="flex items-stretch" aria-label="Review sections">
           {hasClusters && (
-            <Tab active={tab === "clusters"} label={`Clusters (${clusterList.length})`} onClick={selectTab("clusters")}>
-              <Icon name="clusters" /> <TabCount>{clusterList.length}</TabCount>
+            <Tab active={tab === "clusters"} label={`Clusters (${clusterProgress})`} onClick={selectTab("clusters")}>
+              <Icon name="clusters" /> <TabCount>{clusterProgress}</TabCount>
             </Tab>
           )}
           {hasSingles && (
-            <Tab active={tab === "singles"} label={`Singles (${singleList.length})`} onClick={selectTab("singles")}>
-              <Icon name="singles" /> <TabCount>{singleList.length}</TabCount>
+            <Tab active={tab === "singles"} label={`Singles (${singleProgress})`} onClick={selectTab("singles")}>
+              <Icon name="singles" /> <TabCount>{singleProgress}</TabCount>
             </Tab>
           )}
           {hasVideos && (
-            <Tab active={tab === "videos"} label={`Videos (${reviewableVideos.length})`} onClick={selectTab("videos")}>
-              <Icon name="videos" /> <TabCount>{reviewableVideos.length}</TabCount>
+            <Tab active={tab === "videos"} label={`Videos (${videoProgress})`} onClick={selectTab("videos")}>
+              <Icon name="videos" /> <TabCount>{videoProgress}</TabCount>
             </Tab>
           )}
           {hasFavorites && (
