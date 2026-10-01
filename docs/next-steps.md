@@ -6,6 +6,13 @@ _Last updated: 2026-10-01._
 
 The 2026-09-20 list was pruned; those items are in `git log` by hash.
 
+- **Source filter in the review header.** One checkbox per top-level folder
+  the open project's photos and videos live in; a file sitting in the project
+  root counts as that folder's name. All on until the user says otherwise,
+  remembered per project, and the last checkbox cannot be turned off. A
+  cluster stays whole when any of its frames is in a checked source.
+  Timeline, Favorites and Finish are not filtered. The control hides when
+  there is only one source.
 - **One header row for all review chrome** (`a295524`, `185c253`). The
   clusters tab had two stacked bars plus a progress line; singles and videos
   each had a third. Now a 36 px row: home icon, project name, icon tabs with
