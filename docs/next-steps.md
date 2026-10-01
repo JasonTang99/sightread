@@ -486,9 +486,8 @@ above was the remaining code item; same PATH and counts again after it.
    picker-chrome bullet above. Timeline has nothing equivalent left.
 3. ~~Run the Playwright suite with 3.11.15 first on PATH.~~ Done; 107 passed.
    The PATH prefix remains load-bearing for any later run from a 3.10.8 shell.
-4. ~~**Not merged and not pushed.**~~ **Merged into main** (`68d62bd`). Main is
-   90 commits ahead of `origin/main` and nothing has been pushed; pushing needs
-   Jason's say-so. Much of this section's chrome (Status, Divider, the cribs on
+4. ~~**Not merged and not pushed.**~~ **Merged into main** (`68d62bd`). Pushed to
+   `origin/main` on 2026-10-01 (`9ce573b..78f28e6`). Much of this section's chrome (Status, Divider, the cribs on
    clusters/singles/videos, the grouped header) was then removed again by the
    one-row header on 2026-10-01.
 
@@ -554,6 +553,5 @@ reflects it.
 
 Portugal still adopts on first open (§3), arriving with 196 `to_delete`
 queued. Hoh has been opened, so its adoption is done. 30 old trips have no
-pipeline output and resuming costs the GPU back from Sigil (§2). Main is 90
-commits ahead of origin and unpushed. Remote curation stays gated on auth
+pipeline output and resuming costs the GPU back from Sigil (§2). Remote curation stays gated on auth
 (`plan.md`). Clipfarm highlights stay off.
