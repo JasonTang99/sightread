@@ -1,10 +1,32 @@
 # sightread — next steps
 
-_Last updated: 2026-10-01._
+_Last updated: 2026-10-05._
 
 ## Done since the last update
 
 The 2026-09-20 list was pruned; those items are in `git log` by hash.
+
+- **Keep best is back, as a header switch on the clusters tab** (`0fbb7fd`).
+  On: a cluster opens as it always did, rank-1 kept and the rest delete. Off:
+  every undecided photo starts as delete. Persisted in
+  `localStorage["sightread:keepBest"]`. Not the keep-best `c742427` removed
+  (a button, a K key and an auto-best endpoint that wrote decisions): this
+  only moves where an undecided photo starts. Checked against the server:
+  confirm sends every path and `/api/confirm` records whatever is not in
+  `delete_paths` as kept, so nothing server-side assumes rank 1. Flipping it
+  rewrites undecided marks in the open cluster and any visited one; stored
+  decisions and stars stay. It runs in a layout effect because a plain effect
+  let Enter right after the flip confirm the old marks (the new test caught
+  2 queued instead of 3).
+- **A photos-per-row pick holds for the page load** (`b3f2b2e`), not one
+  cluster. A module variable keeps it across tab switches; a reload goes back
+  to the per-cluster 2-or-3 default.
+- **Singles show `score · folder · model` in one pill; videos show their
+  camera folder** (`2759bdd`). The header fold had dropped the singles score.
+  These three were uncommitted in the tree with no note; header checked by
+  screenshot at 1440x900 (one row, Keep best sits before Skip reviewed).
+- **Canon clips in Europe now reach a city** (`2a5a48b`); see §7.
+- Suites: 390 Python, 99 Playwright, `tsc -b` clean, `dist/` rebuilt.
 
 - **Source filter in the review header.** One checkbox per top-level folder
   the open project's photos and videos live in; a file sitting in the project
@@ -45,7 +67,8 @@ The 2026-09-20 list was pruned; those items are in `git log` by hash.
   numbers, which is why neither name nor second-level time is enough.
 - **`ui-cleanup` and `mirror-aware-deletes` are both merged into main**
   (`68d62bd`); see §8 and §8a. Keep-best, auto-best and skip were removed
-  (`c742427`). Suites: 389 Python, 81 Playwright.
+  (`c742427`); keep-best returned on 2026-10-05 as a default-only switch
+  (top of this list).
 
 ## 1. Where the seven 2026 trips landed
 
@@ -405,12 +428,10 @@ a description of HEAD.
 
 1. ~~Restart sightread.~~ **Done 2026-10-01** — running in tmux `fleet:0.5`
    on the current main.
-2. Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
-   on picker load, and whether Canon photos showed up via time assignment.
-   Half-answered: four Europe city dirs exist on disk (`01_Iceland`,
-   `02_Amsterdam`, `03_Brussels`, `04_Nice`), so the slice did happen. Whether
-   Canon's `2024_02_Amsterdam` folders landed in them by time assignment has
-   still not been looked at.
+2. ~~Glance at whether Europe split into `01_Iceland` / `02_Amsterdam` / …
+   and whether Canon photos showed up via time assignment.~~ **Looked at
+   2026-10-05** — see "Europe 2024" below. The slice is right; one bug fixed;
+   one recluster still owed.
 3. ~~Recluster Hawaii, Hoh and Yellowstone so the own-vs-guest split reaches
    them (§4). Long runs — their current `results.json` still mixes
    `google photos/` into Jason's clusters.~~ **Done 2026-09-20** (`3ee68ab`),
@@ -418,6 +439,56 @@ a description of HEAD.
    5–23 s of CPU each. The 13 Japan cities and every other trip were left
    alone — with no `google photos/` or `shared/` folder there is nothing for
    the split to do, so their `results.json` is unaffected by the change.
+   **Wrong for Europe 2024** (found 2026-10-05): it has `shared/`, and its
+   four cities still mix it in. See "Europe 2024" above.
+
+### Europe 2024 (inspected 2026-10-05, read-only plus one code fix)
+
+Layout: `iphone/` and `shared/` are both `01_Iceland`, `02_Amsterdam`,
+`03_Brussels`, `04_Nice`; `canon/` is `2024_02_Iceland`, `2024_02_Amsterdam`,
+`2024_03_Brussels`, `2024_03_Nice`, which does not match `NN_City`, so every
+Canon file is time-assigned. Parent project `37143ee6…` (9,522 stills, 3,308
+clusters) stays on disk.
+
+| City | stills (iphone / shared / canon) | clusters | Canon clips |
+|---|---|---:|---:|
+| `01_Iceland` | 776 / 314 / 214 | 382 | 3 |
+| `02_Amsterdam` | 849 / 600 / 1,085 | 1,066 | 1 |
+| `03_Brussels` | 793 / 508 / 1,229 | 965 | 2 |
+| `04_Nice` | 980 / 596 / 1,578 | 1,139 | 22 |
+
+- **Stills: correct.** 1,304 + 2,534 + 2,530 + 3,154 = 9,522, every still in
+  exactly one city, and all 4,106 Canon stills in the city their folder name
+  says. No decisions exist on any Europe dir yet.
+- **Bug, fixed in `2a5a48b`: the 28 Canon `MVI_*.MP4` landed in no city.**
+  `_exif_unix` reads nothing from an MP4, so `unfiled_assignment` dropped
+  them and no city's Videos tab listed them. They now fall back to mtime
+  (as `server._read_shot_time` does), only when that mtime lies inside the
+  trip's span ± a day. All 28 then match their folder's city. Japan's
+  assignment is unchanged. `walk_project` reads the assignment live, so no
+  re-split is needed.
+- City time ranges overlap by seconds to minutes on travel days (Brussels
+  starts 12 s before Amsterdam ends, Nice 6½ min before Brussels ends),
+  probably a `shared/` camera clock. Harmless here, since no Canon still sits
+  in an overlap wrongly; `_nearest_city` breaks ties by midpoint.
+- **Open: the four Europe city `results.json` predate own-vs-guest.** They
+  were written 2026-09-15 11:21–11:23; stage 3b landed in `8db52cf` on the
+  20th. The 09-20 recluster (§4) covered the four trips with a guest folder
+  and skipped Europe, though its `shared/` is one — §7 item 3 above says
+  "every other trip" had none, which is wrong for Europe. Counted from the
+  files: **129 clusters mix Jason's folders with `shared/`** (Iceland 9,
+  Amsterdam 38, Brussels 43, Nice 39), e.g. Brussels 91 is 43 photos across
+  canon/iphone/shared over 68 min. With Keep best on that is the §4
+  "rank one first, queue the rest across owners" case. Fix is a recluster
+  from cached embeddings per city, before anyone reviews Europe:
+  `CUDA_VISIBLE_DEVICES= python scripts/pipeline.py --image-dir
+  /mnt/h0/Trips/2024/2024_03_Europe --subtrip 01_Iceland` (and the other
+  three). **Not run**: this session's permission check refused it as
+  overwriting output, so it is Jason's call. Back up each city's
+  `results.json` / `clusters.json` first; it was not confirmed that the run
+  touches no model when every cache is warm, hence hiding the GPU. The album
+  duplicate guard (`5a15e3c`) will also run and may queue `shared/`
+  duplicates as `to_delete` — check the count after.
 
 ## 8a. UI cleanliness pass — branch `ui-cleanup`
 
@@ -558,7 +629,8 @@ reflects it.
   with his `.MOV`s. No case has been seen, so nothing is planned; the place to
   add one is `find_duplicates` in `scripts/pipeline.py`.
 
-Portugal still adopts on first open (§3), arriving with 196 `to_delete`
-queued. Hoh has been opened, so its adoption is done. 30 old trips have no
+Europe 2024's four cities need a recluster before review (§7, 129 clusters
+mix his photos with `shared/`). Portugal still adopts on first open (§3),
+arriving with 196 `to_delete` queued. Hoh has been opened, so its adoption is done. 30 old trips have no
 pipeline output and resuming costs the GPU back from Sigil (§2). Remote curation stays gated on auth
 (`plan.md`). Clipfarm highlights stay off.
