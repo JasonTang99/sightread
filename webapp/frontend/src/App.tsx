@@ -75,6 +75,16 @@ export default function App() {
       return false;
     }
   });
+  // Rank-1 starts kept. Off, every undecided photo in a cluster starts as
+  // delete and the user keeps the ones they want. Same kind of choice as
+  // skip-reviewed: a way of working, so it survives a reload.
+  const [keepBest, setKeepBest] = useState(() => {
+    try {
+      return localStorage.getItem("sightread:keepBest") !== "0";
+    } catch {
+      return true;
+    }
+  });
   // Override of the stored source filter for the project in `key`. Absent
   // means "read localStorage", so the first render that knows the folder
   // already has the choice the landing tab needs.
@@ -193,6 +203,14 @@ export default function App() {
       // starts off again next time.
     }
   }, [hideReviewed]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("sightread:keepBest", keepBest ? "1" : "0");
+    } catch {
+      // Same as skip-reviewed: the switch still works for this visit.
+    }
+  }, [keepBest]);
 
   useEffect(() => {
     if (!error) return;
@@ -419,6 +437,24 @@ export default function App() {
             </div>
           )}
           <div ref={setControlsEl} className="flex items-center justify-end gap-3 min-w-0" />
+          {tab === "clusters" && hasClusters && (
+            <span className="shrink-0">
+              <Switch
+                checked={keepBest}
+                label="Keep best"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setKeepBest((v) => !v);
+                }}
+                title={
+                  keepBest
+                    ? "Keep best: on — the top-ranked photo in a cluster starts kept"
+                    : "Keep best: off — every photo starts as delete"
+                }
+                data-testid="keep-best"
+              />
+            </span>
+          )}
           {hasReviewables && (
             <span className="shrink-0">
               <Switch
@@ -499,7 +535,7 @@ export default function App() {
         ) : (
           <>
             {tab === "clusters" && hasClusters && (
-              <ClusterView controlsEl={controlsEl} folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} onAdvance={advanceTab} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
+              <ClusterView controlsEl={controlsEl} folder={state.folder} clusters={clusterList} decisions={decisions} skipReviewed={hideReviewed} keepBest={keepBest} favorites={favorites} onRefresh={reload} onError={setError} onUndo={handleUndo} onToggleFavorite={toggleFavorite} onAdvance={advanceTab} videoTags={videoTags} onVideoTagsChange={setVideoTags} />
             )}
             {tab === "singles" && hasSingles && (
               <SingletonsView

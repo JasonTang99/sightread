@@ -239,6 +239,50 @@ class TestConfirm:
 
 
 # ---------------------------------------------------------------------------
+# Keep best
+# ---------------------------------------------------------------------------
+class TestKeepBest:
+    """The header switch decides only where an undecided photo starts.
+    Confirm still sends every path, so the server needs no rank rule."""
+
+    def _switch(self, page: Page):
+        return page.get_by_test_id("keep-best")
+
+    def test_on_by_default(self, page_loaded: Page):
+        expect(self._switch(page_loaded)).to_have_attribute("aria-checked", "true")
+
+    def test_off_starts_every_photo_as_delete(self, page_loaded: Page):
+        self._switch(page_loaded).click()
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(0)
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(3)
+
+    def test_off_then_confirm_queues_the_whole_cluster(self, page_loaded: Page, output_dir):
+        self._switch(page_loaded).click()
+        page_loaded.keyboard.press("Enter")
+        settle(page_loaded)
+        assert len(queued(output_dir)) == 3
+
+    def test_a_stored_decision_survives_the_flip(self, page_loaded: Page, output_dir):
+        images = FIXTURE_RESULTS["clusters"][0]["images"]
+        save_decisions(output_dir, {images[1]["path"]: "kept"})
+        page_loaded.reload()
+        settle(page_loaded)
+        self._switch(page_loaded).click()
+        expect(page_loaded.locator("button.bg-green-50")).to_have_count(1)
+
+    def test_survives_a_reload(self, page_loaded: Page):
+        self._switch(page_loaded).click()
+        page_loaded.reload()
+        settle(page_loaded)
+        expect(self._switch(page_loaded)).to_have_attribute("aria-checked", "false")
+        expect(page_loaded.locator("button.bg-red-50")).to_have_count(3)
+
+    def test_only_on_the_clusters_tab(self, page_loaded: Page):
+        tab(page_loaded, f"Singles (0/{_singleton_count()})").click()
+        expect(self._switch(page_loaded)).to_have_count(0)
+
+
+# ---------------------------------------------------------------------------
 # Undo
 # ---------------------------------------------------------------------------
 class TestUndo:

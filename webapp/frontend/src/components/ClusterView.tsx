@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
@@ -19,6 +19,8 @@ interface Props {
   decisions: PhotoDecisions;
   // Confirm jumps to the next undecided cluster instead of the next one.
   skipReviewed?: boolean;
+  // Rank-1 starts kept. Off: every undecided photo starts as delete.
+  keepBest?: boolean;
   favorites: string[];
   onRefresh: () => Promise<void>;
   onError: (msg: string) => void;
@@ -39,7 +41,7 @@ function imgUrl(path: string, w = 2400) {
 // with the page, so a reload goes back to the per-cluster default.
 let sessionCols: number | null = null;
 
-export function ClusterView({ controlsEl, folder, clusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
+export function ClusterView({ controlsEl, folder, clusters, decisions, skipReviewed = false, keepBest = true, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [idx, setIdx] = useState(() => {
     const first = clusters.findIndex((c) => !isDecided(c, decisions));
     return first === -1 ? 0 : first;
@@ -98,7 +100,7 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
       for (const img of cluster.images) {
         init[img.path] = img.path in decisions
           ? !isDoomed(decisions[img.path])
-          : img.rank === 1;
+          : keepBest && img.rank === 1;
       }
       setKeeps(init);
     }
@@ -109,6 +111,33 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
   useEffect(() => {
     if (cluster) keepsByClusterRef.current[cluster.cluster_id] = keeps;
   }, [keeps]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Flipping Keep best rewrites undecided photos. A confirmed decision and a
+  // star stay. Clusters not opened yet pick up the new default on arrival.
+  // A layout effect, so the corrected marks land before paint and before the
+  // next keypress: with a plain effect, Enter straight after the flip
+  // confirmed the old marks.
+  const keepBestSeen = useRef(keepBest);
+  useLayoutEffect(() => {
+    if (keepBestSeen.current === keepBest) return;
+    keepBestSeen.current = keepBest;
+    const apply = (
+      images: { path: string; rank: number }[],
+      prev: Record<string, boolean>,
+    ) => {
+      const next = { ...prev };
+      for (const img of images) {
+        if (img.path in decisions || favSet.has(img.path)) continue;
+        next[img.path] = keepBest && img.rank === 1;
+      }
+      return next;
+    };
+    for (const c of clusters) {
+      const saved = keepsByClusterRef.current[c.cluster_id];
+      if (saved) keepsByClusterRef.current[c.cluster_id] = apply(c.images, saved);
+    }
+    if (cluster) setKeeps((prev) => apply(cluster.images, prev));
+  }, [keepBest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (idx >= clusters.length) setIdx(Math.max(0, clusters.length - 1));
@@ -132,7 +161,7 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
   }, [clusters]);
 
   const isKeptOf = (path: string, rank: number) =>
-    favSet.has(path) || (keeps[path] ?? rank === 1);
+    favSet.has(path) || (keeps[path] ?? (keepBest && rank === 1));
 
   const toggle = (path: string) => {
     if (favSet.has(path)) return;
