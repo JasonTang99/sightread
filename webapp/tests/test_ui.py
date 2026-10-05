@@ -977,13 +977,13 @@ class TestPhotosPerRow:
         self._serve_images(page_loaded, 60, 40)
         expect(self._per_row(page_loaded, 2)).to_have_attribute("aria-pressed", "true")
 
-    def test_a_pick_holds_for_that_cluster_only(self, page_loaded: Page):
+    def test_a_pick_holds_for_the_page(self, page_loaded: Page):
         self._serve_images(page_loaded, 40, 60)
         self._per_row(page_loaded, 4).click()
         expect(self._per_row(page_loaded, 4)).to_have_attribute("aria-pressed", "true")
         page_loaded.keyboard.press("ArrowRight")
         at_cluster(page_loaded, 1)
-        expect(self._per_row(page_loaded, 3)).to_have_attribute("aria-pressed", "true")
+        expect(self._per_row(page_loaded, 4)).to_have_attribute("aria-pressed", "true")
 
 
 # ---------------------------------------------------------------------------

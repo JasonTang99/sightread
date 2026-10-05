@@ -35,6 +35,10 @@ function imgUrl(path: string, w = 2400) {
   return `/api/image?path=${encodeURIComponent(path)}&w=${w}`;
 }
 
+// A header pick. Outlives the view (switching tabs unmounts it) and dies
+// with the page, so a reload goes back to the per-cluster default.
+let sessionCols: number | null = null;
+
 export function ClusterView({ controlsEl, folder, clusters, decisions, skipReviewed = false, favorites, onRefresh, onError, onUndo, onToggleFavorite, onAdvance, videoTags = { tags: [], assignments: {} }, onVideoTagsChange }: Props) {
   const [idx, setIdx] = useState(() => {
     const first = clusters.findIndex((c) => !isDecided(c, decisions));
@@ -43,8 +47,10 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
   const [keeps, setKeeps] = useState<Record<string, boolean>>({});
   // Photos per row. Each cluster starts at its own default — three when every
   // frame is portrait, since two tall frames side by side leave most of the
-  // width empty — and a pick from the header holds for that cluster only.
-  const [colsOverride, setColsOverride] = useState<number | null>(null);
+  // width empty — until a header pick, which then holds for the rest of this
+  // page load. The module variable keeps it across leaving the tab; a reload
+  // starts the module over and the default returns.
+  const [colsOverride, setColsOverride] = useState<number | null>(sessionCols);
   // Portrait or not, per path, learnt from the decoded image. The pipeline
   // knows framing but does not ship it, and this way existing projects work
   // without a re-run. The preload below fills it for the next clusters, so
@@ -97,7 +103,6 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
       setKeeps(init);
     }
     setFocusedImg(0);
-    setColsOverride(null);
   }, [cluster?.cluster_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Remember selections per cluster so navigating back restores them
@@ -323,7 +328,11 @@ export function ClusterView({ controlsEl, folder, clusters, decisions, skipRevie
         {[2, 3, 4].map((n) => (
           <button
             key={n}
-            onClick={(e) => { e.currentTarget.blur(); setColsOverride(n); }}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              sessionCols = n;
+              setColsOverride(n);
+            }}
             aria-pressed={cols === n}
             aria-label={`${n} photos per row`}
             title={`${n} photos per row`}
