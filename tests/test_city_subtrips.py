@@ -1,5 +1,6 @@
 """City subtrips: Japan-like trips split; iPhone dumps join by shot time."""
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -90,6 +91,27 @@ def test_iphone_dump_joins_city_by_shot_time(tmp_path):
     files = {Path(p).name for p in projects.image_files_in(trip, "01_Hakodate")}
     assert files == {"c1.JPG", "IMG_1.JPG"}
     assert hak.exists() and sap.exists()
+
+
+def test_camera_clip_without_exif_joins_city_by_mtime(tmp_path):
+    """Europe 2024: Canon `2024_03_Nice/MVI_*.MP4` has no EXIF and no city
+    folder. Its mtime is the shot time; an import-date mtime is not."""
+    trip = tmp_path / "Trips" / "2024" / "2024_03_Europe"
+    _jpeg(trip / "iphone" / "01_Iceland" / "a.JPG", "2024:02:25 12:00:00")
+    _jpeg(trip / "iphone" / "02_Nice" / "b.JPG", "2024:03:08 12:00:00")
+    clip = trip / "canon" / "2024_02_Iceland" / "MVI_1801.MP4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"\0" * 16)
+    shot = datetime(2024, 2, 26, 5, 54).timestamp()
+    os.utime(clip, (shot, shot))
+    stale = trip / "canon" / "2024_02_Iceland" / "MVI_1802.MP4"
+    stale.write_bytes(b"\0" * 16)
+    imported = datetime(2026, 7, 9, 17, 3).timestamp()
+    os.utime(stale, (imported, imported))
+
+    assigned = projects.unfiled_assignment(trip)
+    assert assigned[str(clip.resolve())] == "01_Iceland"
+    assert str(stale.resolve()) not in assigned
 
 
 def test_picker_replaces_trip_with_city_rows(tmp_path, monkeypatch):

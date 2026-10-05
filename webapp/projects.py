@@ -536,6 +536,9 @@ def _nearest_city(t: float, ranges: dict[str, tuple[float, float]]) -> str:
     )
 
 
+UNFILED_MTIME_SLACK_S = 24 * 3600
+
+
 def unfiled_assignment(trip: Path, cities: list[str] | None = None,
                        timestamps: dict[str, float] | None = None) -> dict[str, str]:
     """Map unfiled files (no `NN_City` in the path) to a city by shot time.
@@ -575,6 +578,12 @@ def unfiled_assignment(trip: Path, cities: list[str] | None = None,
     ranges = {c: (min(ts), max(ts)) for c, ts in filed.items() if ts}
     if not ranges or not unfiled:
         return {}
+    # A camera MP4 has no EXIF, so it falls back to mtime like
+    # `_read_shot_time` does. Europe's 28 Canon clips keep their shot time
+    # there. Only inside the trip, though: a copy that reset mtime to the
+    # import date would otherwise all land in the last city.
+    trip_lo = min(lo for lo, _ in ranges.values()) - UNFILED_MTIME_SLACK_S
+    trip_hi = max(hi for _, hi in ranges.values()) + UNFILED_MTIME_SLACK_S
     assigned: dict[str, str] = {}
     for path in unfiled:
         key = str(path.resolve())
@@ -582,7 +591,13 @@ def unfiled_assignment(trip: Path, cities: list[str] | None = None,
         if t is None:
             t = _exif_unix(path)
         if t is None:
-            continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if not trip_lo <= mtime <= trip_hi:
+                continue
+            t = mtime
         assigned[key] = _nearest_city(t, ranges)
     return assigned
 
