@@ -506,6 +506,7 @@ export default function App() {
         ) : tab === "videos" ? (
           <VideoView
             controlsEl={controlsEl}
+            folder={folder}
             videos={reviewableVideos}
             skipReviewed={hideReviewed}
             statuses={videoStatuses}

@@ -4,6 +4,7 @@ import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { nextAfterConfirm } from "../decisions";
+import { deviceOf } from "../device";
 import type { VideoStatuses, VideoTagsState } from "../types";
 import { VIDEO_KEYS, typingTarget } from "../shortcuts";
 
@@ -40,6 +41,8 @@ function PreloadVideo({ src }: { src: string }) {
 interface Props {
   // The app header's slot for this view's controls.
   controlsEl: HTMLElement | null;
+  // The project folder, so the player can name the camera folder a clip came from.
+  folder?: string;
   videos: string[];
   // Server-side decision per video. "reviewed" means exactly this, not a
   // browser-local memory of having pressed enter — see the note on `reviewed`.
@@ -58,6 +61,7 @@ interface Props {
 
 export function VideoView({
   controlsEl,
+  folder,
   videos,
   statuses = {},
   skipReviewed = false,
@@ -343,6 +347,7 @@ export function VideoView({
   const isKept = isFavorited || (keeps[current] ?? true);
   const currentTag = videoTags.assignments[current] ?? null;
   const name = current.split("/").pop() ?? current;
+  const device = deviceOf(current, folder);
 
   return (
     <div
@@ -389,10 +394,15 @@ export function VideoView({
 
       {/* Full-viewport video */}
       <div
-        className={`flex-1 min-h-0 overflow-hidden bg-black border-4 transition-colors ${
+        className={`relative flex-1 min-h-0 overflow-hidden bg-black border-4 transition-colors ${
           isFavorited ? "border-yellow-400" : isKept ? "border-green-400" : "border-red-400"
         }`}
       >
+        {device && (
+          <span className="absolute top-2 left-2 z-10 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded-full max-w-[70%] truncate select-none pointer-events-none">
+            {device}
+          </span>
+        )}
         {videoSrc ? (
         <video
           key={current}

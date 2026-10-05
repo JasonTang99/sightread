@@ -4,7 +4,6 @@ import { useShortcuts } from "../hooks/useWindowKeydown";
 import { useMediaTags } from "../hooks/useMediaTags";
 import { TagBar } from "./TagBar";
 import { LiveMotion } from "./LiveMotion";
-import { DeviceBadge } from "./DeviceBadge";
 import { deviceOf } from "../device";
 import { nextAfterConfirm } from "../decisions";
 import type { Cluster, PhotoDecisions, VideoTagsState } from "../types";
@@ -190,6 +189,11 @@ export function SingletonsView({
   const isFav = favSet.has(current.path);
   const isKept = isKeptOf(current.path);
   const currentTag = videoTags.assignments[current.path] ?? null;
+  // Folder is which camera handed the file over; model is the camera itself
+  // (a "google photos" folder holds several). Both stay on the photo: the
+  // header fold dropped the score, and the badge hid the model in a tooltip.
+  const device = deviceOf(current.path, folder);
+  const where = [device, current.model].filter(Boolean).join(" · ");
 
   return (
     <div
@@ -233,11 +237,13 @@ export function SingletonsView({
           alt=""
           className="max-w-full max-h-full object-contain"
         />
-        <DeviceBadge
-          device={deviceOf(current.path, folder)}
-          model={current.model}
-          corner="bottom-2 left-2"
-        />
+        <span
+          className="absolute bottom-2 left-2 z-10 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded-full max-w-[70%] truncate select-none"
+          title={where || undefined}
+        >
+          <span className="font-mono">{current.score.toFixed(2)}</span>
+          {where && <> · {where}</>}
+        </span>
         {current.motion && (
           <LiveMotion key={`motion:${current.path}`} motion={current.motion} fit="contain" corner="top-2 left-2" />
         )}
