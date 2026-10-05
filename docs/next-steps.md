@@ -440,7 +440,8 @@ a description of HEAD.
    alone — with no `google photos/` or `shared/` folder there is nothing for
    the split to do, so their `results.json` is unaffected by the change.
    **Wrong for Europe 2024** (found 2026-10-05): it has `shared/`, and its
-   four cities still mix it in. See "Europe 2024" above.
+   four cities mixed it in until they were reclustered that day. See "Europe
+   2024" above.
 
 ### Europe 2024 (inspected 2026-10-05, read-only plus one code fix)
 
@@ -452,10 +453,12 @@ clusters) stays on disk.
 
 | City | stills (iphone / shared / canon) | clusters | Canon clips |
 |---|---|---:|---:|
-| `01_Iceland` | 776 / 314 / 214 | 382 | 3 |
-| `02_Amsterdam` | 849 / 600 / 1,085 | 1,066 | 1 |
-| `03_Brussels` | 793 / 508 / 1,229 | 965 | 2 |
-| `04_Nice` | 980 / 596 / 1,578 | 1,139 | 22 |
+| `01_Iceland` | 776 / 314 / 214 | 382 → 390 | 3 |
+| `02_Amsterdam` | 849 / 600 / 1,085 | 1,066 → 1,107 | 1 |
+| `03_Brussels` | 793 / 508 / 1,229 | 965 → 1,009 | 2 |
+| `04_Nice` | 980 / 596 / 1,578 | 1,139 → 1,185 | 22 |
+
+Cluster counts are before → after the 2026-10-05 recluster below.
 
 - **Stills: correct.** 1,304 + 2,534 + 2,530 + 3,154 = 9,522, every still in
   exactly one city, and all 4,106 Canon stills in the city their folder name
@@ -471,24 +474,27 @@ clusters) stays on disk.
   starts 12 s before Amsterdam ends, Nice 6½ min before Brussels ends),
   probably a `shared/` camera clock. Harmless here, since no Canon still sits
   in an overlap wrongly; `_nearest_city` breaks ties by midpoint.
-- **Open: the four Europe city `results.json` predate own-vs-guest.** They
-  were written 2026-09-15 11:21–11:23; stage 3b landed in `8db52cf` on the
+- ~~**Open: the four Europe city `results.json` predate own-vs-guest.**~~
+  They were written 2026-09-15, before stage 3b landed in `8db52cf` on the
   20th. The 09-20 recluster (§4) covered the four trips with a guest folder
-  and skipped Europe, though its `shared/` is one — §7 item 3 above says
-  "every other trip" had none, which is wrong for Europe. Counted from the
-  files: **129 clusters mix Jason's folders with `shared/`** (Iceland 9,
-  Amsterdam 38, Brussels 43, Nice 39), e.g. Brussels 91 is 43 photos across
-  canon/iphone/shared over 68 min. With Keep best on that is the §4
-  "rank one first, queue the rest across owners" case. Fix is a recluster
-  from cached embeddings per city, before anyone reviews Europe:
-  `CUDA_VISIBLE_DEVICES= python scripts/pipeline.py --image-dir
-  /mnt/h0/Trips/2024/2024_03_Europe --subtrip 01_Iceland` (and the other
-  three). **Not run**: this session's permission check refused it as
-  overwriting output, so it is Jason's call. Back up each city's
-  `results.json` / `clusters.json` first; it was not confirmed that the run
-  touches no model when every cache is warm, hence hiding the GPU. The album
-  duplicate guard (`5a15e3c`) will also run and may queue `shared/`
-  duplicates as `to_delete` — check the count after.
+  and skipped Europe, though its `shared/` is one too. 129 clusters mixed
+  Jason's folders with `shared/` (Iceland 9, Amsterdam 38, Brussels 43,
+  Nice 39). Brussels 91, for example, was 43 photos across canon, iphone
+  and shared over 68 min.
+
+  **Reclustered 2026-10-05** from cached embeddings and scores, with
+  `CUDA_VISIBLE_DEVICES=` and no model loaded (`Loading cached embeddings`
+  and `Loading cached scores` on every city), ~20 s each. Stage 3b split
+  10 / 40 / 49 / 47 clusters. Afterwards **no cluster in any of the four
+  holds more than one photographer**, counted with `own_flags`' rule
+  (folder, then the own-model rescue, each guest model its own
+  photographer). Largest cluster per city: 43 / 53 / 37 / 25. The
+  duplicate guard ran and found nothing, so **0 `to_delete` were queued**
+  and no city has a `decisions.json`. That is expected: no `shared/` frame
+  carries a model found in his own folders, and the guard needs the same
+  model. The 09-15 `results.json` and `clusters.json` are in
+  `~/.local/share/sightread/backups/europe_results_2026-09-15/<hash>/`.
+  Europe is ready to review.
 
 ## 8a. UI cleanliness pass — branch `ui-cleanup`
 
@@ -629,8 +635,8 @@ reflects it.
   with his `.MOV`s. No case has been seen, so nothing is planned; the place to
   add one is `find_duplicates` in `scripts/pipeline.py`.
 
-Europe 2024's four cities need a recluster before review (§7, 129 clusters
-mix his photos with `shared/`). Portugal still adopts on first open (§3),
+Europe 2024's four cities are reclustered and ready to review (§7).
+Portugal still adopts on first open (§3),
 arriving with 196 `to_delete` queued. Hoh has been opened, so its adoption is done. 30 old trips have no
 pipeline output and resuming costs the GPU back from Sigil (§2). Remote curation stays gated on auth
 (`plan.md`). Clipfarm highlights stay off.
