@@ -373,10 +373,11 @@ are *not* in a city folder (a dump next to city-split Canon) join by EXIF
 time against the city's min/max from the filed photos.
 
 Korea (`02-06` date folders) and Hoh (`xt5/` / `iphone/` only) do not split.
-Europe *will*: iPhone is `01_Iceland`, `02_Amsterdam`, … which matches
-`NN_City`, so the first picker load after restart will try to slice Europe
-the same way and time-assign Canon's `2024_02_Amsterdam` folders. That is
-probably right, but it has not been looked at.
+Europe does: iPhone and `shared/` are `01_Iceland`, `02_Amsterdam`, …, and
+Canon's `2024_02_Amsterdam` folders are time-assigned. Checked and
+reclustered on 2026-10-05; see "Europe 2024" below. No sightread server was
+running at wrap-up, so the next start serves the Canon-clip fix (`2a5a48b`)
+and the rebuilt `dist/` without anything extra.
 
 **Caches were sliced, not recomputed.** Parent embeddings 51.8 MB, scores,
 285 decisions, shot times, and existing thumbs were copied/hardlinked into
