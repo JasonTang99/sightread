@@ -1,8 +1,13 @@
 # sightread — next steps
 
-_Last updated: 2026-10-05._
+_Last updated: 2026-10-06._
 
 ## Done since the last update
+
+- **The archive batch finished** (2026-10-06): the 21 remaining trips with
+  stills ran in 45 min, all rc 0, and Sigil is back up. The other 9 are
+  RAW- or video-only. One Snapseed export on Dashwood Cottage was queued as
+  an album duplicate. See §2.
 
 The 2026-09-20 list was pruned; those items are in `git log` by hash.
 
@@ -139,11 +144,36 @@ minutes. Reproduce the list with `project_output_dir_name` over
 `/mnt/h0/Trips/*/*`, which is what produced these counts — the picker's
 estimate tag says the same thing one row at a time.
 
-**Resuming costs the GPU back.** Sigil is up again, and the reason it was
+~~**Resuming costs the GPU back.** Sigil is up again, and the reason it was
 stopped has not changed: with it resident, clipiqa+ ran out of memory and fell
 back to per-image scoring on every trip. Stop both services before restarting
 the batch, and restart them after. Nothing here is urgent — these are old,
-small trips and none is queued for review.
+small trips and none is queued for review.~~
+
+**Done 2026-10-06: the archive is fully preprocessed.** Sigil was stopped
+for the run and restarted by the batch script's exit trap at 11:56 (both
+`active` after). 21 trips ran newest first, 11:11–11:56, all rc 0, with no
+OOM and no per-image scoring fallback. 3,167 stills became 1,614 clusters. The
+long ones were LA (613 stills, 556 s), Greece (479, 344 s), Stratford (555, 385 s),
+Dashwood Cottage (380, 269 s) and Wasaga (255, 183 s); the twelve under 100
+stills took 23–100 s each. The largest clusters are LA 23, Wasaga 23 and
+Hiking 26.
+
+**The other 9 have nothing the pipeline reads, so they have no output on
+purpose.** `2024_12_NYC` (91 CR3 + 1 MP4), `2022_11_Foggy_AGO`,
+`2022_11_DVP_Bike`, `2022_10_Vic_Night`, `2022_09_5th_floor`,
+`2022_08_Parking_Lot` and `2022_08_Nathan_Philips` are CR3 + `.xmp` only, and
+`IMAGE_EXTENSIONS` has no raw format. `2021_09_Karaoke` and `2021_11_Toybox`
+are a few `.mp4`s. Making the RAW-only trips reviewable would mean decoding
+CR3 (or its embedded preview) in the pipeline and the thumbnailer. Nobody has
+asked for that, so nothing is planned.
+
+**First real hit for the album duplicate guard** (§9): in
+`2023_07_Dashwood_Cottage`, `shared/Snapseed.jpg` is a copy of
+`iphone/IMG_2132.HEIC` (same model, same sub-second time, under 0.01 cosine).
+It is left out of review and queued `to_delete`, but not deleted. It is a
+Snapseed export, so it may be the *edited* version of that shot. Look at both
+before the trip's first Finish if the edit matters.
 
 **2026-09-15:** `2024_01_Japan` did run as one project (6,324 stills, 1,275
 clusters). That pile is now being split into city subtrips — §7. Do not re-GPU
@@ -638,6 +668,7 @@ reflects it.
 
 Europe 2024's four cities are reclustered and ready to review (§7).
 Portugal still adopts on first open (§3),
-arriving with 196 `to_delete` queued. Hoh has been opened, so its adoption is done. 30 old trips have no
-pipeline output and resuming costs the GPU back from Sigil (§2). Remote curation stays gated on auth
+arriving with 196 `to_delete` queued. Hoh has been opened, so its adoption is done. Every trip on h0
+with readable stills now has pipeline output; the 9 without are RAW- or
+video-only (§2). Remote curation stays gated on auth
 (`plan.md`). Clipfarm highlights stay off.
