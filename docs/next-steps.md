@@ -6,8 +6,8 @@ _Last updated: 2026-10-06._
 
 - **The archive batch finished** (2026-10-06): the 21 remaining trips with
   stills ran in 45 min, all rc 0, and Sigil is back up. The other 9 are
-  RAW- or video-only. One Snapseed export on Dashwood Cottage was queued as
-  an album duplicate. See §2.
+  RAW- or video-only. One Snapseed export on Dashwood Cottage was caught as
+  an album duplicate and deleted from h0 (h1 keeps it). See §2.
 
 The 2026-09-20 list was pruned; those items are in `git log` by hash.
 
@@ -171,9 +171,10 @@ asked for that, so nothing is planned.
 **First real hit for the album duplicate guard** (§9): in
 `2023_07_Dashwood_Cottage`, `shared/Snapseed.jpg` is a copy of
 `iphone/IMG_2132.HEIC` (same model, same sub-second time, under 0.01 cosine).
-It is left out of review and queued `to_delete`, but not deleted. It is a
-Snapseed export, so it may be the *edited* version of that shot. Look at both
-before the trip's first Finish if the edit matters.
+It was left out of review and queued `to_delete`. **Deleted from h0 on
+2026-10-06 at Jason's request** via `delete_marked.py` (mirror copy
+size-matched first). The h1 copy remains and is listed in that folder's
+`.sightread_deleted.txt`.
 
 **2026-09-15:** `2024_01_Japan` did run as one project (6,324 stills, 1,275
 clusters). That pile is now being split into city subtrips — §7. Do not re-GPU
