@@ -1,0 +1,19 @@
+---
+description: Restart the Sightread UI server instead of asking
+alwaysApply: true
+---
+
+# Restart the server
+
+When a change needs the process on port 8765 restarted, restart it. Do not ask, and do not tell the user to restart it themselves.
+
+The UI is `webapp/run.sh` (repo root `./run.sh`), which serves `webapp/frontend/dist` from:
+
+```bash
+cd webapp && python -m uvicorn server:app --host 127.0.0.1 --port 8765
+```
+
+- No `--reload`. It would wipe the in-memory project and undo stack on every file edit.
+- Do not open a browser.
+- Stop whatever is listening on `127.0.0.1:8765`, wait until the port is free, start the same command in the background, then confirm `http://127.0.0.1:8765/` returns 200.
+- A restart drops the open project and the undo stack. Say so after it is back up.
