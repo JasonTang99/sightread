@@ -1,9 +1,12 @@
 # sightread — next steps
 
-_Last updated: 2026-10-06._
+_Last updated: 2026-10-07._
 
 ## Done since the last update
 
+- **Adoption runs both ways now** (`5bb23e4`): opening `<trip>/xt5` pulls
+  in what the trip decided about its photos, and the most recent decision
+  wins a conflict. See §3.
 - **The archive batch finished** (2026-10-06): the 21 remaining trips with
   stills ran in 45 min, all rc 0, and Sigil is back up. The other 9 are
   RAW- or video-only. One Snapseed export on Dashwood Cottage was caught as
@@ -31,7 +34,7 @@ The 2026-09-20 list was pruned; those items are in `git log` by hash.
   These three were uncommitted in the tree with no note; header checked by
   screenshot at 1440x900 (one row, Keep best sits before Skip reviewed).
 - **Canon clips in Europe now reach a city** (`2a5a48b`); see §7.
-- Suites: 390 Python, 99 Playwright, `tsc -b` clean, `dist/` rebuilt.
+- Suites: 409 Python, 99 Playwright, `tsc -b` clean, `dist/` rebuilt.
 
 - **Source filter in the review header.** One checkbox per top-level folder
   the open project's photos and videos live in; a file sitting in the project
@@ -182,27 +185,60 @@ it. The whole-trip output dir
 `~/.local/share/sightread/projects/2870dc083f7ebafa993fd9f975258fad/` stays on
 disk; the picker will hide it once the city rows exist.
 
-## 3. Adoption covers trips, not the other direction
+## 3. Adoption runs both ways
 
-`adopt_subfolder_reviews` runs when a trip is opened and pulls in the decisions,
-video tags and user clips of any project whose folder sits inside it. Two trips
-have not been opened since it shipped and will adopt on their next open:
+`adopt_subfolder_reviews` runs on every open. A trip pulls in the decisions,
+video tags and user clips of any project whose folder sits inside it, and
+since `5bb23e4` a folder also pulls its own paths from each project enclosing
+it, up to two levels. A city-split trip's city projects count as enclosing:
+`canon/01_Hakodate` adopts from Japan's Hakodate project. One trip has not
+been opened since downward adoption shipped and will adopt on its next open:
 
-- `2026_09_Hoh_River_Trail` — 119 decisions (46 applied deletes, 38 favourites,
-  35 kept) and 32 video tags from its `xt5/` project.
 - `2026_08_Portugal` — 338 decisions from `xt5/`, of which **196 are `to_delete`,
   not yet applied**. Opening the trip therefore arrives with a delete queue of
   196 waiting in the Finish tab. That is the correct carry-over, but it is worth
-  knowing before the first Confirm rather than after.
+  knowing before the first Confirm rather than after. Nothing was opened on
+  Portugal while this was built.
 
-The gap: adoption is one-directional. Opening `<trip>/xt5` on its own still knows
+~~The gap: adoption is one-directional. Opening `<trip>/xt5` on its own still knows
 nothing of review done at the trip level, so a decision made in the trip and then
-revisited in the camera folder will be offered again.
-
-~~Nobody has hit this yet — it needs someone to open a camera folder after
-reviewing its trip — so it is recorded rather than fixed.~~ **Decided 2026-09-14:
+revisited in the camera folder will be offered again.~~ ~~**Decided 2026-09-14:
 won't fix.** Since `e83d51c` the picker no longer lists device folders; reaching
-one takes "Other folder…".
+one takes "Other folder…".~~ **Reversed and fixed 2026-10-07** at Jason's
+request (`5bb23e4`).
+
+**The conflict rule: the most recent decision wins**, in both directions.
+`decisions.json` now carries `decided_at` (Unix seconds per path) beside
+`photos`. It is additive under schema 2, so older files load unchanged.
+`save_decisions` stamps every write. An adopted copy keeps its source's
+stamp, and so does a city slice in `split_city_caches`. That is what stops
+two projects trading a decision back and forth on alternate opens: a copy
+never looks newer than the decision it came from. Every decision on disk
+before `5bb23e4` is unstamped. Unstamped loses to stamped, and a tie keeps
+the opened project's own decision, so existing data resolves exactly as the
+old trip-always-wins rule did. The one exception is `deleted`: it records a
+file already unlinked from h0, so it beats any status and nothing replaces
+it. Video tags and clips have no stamps and stay fill-only. The opened
+project's own wins those.
+
+The trip-level rule changed with it. A camera folder decided *after* the
+trip's own decision now replaces it when the trip is next opened. Before,
+the trip always won.
+
+Still open, neither seen in practice:
+
+- **Clearing a decision does not travel.** Undo back to undecided removes
+  the path and its stamp. The other project still holds the old decision,
+  so on the next open it comes back. Fixing that needs tombstones (a stamp
+  with no status) in `save_decisions`. Only worth doing if someone undoes a
+  decision in one project and then opens the other.
+- **A whole-trip project does not pull from its own city projects.** City
+  projects pull down from the whole trip, and folders pull from cities, but
+  `2024_01_Japan` opened whole ignores `01_Hakodate`'s review. The picker
+  hides the whole-trip row once cities exist, so it takes "Other folder…" to
+  hit this.
+- **The running server serves the old code until restarted** (tmux
+  `fleet:0.5`). Python only. `dist/` does not change.
 
 ## 4. The cross-camera merge — all four questions settled
 
