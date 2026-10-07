@@ -183,8 +183,10 @@ python3 scripts/delete_marked.py --output-dir ~/.local/share/sightread/projects/
 
 Still open:
 
-- **Run it.** 1394 files, irreversible in-app (the undo stack is cleared in the same call);
-  recovery means copying back from h1 by hand.
+- ~~**Run it.** 1394 files, irreversible in-app (the undo stack is cleared in the same call);
+  recovery means copying back from h1 by hand.~~ **Done by 2026-09-11** through the Finish
+  tab, after the drive reorg moved the trip to `/mnt/h0/Trips/2026_01_Japan/` (so the
+  project hash above no longer exists; `xt5/` is now `62ba829e…`, with 359 `deleted`).
 - ~~**Placement.** `TrashPanel` still renders inside the clusters, singles and timeline tabs~~
   **Done 2026-08-31.** Finish tab + `FinishTripPanel` — apply-deletes is step 1 there.
 
@@ -242,9 +244,8 @@ hardlinking the 1.76 GiB is described, not spent.
 
 Still open:
 
-- **Run it.** Non-destructive; only ever writes into the exports tree, and under
-  hardlinking it costs no space. First action: Finish tab → step 2, or the 📤 button on
-  the Favourites tab.
+- ~~**Run it.**~~ **Done by 2026-09-11:** `2026_01_Japan/_exports/` holds 205 files, videos
+  split into `vibes/`, `people/` and `action/`.
 - **A hardlinked export is the same file, under two names.** Nothing edits it today — the
   export is a delivery, and editors open the raw — but a tool that rewrites a JPEG *in
   place* would change the import copy too. Most write-new-then-rename, which breaks the
@@ -276,7 +277,9 @@ Offered *after* a successful export, and only then — it destroys the ability t
 
 Still open:
 
-- **Run steps 1–3 on Japan** (operational, not code).
+- ~~**Run steps 1–3 on Japan**~~ **Done:** `xt5/` was marked done on 2026-09-11
+  (`curation_done.json`). The trip-level project (`743ce07b…`) still has 20 `iphone/`
+  photos queued `to_delete` since 2026-09-12, not applied.
 - **Orphan cache sweep** on nvme (see Related below) — not part of the finish panel yet.
 
 ### Suggested shape
@@ -286,7 +289,7 @@ Still open:
 ### Video tags for export routing — **Built 2026-09-01.**
 
 Named tags on favourited videos, routed into export subfolders at copy time. Built on
-`mirror-aware-deletes`; not yet merged to `main`.
+`mirror-aware-deletes`, which is merged into `main`.
 
 - **Storage:** `<output_dir>/video_tags.json` — `tags` list + per-video assignments
   (`webapp/video_tags.py`). A project with no file yet starts on `DEFAULT_TAGS` —
@@ -305,12 +308,10 @@ Named tags on favourited videos, routed into export subfolders at copy time. Bui
 
 Still open:
 
-- **Use while reviewing Japan's 62 undecided videos** — tag before export so delivery
-  folders match the edit. Nothing is starred yet, so the export currently has no video
-  rows at all; every clip that gets starred and left untagged lands in `untagged/`.
-  First action: open Videos tab on Japan, star + `1` vibes / `2` people / `3` action as
-  you go.
-- **Merge `mirror-aware-deletes` → `main`** after Japan finish flow validates end-to-end.
+- ~~**Use while reviewing Japan's 62 undecided videos**~~ **Done:** 53 videos tagged, and
+  the export routed them into the tag folders.
+- ~~**Merge `mirror-aware-deletes` → `main`**~~ **Done** (`68d62bd` merged `ui-cleanup`, which
+  carried it; see `docs/next-steps.md` §8a).
 
 ### Related, still open
 
