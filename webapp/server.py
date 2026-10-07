@@ -1511,12 +1511,13 @@ def open_project(req: FolderRequest):
         migrate_project_state(out_dir)
         # A trip whose xt5/ folder was reviewed on its own starts here with no
         # opinion about any of those photos, and would walk the user back
-        # through every keeper. The child project's decisions are on disk.
+        # through every keeper; xt5/ opened after its trip has the same gap.
+        # The other project's decisions are on disk.
         adopted = adopt_subfolder_reviews(folder, out_dir, subtrip)
     if adopted["photos"] or adopted["video_tags"] or adopted["clips"]:
         log.info(
-            "Adopted %d decision(s), %d video tag(s), %d clip(s) from %d device "
-            "folder project(s) into %s",
+            "Adopted %d decision(s), %d video tag(s), %d clip(s) from %d "
+            "overlapping project(s) into %s",
             adopted["photos"], adopted["video_tags"], adopted["clips"],
             adopted["folders"], folder,
         )

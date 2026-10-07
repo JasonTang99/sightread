@@ -663,7 +663,7 @@ def split_city_caches(trip: Path) -> list[dict]:
     if not (emb_path.exists() and emb_side.exists()):
         return []
 
-    from utils import load_decisions, save_decisions
+    from utils import load_decision_times, load_decisions, save_decisions
 
     emb_paths: list[str] = json.loads(emb_side.read_text())
     embeddings = np.load(str(emb_path))
@@ -683,6 +683,7 @@ def split_city_caches(trip: Path) -> list[dict]:
             score_keys = list(scores)
 
     parent_decisions = load_decisions(parent)
+    parent_times = load_decision_times(parent)
     assignment = unfiled_assignment(trip, cities)
     reports = []
 
@@ -734,7 +735,10 @@ def split_city_caches(trip: Path) -> list[dict]:
 
         city_decisions = {p: s for p, s in parent_decisions.items() if p in keep_set}
         if city_decisions:
-            save_decisions(out, city_decisions)
+            # The slice is a copy, not a new decision; it keeps the parent's
+            # stamps so adoption does not take it for the newer opinion.
+            save_decisions(out, city_decisions,
+                           at={p: parent_times.get(p) for p in city_decisions})
 
         for name in ("shot_times.json", "video_tags.json", "user_clips.json"):
             _slice_json_by_paths(parent / name, out / name, keep_set, city)
@@ -1011,9 +1015,48 @@ def _path_in_subtrip(path: str, subtrip: str | None) -> bool:
     return subtrip in Path(path).parts
 
 
+def _path_inside(path: str, folder: Path) -> bool:
+    return path.startswith(str(folder) + os.sep)
+
+
+def _enclosing_projects(folder: Path, depth: int = _ADOPT_DEPTH):
+    """Output dirs of projects whose folder encloses this one.
+
+    The mirror of `_device_folders`: `<trip>/xt5` is enclosed by `<trip>`, and
+    by each of the trip's city projects when it is city-split.
+    """
+    for parent in list(folder.parents)[:depth]:
+        yield project_output_dir(parent)
+        for city in city_subtrips(parent):
+            yield project_output_dir(parent, city)
+
+
+def _adoption_wins(theirs: str, theirs_at: float | None,
+                   ours: str | None, ours_at: float | None) -> bool:
+    """Whether another project's decision replaces the one held here.
+
+    The most recent decision wins. A decision written before stamps existed is
+    older than any stamped one, and a tie keeps what is held here, so two
+    unstamped decisions resolve as adoption always did: the opened project's
+    own. `deleted` is the exception both ways — it records a file that is
+    already gone, so it beats any status and nothing replaces it.
+    """
+    from utils import DELETED
+
+    if ours is None:
+        return True
+    if ours == DELETED:
+        return False
+    if theirs == DELETED:
+        return True
+    if theirs_at is None:
+        return False
+    return ours_at is None or theirs_at > ours_at
+
+
 def adopt_subfolder_reviews(folder: Path, out_dir: Path,
                             subtrip: str | None = None) -> dict[str, int]:
-    """Fold reviews of a trip's device folders into the trip project.
+    """Fold reviews of overlapping projects into the one being opened.
 
     A project is identified by its folder path, so opening `<trip>` is a
     different project from opening `<trip>/xt5` — and reviewing the trip after
@@ -1021,44 +1064,57 @@ def adopt_subfolder_reviews(folder: Path, out_dir: Path,
     undecided. The decisions are right there on disk under the child's own
     output dir; this brings them across.
 
+    It runs both ways. A trip pulls from its device folders, and a device
+    folder pulls its own paths from any project enclosing it, so a delete
+    queued at the trip level is not offered again when `xt5/` is opened alone.
     A city subtrip also pulls matching paths from the whole-trip project, so
     review done on Japan 2024 as one pile is not thrown away when Hakodate
     becomes its own project.
 
-    The trip's own decisions always win, so this is safe to run on every open
-    and safe to run twice: it only ever fills in paths the trip has no opinion
-    about. Deletes that were already applied come across too — they name files
+    Where two projects disagree about a photo, the most recent decision wins
+    (`_adoption_wins`). The adopted copy keeps its source's stamp, so running
+    this again, on either side, changes nothing until one of them is decided
+    anew. Deletes that were already applied come across too — they name files
     that are gone, which is exactly what stops them being re-proposed.
+
+    Video tags and user clips carry no stamps and only fill gaps: the opened
+    project's own always wins.
     """
-    from utils import load_decisions, save_decisions  # local: utils imports media, not projects
+    from utils import load_decision_times, load_decisions, save_decisions  # local: utils imports media, not projects
 
     adopted = {"photos": 0, "video_tags": 0, "clips": 0, "folders": 0}
     folder = Path(folder).resolve()
     out_dir = Path(out_dir)
     own = load_decisions(out_dir)
+    own_at = load_decision_times(out_dir)
     new_decisions: dict[str, str] = {}
+    new_at: dict[str, float | None] = {}
 
-    sources = list(_device_folders(folder))
+    sources = [project_output_dir(child) for child in _device_folders(folder)]
     if subtrip:
-        parent_out = project_output_dir(folder)
-        if parent_out != out_dir and parent_out.is_dir():
-            sources.append(folder)
+        sources.append(project_output_dir(folder))
+    sources.extend(_enclosing_projects(folder))
 
-    for child in sources:
-        child_out = project_output_dir(child) if child != folder else project_output_dir(folder)
-        if child_out == out_dir or not child_out.is_dir():
+    seen: set[Path] = set()
+    for child_out in sources:
+        if child_out == out_dir or child_out in seen or not child_out.is_dir():
             continue
+        seen.add(child_out)
         adopted["folders"] += 1
+        their_at = load_decision_times(child_out)
         for path, status in load_decisions(child_out).items():
-            if path in own or path in new_decisions or not path.startswith(str(folder)):
+            if not _path_inside(path, folder) or not _path_in_subtrip(path, subtrip):
                 continue
-            if not _path_in_subtrip(path, subtrip):
+            ours = new_decisions.get(path, own.get(path))
+            ours_at = new_at[path] if path in new_decisions else own_at.get(path)
+            if ours == status or not _adoption_wins(status, their_at.get(path), ours, ours_at):
                 continue
             new_decisions[path] = status
+            new_at[path] = their_at.get(path)
         adopted["video_tags"] += _adopt_video_tags(child_out, out_dir, folder, subtrip)
         adopted["clips"] += _adopt_user_clips(child_out, out_dir, folder, subtrip)
     if new_decisions:
-        save_decisions(out_dir, new_decisions)
+        save_decisions(out_dir, new_decisions, at=new_at)
         adopted["photos"] = len(new_decisions)
     return adopted
 
@@ -1076,7 +1132,7 @@ def _adopt_video_tags(child_out: Path, out_dir: Path, folder: Path,
     tags = list(ours["tags"]) + [t for t in theirs["tags"] if t not in ours["tags"]]
     added = {
         p: t for p, t in theirs["videos"].items()
-        if p not in ours["videos"] and p.startswith(str(folder))
+        if p not in ours["videos"] and _path_inside(p, folder)
         and _path_in_subtrip(p, subtrip)
     }
     if not added:
@@ -1099,7 +1155,7 @@ def _adopt_user_clips(child_out: Path, out_dir: Path, folder: Path,
     ours = load_user_clips(out_dir)
     added = 0
     for path, entry in theirs.items():
-        if path in ours or not path.startswith(str(folder)):
+        if path in ours or not _path_inside(path, folder):
             continue
         if not _path_in_subtrip(path, subtrip):
             continue

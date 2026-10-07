@@ -3,7 +3,8 @@
 Curation state is one file per project — `decisions.json` — holding a single
 status per photo path:
 
-    {"schema_version": 2, "photos": {"/abs/path.JPG": "kept", ...}}
+    {"schema_version": 2, "photos": {"/abs/path.JPG": "kept", ...},
+     "decided_at": {"/abs/path.JPG": 1791331200.5, ...}}
 
     (absent)     never reviewed
     kept         reviewed, staying
@@ -17,12 +18,19 @@ decision. It is a single slot rather than parallel files because the previous
 split — decisions.json plus to_delete.txt plus favorites.json — had no
 mechanism keeping the three in agreement, and they drifted in practice: photos
 marked kept sat in the delete queue regardless.
+
+`decided_at` is when each status was last written, in Unix seconds. It exists
+so that two projects covering the same photo — a trip and its `xt5/` folder —
+can tell which of their disagreeing decisions is the newer one when one adopts
+from the other. Decisions written before it existed have no entry, and read as
+older than any that do.
 """
 
 import json
 import logging
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from media import motion_of
@@ -231,19 +239,49 @@ def load_decisions(output_dir) -> dict[str, str]:
     return _legacy_state(output_dir, raw)
 
 
-def save_decisions(output_dir, updates: dict[str, str | None]) -> dict[str, str]:
-    """Apply status updates; a None value clears the photo back to undecided."""
+def load_decision_times(output_dir) -> dict[str, float]:
+    """Return {photo path: when its status was last written}, where known."""
+    raw = _read_raw(decisions_file(output_dir))
+    if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
+        return {}
+    at = raw.get("decided_at", {})
+    if not isinstance(at, dict):
+        return {}
+    return {k: float(v) for k, v in at.items() if isinstance(v, (int, float))}
+
+
+def save_decisions(output_dir, updates: dict[str, str | None],
+                   at: dict[str, float | None] | None = None) -> dict[str, str]:
+    """Apply status updates; a None value clears the photo back to undecided.
+
+    Each written status is stamped with the current time, unless `at` names the
+    path: then that stamp is kept, or none at all for a None. Adoption passes
+    the source project's stamps so a copied decision does not look newer than
+    the one it was copied from.
+    """
     decisions = load_decisions(output_dir)
+    times = load_decision_times(output_dir)
+    now = time.time()
     for path, status in updates.items():
         if status is None:
             decisions.pop(path, None)
+            times.pop(path, None)
         elif status in _STATUSES:
             decisions[path] = status
+            stamp = at[path] if at is not None and path in at else now
+            if stamp is None:
+                times.pop(path, None)
+            else:
+                times[path] = stamp
         else:
             raise ValueError(f"Unknown decision status: {status!r}")
     _write_json_atomic(
         decisions_file(output_dir),
-        {"schema_version": SCHEMA_VERSION, "photos": decisions},
+        {
+            "schema_version": SCHEMA_VERSION,
+            "photos": decisions,
+            "decided_at": {p: t for p, t in times.items() if p in decisions},
+        },
     )
     return decisions
 

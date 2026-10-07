@@ -7,6 +7,7 @@ rules that fold the old files into it.
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from utils import (
     KEPT,
     SCHEMA_VERSION,
     TO_DELETE,
+    load_decision_times,
     load_decisions,
     merge_legacy_state,
     migrate_project_state,
@@ -197,3 +199,34 @@ class TestPathsWithStatus:
 
     def test_empty_when_none_match(self):
         assert paths_with_status({"a.jpg": KEPT}, DELETED) == []
+
+
+class TestDecidedAt:
+    """When each status was written, so overlapping projects can tell which of
+    two disagreeing decisions is the newer one."""
+
+    def test_a_write_is_stamped_with_now(self, tmp_path):
+        before = time.time()
+        save_decisions(tmp_path, {"a.jpg": KEPT})
+        assert before <= load_decision_times(tmp_path)["a.jpg"] <= time.time()
+
+    def test_a_given_stamp_is_kept(self, tmp_path):
+        save_decisions(tmp_path, {"a.jpg": KEPT, "b.jpg": KEPT}, at={"a.jpg": 100.0, "b.jpg": None})
+        assert load_decision_times(tmp_path) == {"a.jpg": 100.0}
+        assert load_decisions(tmp_path) == {"a.jpg": KEPT, "b.jpg": KEPT}
+
+    def test_clearing_a_photo_drops_its_stamp(self, tmp_path):
+        save_decisions(tmp_path, {"a.jpg": KEPT})
+        save_decisions(tmp_path, {"a.jpg": None})
+        assert load_decision_times(tmp_path) == {}
+
+    def test_other_photos_keep_their_stamps(self, tmp_path):
+        save_decisions(tmp_path, {"a.jpg": KEPT}, at={"a.jpg": 100.0})
+        save_decisions(tmp_path, {"b.jpg": TO_DELETE})
+        assert load_decision_times(tmp_path)["a.jpg"] == 100.0
+
+    def test_a_file_from_before_stamps_reads_as_unstamped(self, tmp_path):
+        (tmp_path / "decisions.json").write_text(json.dumps(
+            {"schema_version": SCHEMA_VERSION, "photos": {"a.jpg": KEPT}}))
+        assert load_decision_times(tmp_path) == {}
+        assert load_decisions(tmp_path) == {"a.jpg": KEPT}
