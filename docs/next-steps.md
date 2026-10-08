@@ -23,7 +23,8 @@ _Last updated: 2026-10-07._
   3 starred) that are linked in the `_exports/` root too. They were tagged
   `people` (digit `2` tags on Singles) and exported, then untagged; nothing
   in the current tags names them, and an export never removes an old link.
-  Removing them loses nothing (each has 3 names), but waits on Jason.
+  **Deleted 2026-10-07 at Jason's request**, after checking each was the same
+  inode as its `_exports/` root and `xt5/` copies; both remain.
 - **Adoption runs both ways now** (`5bb23e4`): opening `<trip>/xt5` pulls
   in what the trip decided about its photos, and the most recent decision
   wins a conflict. See §3.
