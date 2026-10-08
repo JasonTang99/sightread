@@ -742,15 +742,20 @@ reflects it.
 
 ## 10. Exports for Resolve — what is still owed
 
-- **Re-export the other finished trips** under the all-video rule: Japan 2026
-  (`xt5/` project `62ba829e…`), Japan 2024's cities and Hawaii. Why: their
-  exports ran when only starred videos went out, so kept clips are missing,
-  as Hoh's 8 Google Photos `.mp4`s were. Jason's Resolve projects read the
-  tag folders' `prores/`, so do it the way Hoh was done, proving nothing
-  existing moves. First action: per trip, `plan_export(out, folder)` and
-  read `pending` per destination, snapshot `stat -c '%i %s %Y %n'` of
-  `_exports` outside `_videos/`, `export_trip`, diff by path (not `comm`:
-  it misreports on that sort).
+- **Re-export under the all-video rule: two trips still need a decision**
+  (checked 2026-10-08 with `plan_export`). Japan 2024's cities are done: 3
+  kept videos linked into `untagged/` (`IMG_0414.MOV`, `MVI_7645.MP4`,
+  `MVI_7681.MP4`), every earlier file unchanged by inode, size and mtime.
+  Use the cities, not the whole-trip project. It reports 37 pending because
+  it ignores the cities' review (§3).
+  Japan 2026's `xt5/` project (`62ba829e…`) has 0 pending; all 153 are out.
+  Its trip-level project (`743ce07b…`) would add 260 more (226 photos, the
+  rest the other devices' videos) but has never been exported and is blocked
+  on its 20 queued deletes. **Hawaii was never exported.** Its `_exports/`
+  holds only `clips/`. `xt5/` would deliver 434 files (345 photos, 89
+  videos), the whole trip 1,396 including the guests' and Google Photos
+  files. Both are hardlinks, so they cost no space. **Jason picks the
+  scope** for each.
 - **Japan 2026's trip-level project still has 20 `iphone/` photos queued
   `to_delete`**, since 2026-09-12 (`743ce07b…`), never applied. Found while
   checking `plan.md`. **Blocked on Jason:** look at them in the Finish tab
