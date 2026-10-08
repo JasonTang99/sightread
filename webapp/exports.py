@@ -8,6 +8,7 @@ look, grouped per trip:
     Trips/<trip>/_exports/DSCF4539.JPG
     Trips/<trip>/_exports/<tag>/DSCF4540.JPG
     Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
+    Trips/<trip>/_exports/_videos/DSCF4601.MOV  <- every video above, in one place
 
 With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
 `<EXPORTS_ROOT>/<project folder name>` instead.
@@ -41,8 +42,18 @@ stays alive until the last name for it goes, so an export survives whatever
 happens to the import folder afterwards. Only a cross-filesystem exports root
 falls back to copying.
 
+**One folder of every video, for the editor.** Resolve imports a folder at a
+time, and the tag folders split the footage three or four ways. `_videos/`
+holds a hardlink to every video under the export, whichever folder it sits in,
+and `_videos/prores/` does the same for the ProRes transcodes Resolve free on
+Linux actually decodes. So running the transcode on `_videos/` covers the trip
+in one pass, and a clip transcoded inside a tag folder is not transcoded again.
+
 Nothing here is destructive: it only ever writes into the exports tree, and it
-never overwrites an existing file.
+never overwrites an existing file. The one exception is `_videos/`, which is
+derived from the folders beside it: a link there whose video has left every
+other export folder is removed, but only while the data still has another name
+on the drive, so the removal never loses a file.
 """
 import os
 import shutil
@@ -87,6 +98,11 @@ MAX_NAME_ATTEMPTS = 100
 # stays photos-only and an untagged clip reads as "not sorted yet" rather than
 # disappearing among the stills.
 UNTAGGED_DIR = "untagged"
+
+# Every exported video, hardlinked in one folder for the editor to import, and
+# the transcodes beside them under the name the transcode script writes.
+VIDEOS_DIR = "_videos"
+PRORES_DIR = "prores"
 
 # A photo carrying one of these is not a deliverable: one is queued for
 # deletion, the other is already gone from the primary drive.
@@ -145,6 +161,7 @@ class ExportReport:
     failed: list[dict] = field(default_factory=list)
     copied_bytes: int = 0
     converted_bytes: int = 0
+    videos: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -157,6 +174,7 @@ class ExportReport:
             "failed": self.failed,
             "copied_bytes": self.copied_bytes,
             "converted_bytes": self.converted_bytes,
+            "videos": self.videos,
         }
 
 
@@ -540,4 +558,79 @@ def export_trip(
 
     for path in missing_favorites(output_dir):
         report.failed.append({"path": path, "error": "file not found"})
+    if dest.is_dir():
+        report.videos = gather_videos(dest)
+        report.failed.extend(report.videos.pop("failed"))
     return report
+
+
+def _exported_videos(dest: Path) -> dict[str, list[Path]]:
+    """Every video under the export, outside `_videos/`, keyed by where it goes.
+
+    `""` collects the deliverables and clip cuts, `prores` the transcodes. A
+    video sits directly in an export folder; the only deeper one that counts is
+    a transcode in that folder's `prores/`.
+    """
+    found: dict[str, list[Path]] = {"": [], PRORES_DIR: []}
+    for sub in sorted(dest.iterdir()):
+        if not sub.is_dir() or sub.name == VIDEOS_DIR:
+            continue
+        for kind, d in (("", sub), (PRORES_DIR, sub / PRORES_DIR)):
+            if not d.is_dir():
+                continue
+            for f in sorted(d.iterdir()):
+                # A dotfile is a transcode still being written (`.<name>.part.mov`).
+                if (is_video(f) and f.is_file() and not f.name.startswith(".")
+                        and not f.name.endswith(PARTIAL_SUFFIX)):
+                    found[kind].append(f)
+    return found
+
+
+def gather_videos(dest: Path) -> dict:
+    """Bring `_videos/` (and `_videos/prores/`) in line with the export beside it.
+
+    Identity is the inode, not the name: one video tagged into two folders over
+    time is two names for one file, and gets one link here. Two different files
+    sharing a camera name get a numeric suffix, as everywhere else in the export.
+    A link whose video is in no other export folder is removed only when the
+    file still has another name, so a render someone saved into `_videos/`
+    themselves is never touched.
+    """
+    out = {"linked": 0, "removed": 0, "failed": []}
+    for kind, sources in _exported_videos(dest).items():
+        target_dir = dest / VIDEOS_DIR / kind if kind else dest / VIDEOS_DIR
+        if not sources and not target_dir.is_dir():
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        have: dict[tuple[int, int], Path] = {}
+        for f in target_dir.iterdir():
+            if f.is_file():
+                st = f.stat()
+                have[(st.st_dev, st.st_ino)] = f
+        wanted: set[tuple[int, int]] = set()
+        for src in sources:
+            try:
+                st = src.stat()
+                key = (st.st_dev, st.st_ino)
+                if key in wanted or key in have:
+                    wanted.add(key)
+                    continue
+                wanted.add(key)
+                stem, suffix = os.path.splitext(src.name)
+                for i in range(MAX_NAME_ATTEMPTS):
+                    target = target_dir / (stem + suffix if i == 0 else f"{stem}_{i}{suffix}")
+                    if not target.exists():
+                        break
+                else:
+                    raise OSError(f"No free filename for {src.name}")
+                # A link from the export, not the import: the two share a
+                # filesystem even when the export had to copy across drives.
+                _place(src, target)
+                out["linked"] += 1
+            except OSError as e:
+                out["failed"].append({"path": str(src), "error": str(e)})
+        for key, f in have.items():
+            if key not in wanted and f.stat().st_nlink > 1 and is_video(f):
+                f.unlink()
+                out["removed"] += 1
+    return out

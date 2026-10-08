@@ -17,6 +17,7 @@ import server
 from exports import export_trip, export_dir_for, export_shots, plan_export
 from projects import ProjectContext
 from utils import DELETED, FAVORITE, KEPT, TO_DELETE, save_decisions
+from video_tags import update_video_tags
 
 
 @pytest.fixture()
@@ -376,6 +377,124 @@ def test_preview_names_starred_files_that_are_gone(project):
     assert plan_export(output_dir, folder, root)["missing"] == [
         str(folder / "gone.JPG")
     ]
+
+
+# ---------------------------------------------------------------------------
+# _videos: every exported video in one folder
+# ---------------------------------------------------------------------------
+
+
+def _starred_videos(folder, output_dir, tags):
+    """Star one video per entry of `tags` and tag it (None leaves it untagged)."""
+    paths = {}
+    for i, tag in enumerate(tags):
+        mov = folder / f"DSCF{i}.MOV"
+        mov.write_bytes(b"video" * (i + 1))
+        paths[str(mov)] = tag
+    save_decisions(output_dir, {p: FAVORITE for p in paths})
+    update_video_tags(output_dir, tags=sorted({t for t in paths.values() if t}),
+                      assign={p: t for p, t in paths.items() if t})
+    return paths
+
+
+def test_videos_folder_links_every_tagged_and_untagged_video(project):
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes", "people", None])
+    _shot(folder, "DSCF9", raw=False, xmp=False)
+
+    report = export_trip(output_dir, folder, root)
+
+    videos = root / "2026_01_Japan" / "_videos"
+    assert _names(videos) == ["DSCF0.MOV", "DSCF1.MOV", "DSCF2.MOV"]
+    assert os.path.samefile(videos / "DSCF1.MOV", root / "2026_01_Japan" / "people" / "DSCF1.MOV")
+    assert report.as_dict()["videos"] == {"linked": 3, "removed": 0}
+
+
+def test_videos_folder_is_not_built_without_videos(project):
+    folder, output_dir, root = project
+    _shot(folder, "DSCF9", raw=False, xmp=False)
+
+    export_trip(output_dir, folder, root)
+
+    assert not (root / "2026_01_Japan" / "_videos").exists()
+
+
+def test_videos_folder_rerun_links_nothing_new(project):
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes", None])
+    export_trip(output_dir, folder, root)
+
+    report = export_trip(output_dir, folder, root)
+
+    assert report.videos == {"linked": 0, "removed": 0}
+    assert _names(root / "2026_01_Japan" / "_videos") == ["DSCF0.MOV", "DSCF1.MOV"]
+
+
+def test_one_video_in_two_tag_folders_is_linked_once(project):
+    """Retagging after an export leaves the old link; _videos dedupes by inode."""
+    folder, output_dir, root = project
+    paths = _starred_videos(folder, output_dir, ["vibes"])
+    export_trip(output_dir, folder, root)
+    update_video_tags(output_dir, tags=["vibes", "people"], assign={next(iter(paths)): "people"})
+
+    export_trip(output_dir, folder, root)
+
+    trip = root / "2026_01_Japan"
+    assert (trip / "vibes" / "DSCF0.MOV").is_file() and (trip / "people" / "DSCF0.MOV").is_file()
+    assert _names(trip / "_videos") == ["DSCF0.MOV"]
+
+
+def test_same_name_different_videos_are_suffixed(project):
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes"])
+    export_trip(output_dir, folder, root)
+    (root / "2026_01_Japan" / "clips").mkdir()
+    (root / "2026_01_Japan" / "clips" / "DSCF0.MOV").write_bytes(b"a different cut")
+
+    export_trip(output_dir, folder, root)
+
+    assert _names(root / "2026_01_Japan" / "_videos") == ["DSCF0.MOV", "DSCF0_1.MOV"]
+
+
+def test_prores_transcodes_gather_into_videos_prores(project):
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes"])
+    export_trip(output_dir, folder, root)
+    prores = root / "2026_01_Japan" / "vibes" / "prores"
+    prores.mkdir()
+    (prores / "DSCF0.mov").write_bytes(b"prores")
+    (prores / ".DSCF1.part.mov").write_bytes(b"half")
+
+    export_trip(output_dir, folder, root)
+
+    assert _names(root / "2026_01_Japan" / "_videos" / "prores") == ["DSCF0.mov"]
+
+
+def test_link_to_a_video_gone_from_the_export_is_removed(project):
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes"])
+    export_trip(output_dir, folder, root)
+    (root / "2026_01_Japan" / "vibes" / "DSCF0.MOV").unlink()
+    save_decisions(output_dir, {str(folder / "DSCF0.MOV"): KEPT})  # unstarred
+
+    report = export_trip(output_dir, folder, root)
+
+    assert report.videos["removed"] == 1
+    assert _names(root / "2026_01_Japan" / "_videos") == []
+    assert (folder / "DSCF0.MOV").is_file()
+
+
+def test_a_file_only_in_videos_is_never_removed(project):
+    """A render saved straight into _videos/ has no other name to fall back on."""
+    folder, output_dir, root = project
+    _starred_videos(folder, output_dir, ["vibes"])
+    export_trip(output_dir, folder, root)
+    render = root / "2026_01_Japan" / "_videos" / "edit.mov"
+    render.write_bytes(b"render")
+
+    export_trip(output_dir, folder, root)
+
+    assert render.is_file()
 
 
 # ---------------------------------------------------------------------------
