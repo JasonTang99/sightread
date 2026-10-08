@@ -4,6 +4,14 @@ _Last updated: 2026-10-07._
 
 ## Done since the last update
 
+- **`_exports/_videos/` holds every exported video** (2026-10-07), hardlinked
+  from the tag folders, with transcodes in `_videos/prores/`, so Resolve gets
+  one folder to import. Every export rebuilds it; built by hand for the four
+  trips already exported. **Hoh's `people/` also holds 23 photos** (20 kept,
+  3 starred) that are linked in the `_exports/` root too. They were tagged
+  `people` (digit `2` tags on Singles) and exported, then untagged; nothing
+  in the current tags names them, and an export never removes an old link.
+  Removing them loses nothing (each has 3 names), but waits on Jason.
 - **Adoption runs both ways now** (`5bb23e4`): opening `<trip>/xt5` pulls
   in what the trip decided about its photos, and the most recent decision
   wins a conflict. See §3.
