@@ -4,6 +4,18 @@ _Last updated: 2026-10-07._
 
 ## Done since the last update
 
+- **Export now delivers every surviving video**, not just starred ones
+  (`6a6231b`), on the photo rule: anything not `to_delete`/`deleted`. A Live
+  Photo's motion file still follows its still's star. `_videos/` is split
+  into `raw/` (needs ProRes for Resolve free), `prores/` and loose
+  edit-codec files (`b74a9ad`); `transcode.sh` takes an output dir, so
+  `transcode.sh _videos/raw 2 _videos/prores`. **Hoh re-exported** under the
+  new rule: 8 kept Google Photos `.mp4`s added to `untagged/`, nothing else
+  touched (all 178 prior files, incl. 22 in `people/prores/`, same inode,
+  size, mtime). **Next: re-run export on the other done trips** (Japan 2026,
+  Japan 2024's cities, Hawaii) the same way: `plan_export` first, snapshot,
+  `export_trip`, diff. Jason's Resolve projects point at the tag folders'
+  `prores/`, which export never moves.
 - **`_exports/_videos/` holds every exported video** (2026-10-07), hardlinked
   from the tag folders, with transcodes in `_videos/prores/`, so Resolve gets
   one folder to import. Every export rebuilds it; built by hand for the four
