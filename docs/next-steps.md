@@ -740,6 +740,17 @@ reflects it.
   read `pending` per destination, snapshot `stat -c '%i %s %Y %n'` of
   `_exports` outside `_videos/`, `export_trip`, diff by path (not `comm`:
   it misreports on that sort).
+- **`_videos/` should hold only ProRes** (Jason, 2026-10-07). Today it also
+  holds `raw/` (camera originals) and any loose edit-codec file, but he
+  imports only the transcodes, so the rest is clutter in the folder Resolve
+  opens. The catch: `raw/` is what `transcode.sh` reads to fill `prores/`
+  in one pass. First action: in `gather_videos`, stop linking originals into
+  `_videos/` and have the transcode read the export's tag folders and
+  `untagged/` instead, writing to `_videos/prores/` (a loop over folders
+  with the output-dir argument, or a `--from-export` mode in the script).
+  Loose edit-codec files are already editable, so they belong in
+  `_videos/` as is. Remove the existing `raw/` links on all four trips
+  afterwards; they are hardlinks, so nothing is lost.
 - **Japan 2026's trip-level project still has 20 `iphone/` photos queued
   `to_delete`**, since 2026-09-12 (`743ce07b…`), never applied. Found while
   checking `plan.md`. **Blocked on Jason:** look at them in the Finish tab
