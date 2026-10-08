@@ -236,9 +236,13 @@ Still open, neither seen in practice:
   projects pull down from the whole trip, and folders pull from cities, but
   `2024_01_Japan` opened whole ignores `01_Hakodate`'s review. The picker
   hides the whole-trip row once cities exist, so it takes "Other folder…" to
-  hit this.
+  hit this. Fix if it is ever hit: in `adopt_subfolder_reviews`, when
+  `subtrip` is None, also add `project_output_dir(folder, c)` for each
+  `c in city_subtrips(folder)` to `sources`.
 - **The running server serves the old code until restarted** (tmux
-  `fleet:0.5`). Python only. `dist/` does not change.
+  `fleet:0.5`). Python only. `dist/` does not change. Restart it when no
+  ffmpeg transcode is running there. The first open after that writes the
+  first `decided_at` stamps.
 
 ## 4. The cross-camera merge — all four questions settled
 
