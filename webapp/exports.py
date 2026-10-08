@@ -16,12 +16,11 @@ With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
 
 Three rules shape the rest of it.
 
-**Every surviving photo, as a JPEG.** Stars pick what to cut with, not what to
-keep, so the export delivers every photo the trip still has — anything not
+**Every surviving photo and video.** Stars pick what to cut with, not what to
+keep, so the export delivers everything the trip still has — anything not
 marked for deletion — and the raw and `.xmp` sidecars stay behind in the import
-folder. Videos are the exception: footage is delivered only when it was
-starred, because a trip holds far more of it than an edit ever uses, and
-starring is the only pass that has looked at it.
+folder. Footage used to need a star too; since 2026-10-07 an unstarred clip is
+delivered like an unstarred photo, into `untagged/` unless it has a tag.
 
 A HEIC is delivered as a JPEG too, because Resolve on Linux cannot open HEIF.
 Many are JPEGs already under the wrong name — every one of the 183 `.HEIC`
@@ -262,13 +261,12 @@ def _is_exported_clip(path: Path, folder: Path) -> bool:
 
 def deliverables(output_dir: Path, folder: Path,
                  subtrip: str | None = None) -> list[Deliverable]:
-    """Everything the trip delivers: every surviving photo, plus starred videos.
+    """Everything the trip delivers: every surviving photo and video.
 
     Walks the folder rather than the decision record, because an undecided
-    photo is still a photo the trip has — only an explicit delete takes one out
-    of the deliverable set. Videos go the other way: they are in only when
-    starred, and the decision record is the whole story. A Live Photo's motion
-    file is never judged on its own, so it rides on its still's star instead.
+    photo or clip is still one the trip has — only an explicit delete takes one
+    out of the deliverable set. A Live Photo's motion file is never judged on
+    its own, so it rides on its still's star instead.
 
     Filters on the filename before touching the filesystem, the way the video
     scan does: a trip is thousands of files, and stat'ing all of them to find
@@ -302,7 +300,7 @@ def deliverables(output_dir: Path, folder: Path,
                 partner = motion_by_stem.get(os.path.splitext(name)[0])
                 if status == FAVORITE and partner is not None:
                     out.append(_deliverable(Path(root, partner).resolve(), tag_of=path))
-            elif status == FAVORITE:
+            elif status not in _EXCLUDED_PHOTO_STATUSES:
                 out.append(_deliverable(path))
     return sorted(out, key=lambda d: d.src)
 
@@ -530,7 +528,7 @@ def export_trip(
     output_dir: Path, folder: Path, root: Path | None = None,
     subtrip: str | None = None,
 ) -> ExportReport:
-    """Deliver every surviving photo and starred video into the trip's export dir.
+    """Deliver every surviving photo and video into the trip's export dir.
 
     Tagged shots land in <trip>/<tag>/; untagged videos in <trip>/untagged/;
     untagged photos stay in <trip>/. One bad file does not sink the run:

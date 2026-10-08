@@ -8,7 +8,7 @@ import { deviceOf } from "../device";
 import type { VideoStatuses, VideoTagsState } from "../types";
 import { VIDEO_KEYS, typingTarget } from "../shortcuts";
 
-// Matches UNTAGGED_DIR in webapp/exports.py: a favourited clip with no tag is
+// Matches UNTAGGED_DIR in webapp/exports.py: a clip with no tag is
 // still delivered, into .../untagged/. Naming it in the UI keeps "no tag" from
 // reading as "not exported".
 const UNTAGGED_LABEL = "untagged";

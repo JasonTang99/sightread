@@ -115,19 +115,21 @@ def test_photos_marked_for_deletion_are_not_exported(project):
     assert _names(root / "2026_01_Japan") == ["DSCF1.JPG"]
 
 
-def test_only_starred_videos_are_exported(project):
-    """A trip holds far more footage than an edit uses, so a star is required."""
+def test_every_surviving_video_is_exported(project):
+    """Starred or not, like a photo; only a delete mark keeps one back."""
     folder, output_dir, root = project
-    starred = folder / "DSCF9.MOV"
-    starred.write_bytes(b"video")
-    ignored = folder / "DSCF8.MOV"
-    ignored.write_bytes(b"video")
-    save_decisions(output_dir, {str(starred): FAVORITE})
+    for stem in ("DSCF6", "DSCF7", "DSCF8", "DSCF9"):
+        (folder / f"{stem}.MOV").write_bytes(b"video")
+    save_decisions(output_dir, {
+        str(folder / "DSCF9.MOV"): FAVORITE,
+        str(folder / "DSCF8.MOV"): KEPT,
+        str(folder / "DSCF7.MOV"): TO_DELETE,
+    })
 
     export_trip(output_dir, folder, root)
 
-    # Untagged, so it lands in the videos-only `untagged/` folder.
-    assert _names(root / "2026_01_Japan" / "untagged") == ["DSCF9.MOV"]
+    # Untagged, so they land in the videos-only `untagged/` folder.
+    assert _names(root / "2026_01_Japan" / "untagged") == ["DSCF6.MOV", "DSCF8.MOV", "DSCF9.MOV"]
 
 
 def test_exported_clips_are_not_re_exported(project):
@@ -517,7 +519,7 @@ def test_link_to_a_video_gone_from_the_export_is_removed(project):
     _starred_videos(folder, output_dir, ["vibes"])
     export_trip(output_dir, folder, root)
     (root / "2026_01_Japan" / "vibes" / "DSCF0.MOV").unlink()
-    save_decisions(output_dir, {str(folder / "DSCF0.MOV"): KEPT})  # unstarred
+    save_decisions(output_dir, {str(folder / "DSCF0.MOV"): TO_DELETE})
 
     report = export_trip(output_dir, folder, root)
 
