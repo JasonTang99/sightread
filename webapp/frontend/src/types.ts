@@ -81,6 +81,13 @@ export interface ProjectEntry {
   eta_s: number | null;
 }
 
+/** Undecided items per review tab, from /api/projects/review-left. */
+export interface ReviewLeft {
+  clusters: number;
+  singles: number;
+  videos: number;
+}
+
 export interface FsEntry {
   name: string;
   path: string;

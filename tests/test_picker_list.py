@@ -88,3 +88,69 @@ def test_details_walks_once_then_serves_cache(tmp_path, monkeypatch):
     assert first[0]["display_name"] == "2026_07_Hawaii"
     assert first[0]["image_count"] == 1
     assert first[0]["eta_s"] is None  # cached photo, nothing pending
+
+
+# ---------------------------------------------------------------------------
+# Review left: undecided clusters, singles and videos per project
+# ---------------------------------------------------------------------------
+
+
+def _seed_review(tmp_path, monkeypatch):
+    folder, out = _seed_project(tmp_path, monkeypatch)
+    paths = {}
+    for name in ("b1.jpg", "b2.jpg", "c1.jpg", "c2.jpg", "s1.jpg", "s2.jpg", "v1.MOV", "v2.MOV"):
+        (folder / name).write_bytes(b"\0")
+        paths[name] = str((folder / name).resolve())
+    (out / "results.json").write_text(json.dumps({"clusters": [
+        {"cluster_id": 0, "images": [{"path": paths["b1.jpg"]}, {"path": paths["b2.jpg"]}]},
+        {"cluster_id": 1, "images": [{"path": paths["c1.jpg"]}, {"path": paths["c2.jpg"]}]},
+        {"cluster_id": 2, "images": [{"path": paths["s1.jpg"]}]},
+        {"cluster_id": 3, "images": [{"path": paths["s2.jpg"]}]},
+    ]}))
+    return folder, out, paths
+
+
+def test_review_left_counts_what_the_tabs_would_show(tmp_path, monkeypatch):
+    folder, out, paths = _seed_review(tmp_path, monkeypatch)
+    # Cluster 0 fully decided, cluster 1 half decided: one left. One single
+    # decided, one video marked for deletion: one of each left.
+    server.save_decisions(out, {
+        paths["b1.jpg"]: server.KEPT, paths["b2.jpg"]: server.TO_DELETE,
+        paths["c1.jpg"]: server.KEPT, paths["s1.jpg"]: server.FAVORITE,
+        paths["v1.MOV"]: server.TO_DELETE,
+    })
+    client = TestClient(server.app, base_url="http://localhost")
+
+    left = client.get("/api/projects/review-left", params={"folder": str(folder)}).json()
+
+    assert left == {"clusters": 1, "singles": 1, "videos": 1}
+
+
+def test_review_left_walks_again_only_after_a_decision(tmp_path, monkeypatch):
+    folder, out, paths = _seed_review(tmp_path, monkeypatch)
+    calls = {"n": 0}
+    real = server._scan_videos
+
+    def counting(ctx):
+        calls["n"] += 1
+        return real(ctx)
+
+    monkeypatch.setattr(server, "_scan_videos", counting)
+    client = TestClient(server.app, base_url="http://localhost")
+    get = lambda: client.get("/api/projects/review-left", params={"folder": str(folder)}).json()
+
+    assert get()["videos"] == 2
+    assert get()["videos"] == 2
+    assert calls["n"] == 1
+    server.save_decisions(out, {paths["v2.MOV"]: server.KEPT})
+    assert get()["videos"] == 1
+    assert calls["n"] == 2
+
+
+def test_review_left_404s_without_pipeline_output(tmp_path, monkeypatch):
+    folder, out = _seed_project(tmp_path, monkeypatch, with_results=False)
+    client = TestClient(server.app, base_url="http://localhost")
+
+    res = client.get("/api/projects/review-left", params={"folder": str(folder)})
+
+    assert res.status_code == 404

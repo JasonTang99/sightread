@@ -29,6 +29,7 @@ from utils import (
     KEPT,
     SINGLETON_DELETE_THRESHOLD,
     TO_DELETE,
+    decisions_file,
     invalidate_results_cache,
     load_decisions,
     load_results,
@@ -1493,6 +1494,59 @@ def list_project_details():
             row["status"] = running
         result.append(row)
     return result
+
+
+# Undecided clusters, singles and videos per in-progress project, for the
+# picker. Photos come from results.json and cost nothing; videos need a walk of
+# the folder, up to 7 s on a big trip, so each project is its own request and
+# the picker fills rows in as they land. Cached against the mtimes of the two
+# files the answer depends on, so a reviewed or re-run project is recounted
+# and the other fifty are not walked again.
+_review_left: dict[tuple[str, str], tuple[tuple, dict]] = {}
+
+
+def _count_review_left(folder: Path, out_dir: Path, subtrip: str | None) -> dict:
+    """What the review tabs would still show as undecided, sources unfiltered.
+
+    Same rules as the app's progress counters: a cluster is decided once every
+    photo in it has a decision, a video once it has any status at all.
+    """
+    data = load_results(out_dir / "results.json")
+    decisions = load_decisions(out_dir)
+    clusters = singles = 0
+    for c in data["clusters"]:
+        images = c["images"]
+        if images and not all(img["path"] in decisions for img in images):
+            if len(images) > 1:
+                clusters += 1
+            else:
+                singles += 1
+    ctx = ProjectContext(folder=folder, output_dir=out_dir, subtrip=subtrip)
+    videos = sum(1 for p in _scan_videos(ctx) if _grid_status(decisions.get(p)) == "undecided")
+    return {"clusters": clusters, "singles": singles, "videos": videos}
+
+
+@app.get("/api/projects/review-left")
+def project_review_left(folder: str, subtrip: str | None = None):
+    path = Path(folder).resolve()
+    subtrip = subtrip or None
+    out_dir = project_output_dir(path, subtrip)
+    if not path.is_dir() or not (out_dir / "results.json").exists():
+        raise HTTPException(404, f"No pipeline output for {folder}")
+    key = (str(path), subtrip or "")
+    # Size too, as in `load_results`: a same-second rewrite keeps the mtime.
+    stamp = tuple(
+        (f.stat().st_mtime_ns, f.stat().st_size) if f.exists() else None
+        for f in (out_dir / "results.json", decisions_file(out_dir))
+    )
+    with _picker_details_lock:
+        cached = _review_left.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    counts = _count_review_left(path, out_dir, subtrip)
+    with _picker_details_lock:
+        _review_left[key] = (stamp, counts)
+    return counts
 
 
 @app.post("/api/projects/open")

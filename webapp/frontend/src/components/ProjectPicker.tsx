@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FsListing, JobStatus, ProjectEntry } from "../types";
+import type { FsListing, JobStatus, ProjectEntry, ReviewLeft } from "../types";
 import { FolderBrowser } from "./FolderBrowser";
 import { PickerActionBar } from "./PickerActionBar";
 import { PipelineScreen } from "./PipelineScreen";
@@ -9,12 +9,38 @@ import { Button } from "./ui";
 
 export { tripKey } from "./picker";
 
+// A few at a time: the walks share one drive, and the browser caps
+// connections per host, which would otherwise starve the details request.
+const REVIEW_LEFT_CONCURRENCY = 3;
+
+async function loadReviewLeft(
+  projects: ProjectEntry[],
+  isCancelled: () => boolean,
+  onCounts: (key: string, left: ReviewLeft) => void,
+) {
+  const queue = [...projects];
+  const worker = async () => {
+    for (let p = queue.shift(); p && !isCancelled(); p = queue.shift()) {
+      const params = new URLSearchParams({ folder: p.folder });
+      if (p.subtrip) params.set("subtrip", p.subtrip);
+      try {
+        const res = await fetch(`/api/projects/review-left?${params}`);
+        if (res.ok && !isCancelled()) onCounts(projectKey(p), await res.json());
+      } catch {
+        // A row without counts is fine; the rest still load.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: REVIEW_LEFT_CONCURRENCY }, worker));
+}
+
 interface Props {
   onProjectOpened: () => void;
 }
 
 export function ProjectPicker({ onProjectOpened }: Props) {
   const [recents, setRecents] = useState<ProjectEntry[]>([]);
+  const [reviewLeft, setReviewLeft] = useState<Record<string, ReviewLeft>>({});
   const [listing, setListing] = useState<FsListing | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [job, setJob] = useState<JobStatus | null>(null);
@@ -24,13 +50,23 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   // has been through the pipeline, so it stays out of the way until asked.
   const [browsing, setBrowsing] = useState(false);
 
-  const loadRecents = useCallback(async () => {
+  const loadRecents = useCallback(async (isCancelled: () => boolean) => {
     const res = await fetch("/api/projects");
-    if (res.ok) setRecents(await res.json());
-    // Names already painted. Counts / stale / ETA walk the photo tree and
-    // can take minutes on a large archive; fill them in when they land.
+    if (!res.ok || isCancelled()) return;
+    const rows: ProjectEntry[] = await res.json();
+    setRecents(rows);
+    // Names already painted. What is left to review needs a walk per project
+    // for its videos, seconds each on a big trip, so the counts run beside
+    // the details below and each row fills in as its own answer lands.
+    loadReviewLeft(
+      rows.filter((p) => p.status === "ready" && !p.done_at),
+      isCancelled,
+      (key, left) => setReviewLeft((prev) => ({ ...prev, [key]: left })),
+    );
+    // Counts / stale / ETA walk the photo tree and can take minutes on a
+    // large archive; fill them in when they land.
     const detail = await fetch("/api/projects/details");
-    if (detail.ok) setRecents(await detail.json());
+    if (detail.ok && !isCancelled()) setRecents(await detail.json());
   }, []);
 
   const browse = useCallback(async (path?: string) => {
@@ -44,7 +80,9 @@ export function ProjectPicker({ onProjectOpened }: Props) {
   }, []);
 
   useEffect(() => {
-    loadRecents();
+    let cancelled = false;
+    loadRecents(() => cancelled);
+    return () => { cancelled = true; };
   }, [loadRecents]);
 
   const byDate = useMemo(() => [...recents].sort(byTripThenName), [recents]);
@@ -137,6 +175,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
           title="Recent"
           testId="recent-projects"
           projects={recents}
+          reviewLeft={reviewLeft}
           selected={selected}
           onSelect={setSelected}
           onOpen={openIfReady}
@@ -147,6 +186,7 @@ export function ProjectPicker({ onProjectOpened }: Props) {
             title="By trip date"
             testId="projects-by-date"
             projects={byDate}
+            reviewLeft={reviewLeft}
             selected={selected}
             onSelect={setSelected}
             onOpen={openIfReady}

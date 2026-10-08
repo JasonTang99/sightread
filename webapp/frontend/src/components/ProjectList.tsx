@@ -1,17 +1,18 @@
-import type { ProjectEntry } from "../types";
-import { EtaTag, STATUS_LABEL, projectKey } from "./picker";
+import type { ProjectEntry, ReviewLeft } from "../types";
+import { EtaTag, ReviewLeftTag, STATUS_LABEL, projectKey } from "./picker";
 import { Pill } from "./ui";
 
 interface ProjectListProps {
   title: string;
   testId: string;
   projects: ProjectEntry[];
+  reviewLeft: Record<string, ReviewLeft>;
   selected: string | null;
   onSelect: (key: string) => void;
   onOpen?: (project: ProjectEntry) => void;
 }
 
-export function ProjectList({ title, testId, projects, selected, onSelect, onOpen }: ProjectListProps) {
+export function ProjectList({ title, testId, projects, reviewLeft, selected, onSelect, onOpen }: ProjectListProps) {
   return (
     <div data-testid={testId} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
       <div className="px-3 py-2 border-b border-gray-100">
@@ -40,6 +41,7 @@ export function ProjectList({ title, testId, projects, selected, onSelect, onOpe
                     {p.image_count > 0 && (
                       <p className="text-xs text-gray-400">{p.image_count} images</p>
                     )}
+                    {!p.done_at && <ReviewLeftTag left={reviewLeft[key]} />}
                     <EtaTag etaS={p.eta_s} pending={p.pending_count} />
                   </div>
                   <Pill tone={p.done_at ? "done" : p.status}>

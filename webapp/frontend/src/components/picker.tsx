@@ -1,4 +1,4 @@
-import type { ProjectEntry, ProjectStatus } from "../types";
+import type { ProjectEntry, ProjectStatus, ReviewLeft } from "../types";
 import { Pill } from "./ui";
 
 /** Labels only. Colour and pill shape live on `Pill`. */
@@ -26,6 +26,25 @@ export function EtaTag({ etaS, pending }: { etaS: number | null; pending: number
     >
       ⏱ {formatEta(etaS)} · {pending} to process
     </Pill>
+  );
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** What is still undecided, in the app's tab order. "Reviewed" once all is. */
+export function ReviewLeftTag({ left }: { left: ReviewLeft | undefined }) {
+  if (!left) return null;
+  const parts = [
+    left.clusters ? plural(left.clusters, "cluster") : null,
+    left.singles ? plural(left.singles, "single") : null,
+    left.videos ? plural(left.videos, "video") : null,
+  ].filter(Boolean);
+  return (
+    <p data-testid="review-left" className="text-xs text-gray-500">
+      {parts.length ? `${parts.join(" · ")} left` : "Reviewed"}
+    </p>
   );
 }
 
