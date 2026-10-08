@@ -4,27 +4,28 @@ _Last updated: 2026-10-07._
 
 ## Done since the last update
 
-- **Export now delivers every surviving video**, not just starred ones
-  (`6a6231b`), on the photo rule: anything not `to_delete`/`deleted`. A Live
-  Photo's motion file still follows its still's star. `_videos/` is split
-  into `raw/` (needs ProRes for Resolve free), `prores/` and loose
-  edit-codec files (`b74a9ad`); `transcode.sh` takes an output dir, so
-  `transcode.sh _videos/raw 2 _videos/prores`. **Hoh re-exported** under the
-  new rule: 8 kept Google Photos `.mp4`s added to `untagged/`, nothing else
-  touched (all 178 prior files, incl. 22 in `people/prores/`, same inode,
-  size, mtime). **Next: re-run export on the other done trips** (Japan 2026,
-  Japan 2024's cities, Hawaii) the same way: `plan_export` first, snapshot,
-  `export_trip`, diff. Jason's Resolve projects point at the tag folders'
-  `prores/`, which export never moves.
-- **`_exports/_videos/` holds every exported video** (2026-10-07), hardlinked
-  from the tag folders, with transcodes in `_videos/prores/`, so Resolve gets
-  one folder to import. Every export rebuilds it; built by hand for the four
-  trips already exported. **Hoh's `people/` also holds 23 photos** (20 kept,
-  3 starred) that are linked in the `_exports/` root too. They were tagged
-  `people` (digit `2` tags on Singles) and exported, then untagged; nothing
-  in the current tags names them, and an export never removes an old link.
-  **Deleted 2026-10-07 at Jason's request**, after checking each was the same
-  inode as its `_exports/` root and `xt5/` copies; both remain.
+- **Exports are ready for Resolve** (2026-10-07, `74b8a28`, `b74a9ad`,
+  `6a6231b`). Export delivers every surviving video now, on the photo rule
+  (anything not `to_delete`/`deleted`), where it used to need a star. A Live
+  Photo's motion file still follows its still's star. Every export also
+  rebuilds `_exports/_videos/`: hardlinks to every exported video, split into
+  `raw/` (anything not ProRes/DNxHR/CineForm, by ffprobe, the transcode
+  script's own skip list), `prores/` (gathered from every tag folder's
+  `prores/`) and loose edit-codec files. `transcode.sh` takes an output dir,
+  so `transcode.sh <trip>/_exports/_videos/raw 2 <trip>/_exports/_videos/prores`
+  converts a trip and skips what is done. Built on all four exported trips. See §10.
+- **Hoh River re-exported** under the new rule: 8 kept Google Photos `.mp4`s
+  added to `untagged/`. All 178 prior files, including the 22 in
+  `people/prores/` that Jason's Resolve project uses, kept inode, size and
+  mtime. Its review is complete (every file decided, 0 undecided).
+- **Hoh's `people/` held 23 photos also linked in the `_exports/` root**
+  (20 kept, 3 starred): tagged `people` (digit `2` on Singles), exported,
+  then untagged, and export never removes an old link. Deleted at Jason's
+  request after checking each shared an inode with its root and `xt5/` copy.
+- **`plan.md`'s Japan finish items struck** (`3cc34b1`): deletes, export,
+  video tags and the `mirror-aware-deletes` merge were all done by
+  2026-09-11. `CLAUDE.md` and the Cursor restart rule are tracked;
+  `graphify-out/` and `.claude/settings.json` are ignored (`7b9edca`).
 - **Adoption runs both ways now** (`5bb23e4`): opening `<trip>/xt5` pulls
   in what the trip decided about its photos, and the most recent decision
   wins a conflict. See §3.
@@ -55,7 +56,7 @@ The 2026-09-20 list was pruned; those items are in `git log` by hash.
   These three were uncommitted in the tree with no note; header checked by
   screenshot at 1440x900 (one row, Keep best sits before Skip reviewed).
 - **Canon clips in Europe now reach a city** (`2a5a48b`); see §7.
-- Suites: 409 Python, 99 Playwright, `tsc -b` clean, `dist/` rebuilt.
+- Suites: 420 Python (2026-10-07), 99 Playwright, `tsc -b` clean, `dist/` rebuilt.
 
 - **Source filter in the review header.** One checkbox per top-level folder
   the open project's photos and videos live in; a file sitting in the project
@@ -727,6 +728,33 @@ reflects it.
 - **The duplicate guard covers stills only.** Album `.mp4`s are not compared
   with his `.MOV`s. No case has been seen, so nothing is planned; the place to
   add one is `find_duplicates` in `scripts/pipeline.py`.
+
+## 10. Exports for Resolve — what is still owed
+
+- **Re-export the other finished trips** under the all-video rule: Japan 2026
+  (`xt5/` project `62ba829e…`), Japan 2024's cities and Hawaii. Why: their
+  exports ran when only starred videos went out, so kept clips are missing,
+  as Hoh's 8 Google Photos `.mp4`s were. Jason's Resolve projects read the
+  tag folders' `prores/`, so do it the way Hoh was done, proving nothing
+  existing moves. First action: per trip, `plan_export(out, folder)` and
+  read `pending` per destination, snapshot `stat -c '%i %s %Y %n'` of
+  `_exports` outside `_videos/`, `export_trip`, diff by path (not `comm`:
+  it misreports on that sort).
+- **Japan 2026's trip-level project still has 20 `iphone/` photos queued
+  `to_delete`**, since 2026-09-12 (`743ce07b…`), never applied. Found while
+  checking `plan.md`. **Blocked on Jason:** look at them in the Finish tab
+  of `2026_01_Japan` and apply or unmark. Until then they also stay out of
+  that project's export.
+- **Old links in tag folders are never cleaned up.** Retagging or untagging
+  after an export leaves the earlier link (Hoh's 23 photos). `_videos/`
+  dedupes by inode so Resolve sees one copy, but the tag folders drift.
+  Not planned: one case, fixed by hand. If it recurs, prune links in tag
+  folders whose source now routes elsewhere, only when `st_nlink > 1`, the
+  rule `gather_videos` already uses.
+- **Live Photo motion files of kept-but-unstarred stills stay out.** Asked
+  Jason on 2026-10-07 whether he wants them; no answer yet. Japan 2026 alone
+  has 186 paired motion files, so including them would swamp `untagged/`.
+  The switch is the `status == FAVORITE` partner check in `deliverables`.
 
 Europe 2024's four cities are reclustered and ready to review (§7).
 Portugal still adopts on first open (§3),
