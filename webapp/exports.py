@@ -8,7 +8,8 @@ look, grouped per trip:
     Trips/<trip>/_exports/DSCF4539.JPG
     Trips/<trip>/_exports/<tag>/DSCF4540.JPG
     Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
-    Trips/<trip>/_exports/_videos/DSCF4601.MOV  <- every video above, in one place
+    Trips/<trip>/_exports/_videos/raw/DSCF4601.MOV     <- every video above, in
+    Trips/<trip>/_exports/_videos/prores/DSCF4601.mov  <- one place
 
 With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
 `<EXPORTS_ROOT>/<project folder name>` instead.
@@ -44,10 +45,11 @@ falls back to copying.
 
 **One folder of every video, for the editor.** Resolve imports a folder at a
 time, and the tag folders split the footage three or four ways. `_videos/`
-holds a hardlink to every video under the export, whichever folder it sits in,
-and `_videos/prores/` does the same for the ProRes transcodes Resolve free on
-Linux actually decodes. So running the transcode on `_videos/` covers the trip
-in one pass, and a clip transcoded inside a tag folder is not transcoded again.
+holds a hardlink to every video under the export, whichever folder it sits in:
+camera footage Resolve free on Linux cannot decode in `raw/`, ProRes
+transcodes in `prores/`, and anything already in an edit codec loose beside
+them. Transcoding `raw/` into `prores/` covers the trip in one pass, and a clip
+transcoded inside a tag folder is not transcoded again.
 
 Nothing here is destructive: it only ever writes into the exports tree, and it
 never overwrites an existing file. The one exception is `_videos/`, which is
@@ -57,6 +59,7 @@ on the drive, so the removal never loses a file.
 """
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -102,7 +105,12 @@ UNTAGGED_DIR = "untagged"
 # Every exported video, hardlinked in one folder for the editor to import, and
 # the transcodes beside them under the name the transcode script writes.
 VIDEOS_DIR = "_videos"
+RAW_DIR = "raw"
 PRORES_DIR = "prores"
+
+# What Resolve free on Linux edits directly; anything else it imports as
+# audio-only. Same list the transcode script skips.
+EDIT_CODECS = frozenset({"prores", "dnxhd", "cfhd"})
 
 # A photo carrying one of these is not a deliverable: one is queued for
 # deletion, the other is already gone from the primary drive.
@@ -565,7 +573,7 @@ def export_trip(
 
 
 def _exported_videos(dest: Path) -> dict[str, list[Path]]:
-    """Every video under the export, outside `_videos/`, keyed by where it goes.
+    """Every video under the export, outside `_videos/`, keyed by kind.
 
     `""` collects the deliverables and clip cuts, `prores` the transcodes. A
     video sits directly in an export folder; the only deeper one that counts is
@@ -586,51 +594,101 @@ def _exported_videos(dest: Path) -> dict[str, list[Path]]:
     return found
 
 
+def needs_transcode(path: Path) -> bool:
+    """Whether Resolve free on Linux needs this video converted before editing.
+
+    It decodes no H.264, HEVC or AAC, so everything but an intraframe edit codec
+    is raw footage. The codec list matches the transcode script's skip list. A
+    file ffprobe cannot read counts as raw: the transcode will say what is wrong.
+    """
+    try:
+        codec = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return codec not in EDIT_CODECS
+
+
+def _free_name(target_dir: Path, name: str) -> Path:
+    stem, suffix = os.path.splitext(name)
+    for i in range(MAX_NAME_ATTEMPTS):
+        target = target_dir / (name if i == 0 else f"{stem}_{i}{suffix}")
+        if not target.exists():
+            return target
+    raise OSError(f"No free filename for {name}")
+
+
+def _inodes(*dirs: Path) -> dict[tuple[int, int], Path]:
+    out: dict[tuple[int, int], Path] = {}
+    for d in dirs:
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_file():
+                    st = f.stat()
+                    out[(st.st_dev, st.st_ino)] = f
+    return out
+
+
 def gather_videos(dest: Path) -> dict:
-    """Bring `_videos/` (and `_videos/prores/`) in line with the export beside it.
+    """Bring `_videos/` in line with the export beside it.
+
+    Footage Resolve cannot decode goes to `_videos/raw/`, transcodes to
+    `_videos/prores/`, and anything already in an edit codec stays loose in
+    `_videos/`. Run the transcode as `transcode.sh _videos/raw 2 _videos/prores`
+    and its output lands where the gather puts transcodes, so a clip converted
+    once is skipped next time wherever it was converted.
 
     Identity is the inode, not the name: one video tagged into two folders over
     time is two names for one file, and gets one link here. Two different files
     sharing a camera name get a numeric suffix, as everywhere else in the export.
-    A link whose video is in no other export folder is removed only when the
-    file still has another name, so a render someone saved into `_videos/`
-    themselves is never touched.
+    Only new links and loose files are probed, so a re-run stays cheap. A link
+    whose video is in no other export folder is removed only when the file
+    still has another name, so a render or transcode written straight into
+    `_videos/` is never touched.
     """
-    out = {"linked": 0, "removed": 0, "failed": []}
-    for kind, sources in _exported_videos(dest).items():
-        target_dir = dest / VIDEOS_DIR / kind if kind else dest / VIDEOS_DIR
-        if not sources and not target_dir.is_dir():
-            continue
+    out = {"linked": 0, "moved": 0, "removed": 0, "failed": []}
+    videos = dest / VIDEOS_DIR
+    raw = videos / RAW_DIR
+    prores = videos / PRORES_DIR
+    sources = _exported_videos(dest)
+    if not any(sources.values()) and not videos.is_dir():
+        return out
+
+    def place(src: Path, target_dir: Path) -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
-        have: dict[tuple[int, int], Path] = {}
-        for f in target_dir.iterdir():
-            if f.is_file():
-                st = f.stat()
-                have[(st.st_dev, st.st_ino)] = f
+        # A link from the export, not the import: the two share a filesystem
+        # even when the export had to copy across drives.
+        _place(src, _free_name(target_dir, src.name))
+        out["linked"] += 1
+
+    def sync(srcs: list[Path], have: dict, place_one) -> None:
         wanted: set[tuple[int, int]] = set()
-        for src in sources:
+        for src in srcs:
             try:
                 st = src.stat()
                 key = (st.st_dev, st.st_ino)
-                if key in wanted or key in have:
-                    wanted.add(key)
-                    continue
+                if key not in wanted and key not in have:
+                    place_one(src)
                 wanted.add(key)
-                stem, suffix = os.path.splitext(src.name)
-                for i in range(MAX_NAME_ATTEMPTS):
-                    target = target_dir / (stem + suffix if i == 0 else f"{stem}_{i}{suffix}")
-                    if not target.exists():
-                        break
-                else:
-                    raise OSError(f"No free filename for {src.name}")
-                # A link from the export, not the import: the two share a
-                # filesystem even when the export had to copy across drives.
-                _place(src, target)
-                out["linked"] += 1
             except OSError as e:
                 out["failed"].append({"path": str(src), "error": str(e)})
         for key, f in have.items():
-            if key not in wanted and f.stat().st_nlink > 1 and is_video(f):
+            if key not in wanted and is_video(f) and f.exists() and f.stat().st_nlink > 1:
                 f.unlink()
                 out["removed"] += 1
+
+    # A loose file is one the editor imports as is, so check it still is one;
+    # links made before raw/ existed all start out loose.
+    for f in _inodes(videos).values():
+        if is_video(f) and f.stat().st_nlink > 1 and needs_transcode(f):
+            raw.mkdir(parents=True, exist_ok=True)
+            f.replace(_free_name(raw, f.name))
+            out["moved"] += 1
+
+    sync(sources[""], _inodes(videos, raw),
+         lambda src: place(src, raw if needs_transcode(src) else videos))
+    sync(sources[PRORES_DIR], _inodes(prores), lambda src: place(src, prores))
     return out
