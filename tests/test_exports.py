@@ -399,45 +399,53 @@ def _starred_videos(folder, output_dir, tags):
     return paths
 
 
-def test_videos_folder_links_every_tagged_and_untagged_video(project):
+def _editable(monkeypatch, *names):
+    """Treat these names as already in an edit codec; the fakes probe as raw."""
+    monkeypatch.setattr(exports, "needs_transcode", lambda p: p.name not in names)
+
+
+def test_videos_folder_links_every_editable_video(project, monkeypatch):
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes", "people", None])
     _shot(folder, "DSCF9", raw=False, xmp=False)
+    _editable(monkeypatch, "DSCF0.MOV", "DSCF1.MOV", "DSCF2.MOV")
 
     report = export_trip(output_dir, folder, root)
 
-    raw = root / "2026_01_Japan" / "_videos" / "raw"
-    assert _names(raw) == ["DSCF0.MOV", "DSCF1.MOV", "DSCF2.MOV"]
-    assert os.path.samefile(raw / "DSCF1.MOV", root / "2026_01_Japan" / "people" / "DSCF1.MOV")
-    assert report.as_dict()["videos"] == {"linked": 3, "moved": 0, "removed": 0}
+    videos = root / "2026_01_Japan" / "_videos"
+    assert _names(videos) == ["DSCF0.MOV", "DSCF1.MOV", "DSCF2.MOV"]
+    assert os.path.samefile(videos / "DSCF1.MOV", root / "2026_01_Japan" / "people" / "DSCF1.MOV")
+    assert report.as_dict()["videos"] == {"linked": 3, "removed": 0}
 
 
-def test_an_edit_codec_video_stays_loose(project, monkeypatch):
-    """Only footage Resolve cannot decode goes to raw/."""
+def test_footage_that_needs_transcoding_stays_out(project, monkeypatch):
+    """Only the transcodes and edit-codec files are imported into Resolve."""
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes", None])
-    monkeypatch.setattr(exports, "needs_transcode", lambda p: p.name != "DSCF1.MOV")
+    _editable(monkeypatch, "DSCF1.MOV")
 
     export_trip(output_dir, folder, root)
 
-    videos = root / "2026_01_Japan" / "_videos"
-    assert _names(videos) == ["DSCF1.MOV", "raw"]
-    assert _names(videos / "raw") == ["DSCF0.MOV"]
+    assert _names(root / "2026_01_Japan" / "_videos") == ["DSCF1.MOV"]
+    assert (root / "2026_01_Japan" / "vibes" / "DSCF0.MOV").is_file()
 
 
-def test_a_loose_link_that_needs_transcoding_moves_to_raw(project):
-    """Links made before raw/ existed sat loose in _videos/."""
+def test_old_raw_links_are_removed(project):
+    """_videos/raw/ held camera originals before 2026-10-08."""
     folder, output_dir, root = project
-    _starred_videos(folder, output_dir, ["vibes"])
+    _starred_videos(folder, output_dir, ["vibes", None])
     export_trip(output_dir, folder, root)
-    videos = root / "2026_01_Japan" / "_videos"
-    (videos / "raw" / "DSCF0.MOV").replace(videos / "DSCF0.MOV")
+    trip = root / "2026_01_Japan"
+    raw = trip / "_videos" / "raw"
+    raw.mkdir(parents=True)
+    os.link(trip / "vibes" / "DSCF0.MOV", raw / "DSCF0.MOV")
+    os.link(trip / "untagged" / "DSCF1.MOV", trip / "_videos" / "DSCF1.MOV")
 
     report = export_trip(output_dir, folder, root)
 
-    assert report.videos == {"linked": 0, "moved": 1, "removed": 0}
-    assert _names(videos) == ["raw"]
-    assert _names(videos / "raw") == ["DSCF0.MOV"]
+    assert report.videos == {"linked": 0, "removed": 2}
+    assert _names(trip / "_videos") == []
+    assert (trip / "vibes" / "DSCF0.MOV").is_file()
 
 
 def test_videos_folder_is_not_built_without_videos(project):
@@ -449,21 +457,23 @@ def test_videos_folder_is_not_built_without_videos(project):
     assert not (root / "2026_01_Japan" / "_videos").exists()
 
 
-def test_videos_folder_rerun_links_nothing_new(project):
+def test_videos_folder_rerun_links_nothing_new(project, monkeypatch):
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes", None])
+    _editable(monkeypatch, "DSCF0.MOV", "DSCF1.MOV")
     export_trip(output_dir, folder, root)
 
     report = export_trip(output_dir, folder, root)
 
-    assert report.videos == {"linked": 0, "moved": 0, "removed": 0}
-    assert _names(root / "2026_01_Japan" / "_videos" / "raw") == ["DSCF0.MOV", "DSCF1.MOV"]
+    assert report.videos == {"linked": 0, "removed": 0}
+    assert _names(root / "2026_01_Japan" / "_videos") == ["DSCF0.MOV", "DSCF1.MOV"]
 
 
-def test_one_video_in_two_tag_folders_is_linked_once(project):
+def test_one_video_in_two_tag_folders_is_linked_once(project, monkeypatch):
     """Retagging after an export leaves the old link; _videos dedupes by inode."""
     folder, output_dir, root = project
     paths = _starred_videos(folder, output_dir, ["vibes"])
+    _editable(monkeypatch, "DSCF0.MOV")
     export_trip(output_dir, folder, root)
     update_video_tags(output_dir, tags=["vibes", "people"], assign={next(iter(paths)): "people"})
 
@@ -471,19 +481,20 @@ def test_one_video_in_two_tag_folders_is_linked_once(project):
 
     trip = root / "2026_01_Japan"
     assert (trip / "vibes" / "DSCF0.MOV").is_file() and (trip / "people" / "DSCF0.MOV").is_file()
-    assert _names(trip / "_videos" / "raw") == ["DSCF0.MOV"]
+    assert _names(trip / "_videos") == ["DSCF0.MOV"]
 
 
-def test_same_name_different_videos_are_suffixed(project):
+def test_same_name_different_videos_are_suffixed(project, monkeypatch):
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes"])
+    _editable(monkeypatch, "DSCF0.MOV")
     export_trip(output_dir, folder, root)
     (root / "2026_01_Japan" / "clips").mkdir()
     (root / "2026_01_Japan" / "clips" / "DSCF0.MOV").write_bytes(b"a different cut")
 
     export_trip(output_dir, folder, root)
 
-    assert _names(root / "2026_01_Japan" / "_videos" / "raw") == ["DSCF0.MOV", "DSCF0_1.MOV"]
+    assert _names(root / "2026_01_Japan" / "_videos") == ["DSCF0.MOV", "DSCF0_1.MOV"]
 
 
 def test_prores_transcodes_gather_into_videos_prores(project):
@@ -501,12 +512,12 @@ def test_prores_transcodes_gather_into_videos_prores(project):
 
 
 def test_a_transcode_written_into_videos_prores_stays(project):
-    """transcode.sh _videos/raw 2 _videos/prores writes files with one name."""
+    """A transcode written straight into _videos/prores/ has one name."""
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes"])
     export_trip(output_dir, folder, root)
     prores = root / "2026_01_Japan" / "_videos" / "prores"
-    prores.mkdir()
+    prores.mkdir(parents=True)
     (prores / "DSCF0.mov").write_bytes(b"prores")
 
     export_trip(output_dir, folder, root)
@@ -514,9 +525,10 @@ def test_a_transcode_written_into_videos_prores_stays(project):
     assert _names(prores) == ["DSCF0.mov"]
 
 
-def test_link_to_a_video_gone_from_the_export_is_removed(project):
+def test_link_to_a_video_gone_from_the_export_is_removed(project, monkeypatch):
     folder, output_dir, root = project
     _starred_videos(folder, output_dir, ["vibes"])
+    _editable(monkeypatch, "DSCF0.MOV")
     export_trip(output_dir, folder, root)
     (root / "2026_01_Japan" / "vibes" / "DSCF0.MOV").unlink()
     save_decisions(output_dir, {str(folder / "DSCF0.MOV"): TO_DELETE})
@@ -524,7 +536,7 @@ def test_link_to_a_video_gone_from_the_export_is_removed(project):
     report = export_trip(output_dir, folder, root)
 
     assert report.videos["removed"] == 1
-    assert _names(root / "2026_01_Japan" / "_videos" / "raw") == []
+    assert _names(root / "2026_01_Japan" / "_videos") == []
     assert (folder / "DSCF0.MOV").is_file()
 
 
@@ -534,6 +546,7 @@ def test_a_file_only_in_videos_is_never_removed(project):
     _starred_videos(folder, output_dir, ["vibes"])
     export_trip(output_dir, folder, root)
     render = root / "2026_01_Japan" / "_videos" / "edit.mov"
+    render.parent.mkdir(exist_ok=True)
     render.write_bytes(b"render")
 
     export_trip(output_dir, folder, root)

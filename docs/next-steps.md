@@ -1,9 +1,20 @@
 # sightread — next steps
 
-_Last updated: 2026-10-07._
+_Last updated: 2026-10-08._
 
 ## Done since the last update
 
+- **`_videos/` holds only what Resolve can edit** (2026-10-08). That means
+  ProRes in `_videos/prores/` and loose edit-codec files (Jason: "prores, and
+  the ones that don't need conversion"). Camera originals stay out: no more
+  `raw/`. Neither `prores/` layout changed, because Jason's Resolve project
+  depends on the current transcode locations. Every existing transcode lives
+  in a tag folder's `prores/` (`transcode.sh <export>/<tag> 2`, the default
+  output) and is linked into `_videos/prores/` as before. Ran `gather_videos`
+  on all four exported trips: 34 + 52 + 2 + 56 `raw/` hardlinks removed.
+  Everything else under `_exports/` kept the same inode, size and mtime.
+  Japan 2024 and Hawaii have no transcodes yet, so their `_videos/` is empty
+  until `transcode.sh` runs on their tag folders.
 - **Exports are ready for Resolve** (2026-10-07, `74b8a28`, `b74a9ad`,
   `6a6231b`). Export delivers every surviving video now, on the photo rule
   (anything not `to_delete`/`deleted`), where it used to need a star. A Live
@@ -740,17 +751,6 @@ reflects it.
   read `pending` per destination, snapshot `stat -c '%i %s %Y %n'` of
   `_exports` outside `_videos/`, `export_trip`, diff by path (not `comm`:
   it misreports on that sort).
-- **`_videos/` should hold only ProRes** (Jason, 2026-10-07). Today it also
-  holds `raw/` (camera originals) and any loose edit-codec file, but he
-  imports only the transcodes, so the rest is clutter in the folder Resolve
-  opens. The catch: `raw/` is what `transcode.sh` reads to fill `prores/`
-  in one pass. First action: in `gather_videos`, stop linking originals into
-  `_videos/` and have the transcode read the export's tag folders and
-  `untagged/` instead, writing to `_videos/prores/` (a loop over folders
-  with the output-dir argument, or a `--from-export` mode in the script).
-  Loose edit-codec files are already editable, so they belong in
-  `_videos/` as is. Remove the existing `raw/` links on all four trips
-  afterwards; they are hardlinks, so nothing is lost.
 - **Japan 2026's trip-level project still has 20 `iphone/` photos queued
   `to_delete`**, since 2026-09-12 (`743ce07b…`), never applied. Found while
   checking `plan.md`. **Blocked on Jason:** look at them in the Finish tab

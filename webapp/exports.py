@@ -8,8 +8,9 @@ look, grouped per trip:
     Trips/<trip>/_exports/DSCF4539.JPG
     Trips/<trip>/_exports/<tag>/DSCF4540.JPG
     Trips/<trip>/_exports/<tag or "untagged">/DSCF4601.MOV
-    Trips/<trip>/_exports/_videos/raw/DSCF4601.MOV     <- every video above, in
-    Trips/<trip>/_exports/_videos/prores/DSCF4601.mov  <- one place
+    Trips/<trip>/_exports/<tag or "untagged">/prores/DSCF4601.mov  <- transcode
+    Trips/<trip>/_exports/_videos/prores/DSCF4601.mov  <- every editable video,
+    Trips/<trip>/_exports/_videos/C0001.MOV            <- in one place
 
 With SIGHTREAD_EXPORTS_ROOT set, `Trips/<trip>/_exports` becomes
 `<EXPORTS_ROOT>/<project folder name>` instead.
@@ -42,13 +43,15 @@ stays alive until the last name for it goes, so an export survives whatever
 happens to the import folder afterwards. Only a cross-filesystem exports root
 falls back to copying.
 
-**One folder of every video, for the editor.** Resolve imports a folder at a
-time, and the tag folders split the footage three or four ways. `_videos/`
-holds a hardlink to every video under the export, whichever folder it sits in:
-camera footage Resolve free on Linux cannot decode in `raw/`, ProRes
-transcodes in `prores/`, and anything already in an edit codec loose beside
-them. Transcoding `raw/` into `prores/` covers the trip in one pass, and a clip
-transcoded inside a tag folder is not transcoded again.
+**One folder of every editable video, for the editor.** Resolve imports a
+folder at a time, and the tag folders split the footage three or four ways.
+`_videos/` holds a hardlink to every video under the export that Resolve can
+edit, whichever folder it sits in: ProRes transcodes in `prores/`, and anything
+already in an edit codec loose beside them. Camera footage Resolve free on Linux
+cannot decode stays out (Jason imports only the transcodes, 2026-10-07); it is
+transcoded where it was delivered, `transcode.sh <export>/<tag> 2` writing into
+that folder's `prores/`, which is where every existing transcode lives and what
+Resolve projects already point at.
 
 Nothing here is destructive: it only ever writes into the exports tree, and it
 never overwrites an existing file. The one exception is `_videos/`, which is
@@ -101,9 +104,10 @@ MAX_NAME_ATTEMPTS = 100
 # disappearing among the stills.
 UNTAGGED_DIR = "untagged"
 
-# Every exported video, hardlinked in one folder for the editor to import, and
-# the transcodes beside them under the name the transcode script writes.
+# Every editable exported video, hardlinked in one folder for the editor to
+# import, with the transcodes under the name the transcode script writes.
 VIDEOS_DIR = "_videos"
+# Where undecodable footage was linked before 2026-10-08; emptied on sight.
 RAW_DIR = "raw"
 PRORES_DIR = "prores"
 
@@ -633,11 +637,10 @@ def _inodes(*dirs: Path) -> dict[tuple[int, int], Path]:
 def gather_videos(dest: Path) -> dict:
     """Bring `_videos/` in line with the export beside it.
 
-    Footage Resolve cannot decode goes to `_videos/raw/`, transcodes to
-    `_videos/prores/`, and anything already in an edit codec stays loose in
-    `_videos/`. Run the transcode as `transcode.sh _videos/raw 2 _videos/prores`
-    and its output lands where the gather puts transcodes, so a clip converted
-    once is skipped next time wherever it was converted.
+    Transcodes from every folder's `prores/` go to `_videos/prores/`, and
+    anything already in an edit codec stays loose in `_videos/`. Footage Resolve
+    cannot decode is left out; links to it from before that rule, in `raw/` or
+    loose, are removed, since the tag folders still hold it.
 
     Identity is the inode, not the name: one video tagged into two folders over
     time is two names for one file, and gets one link here. Two different files
@@ -647,7 +650,7 @@ def gather_videos(dest: Path) -> dict:
     still has another name, so a render or transcode written straight into
     `_videos/` is never touched.
     """
-    out = {"linked": 0, "moved": 0, "removed": 0, "failed": []}
+    out = {"linked": 0, "removed": 0, "failed": []}
     videos = dest / VIDEOS_DIR
     raw = videos / RAW_DIR
     prores = videos / PRORES_DIR
@@ -678,15 +681,20 @@ def gather_videos(dest: Path) -> dict:
                 f.unlink()
                 out["removed"] += 1
 
-    # A loose file is one the editor imports as is, so check it still is one;
-    # links made before raw/ existed all start out loose.
-    for f in _inodes(videos).values():
-        if is_video(f) and f.stat().st_nlink > 1 and needs_transcode(f):
-            raw.mkdir(parents=True, exist_ok=True)
-            f.replace(_free_name(raw, f.name))
-            out["moved"] += 1
+    # A loose file is one the editor imports as is, so check it still is one.
+    # Everything in raw/ predates the rule and goes; the tag folders keep it.
+    for f in _inodes(videos, raw).values():
+        if (is_video(f) and f.stat().st_nlink > 1
+                and (f.parent == raw or needs_transcode(f))):
+            f.unlink()
+            out["removed"] += 1
+    if raw.is_dir() and not any(raw.iterdir()):
+        raw.rmdir()
 
-    sync(sources[""], _inodes(videos, raw),
-         lambda src: place(src, raw if needs_transcode(src) else videos))
+    def place_editable(src: Path) -> None:
+        if not needs_transcode(src):
+            place(src, videos)
+
+    sync(sources[""], _inodes(videos), place_editable)
     sync(sources[PRORES_DIR], _inodes(prores), lambda src: place(src, prores))
     return out
