@@ -1,8 +1,8 @@
 """HEIC support and Live Photo pairing.
 
 A Live Photo is a still plus a ~3s motion file with the same stem. The motion
-file must stay out of video review, be deleted with its still, and follow its
-still's star into the export. The dangerous direction is the delete: a real
+file must stay out of video review, be deleted with its still, and go into the
+export wherever its still goes. The dangerous direction is the delete: a real
 video that happens to share a still's name must never be swept up as one, which
 is why pairing also requires the video to be short — and why a video whose
 duration cannot be read is never paired.
@@ -328,10 +328,17 @@ def test_plan_budgets_space_for_reencoding(trip):
     assert plan["convert_bytes"] == int(src.stat().st_size * exports.HEIF_TO_JPEG_BUDGET)
 
 
-def test_motion_file_is_not_exported_on_its_own(trip):
+def test_unstarred_live_photo_brings_its_motion(trip):
     folder, output_dir, _ = trip
     still, motion = _live(folder, "IMG_24")
-    assert export_shots(output_dir, folder) == [still.resolve()]
+    assert export_shots(output_dir, folder) == [still.resolve(), motion.resolve()]
+
+
+def test_motion_file_is_not_exported_on_its_own(trip):
+    folder, output_dir, _ = trip
+    still, motion = _live(folder, "IMG_23")
+    save_decisions(output_dir, {str(still.resolve()): TO_DELETE})
+    assert export_shots(output_dir, folder) == []
 
 
 def test_starred_live_photo_brings_its_motion(trip):

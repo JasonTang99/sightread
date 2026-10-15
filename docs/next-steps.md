@@ -18,7 +18,7 @@ _Last updated: 2026-10-08._
 - **Exports are ready for Resolve** (2026-10-07, `74b8a28`, `b74a9ad`,
   `6a6231b`). Export delivers every surviving video now, on the photo rule
   (anything not `to_delete`/`deleted`), where it used to need a star. A Live
-  Photo's motion file still follows its still's star. Every export also
+  Photo's motion file follows its still (since 2026-10-15, §10). Every export also
   rebuilds `_exports/_videos/`: hardlinks to every exported video, split into
   `raw/` (anything not ProRes/DNxHR/CineForm, by ffprobe, the transcode
   script's own skip list), `prores/` (gathered from every tag folder's
@@ -767,11 +767,16 @@ reflects it.
   Not planned: one case, fixed by hand. If it recurs, prune links in tag
   folders whose source now routes elsewhere, only when `st_nlink > 1`, the
   rule `gather_videos` already uses.
-- ~~**Live Photo motion files of kept-but-unstarred stills stay out.**~~
-  **Decided 2026-10-15: they stay out** (Jason: "dont export live motion").
-  The current behaviour is the answer; nothing to change. Japan 2026 alone
-  has 186 paired motion files. The switch, should it ever flip, is the
-  `status == FAVORITE` partner check in `deliverables`.
+- **A Live Photo's motion file now goes wherever its still goes** (decided
+  2026-10-15, Jason: "keep them in the export folder if their associated
+  photo is in the export folder"; he first said to leave them out, then
+  changed it). Used to need a star. `deliverables` adds the partner for
+  every exported still, into the still's tag folder; a deleted still takes
+  its motion out with it. **Existing exports do not have them yet:**
+  re-running export on a trip adds them as hardlinks (no space). Japan 2026
+  alone has 186 paired motion files. They are camera `.MOV`s, not ProRes,
+  so `gather_videos` leaves them out of `_videos/`, but `transcode.sh` on a
+  tag folder would convert them along with the real clips.
 
 Europe 2024's four cities are reclustered and ready to review (§7).
 Portugal still adopts on first open (§3),

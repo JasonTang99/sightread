@@ -270,7 +270,7 @@ def deliverables(output_dir: Path, folder: Path,
     Walks the folder rather than the decision record, because an undecided
     photo or clip is still one the trip has — only an explicit delete takes one
     out of the deliverable set. A Live Photo's motion file is never judged on
-    its own, so it rides on its still's star instead.
+    its own, so it goes wherever its still goes.
 
     Filters on the filename before touching the filesystem, the way the video
     scan does: a trip is thousands of files, and stat'ing all of them to find
@@ -302,7 +302,7 @@ def deliverables(output_dir: Path, folder: Path,
                     continue
                 out.append(_deliverable(path))
                 partner = motion_by_stem.get(os.path.splitext(name)[0])
-                if status == FAVORITE and partner is not None:
+                if partner is not None:
                     out.append(_deliverable(Path(root, partner).resolve(), tag_of=path))
             elif status not in _EXCLUDED_PHOTO_STATUSES:
                 out.append(_deliverable(path))
