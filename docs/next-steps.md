@@ -767,10 +767,11 @@ reflects it.
   Not planned: one case, fixed by hand. If it recurs, prune links in tag
   folders whose source now routes elsewhere, only when `st_nlink > 1`, the
   rule `gather_videos` already uses.
-- **Live Photo motion files of kept-but-unstarred stills stay out.** Asked
-  Jason on 2026-10-07 whether he wants them; no answer yet. Japan 2026 alone
-  has 186 paired motion files, so including them would swamp `untagged/`.
-  The switch is the `status == FAVORITE` partner check in `deliverables`.
+- ~~**Live Photo motion files of kept-but-unstarred stills stay out.**~~
+  **Decided 2026-10-15: they stay out** (Jason: "dont export live motion").
+  The current behaviour is the answer; nothing to change. Japan 2026 alone
+  has 186 paired motion files. The switch, should it ever flip, is the
+  `status == FAVORITE` partner check in `deliverables`.
 
 Europe 2024's four cities are reclustered and ready to review (§7).
 Portugal still adopts on first open (§3),
