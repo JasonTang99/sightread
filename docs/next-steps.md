@@ -772,9 +772,12 @@ reflects it.
   photo is in the export folder"; he first said to leave them out, then
   changed it). Used to need a star. `deliverables` adds the partner for
   every exported still, into the still's tag folder; a deleted still takes
-  its motion out with it. **Existing exports do not have them yet:**
-  re-running export on a trip adds them as hardlinks (no space). Japan 2026
-  alone has 186 paired motion files. They are camera `.MOV`s, not ProRes,
+  its motion out with it. **Re-exported the same day:** only Hoh gained
+  any, 17 hardlinks into `untagged/` (13 Google Photos `.MP4`, 1 `.MP4` and
+  3 iPhone `.MOV`); its 184 earlier files kept inode, size and mtime. Japan
+  2026 `xt5/` and all thirteen Japan 2024 cities had 0 pending (no Live
+  Photos in either). The 186 paired motion files on Japan 2026 belong to the
+  trip-level project, which is still unexported (above). They are camera `.MOV`s, not ProRes,
   so `gather_videos` leaves them out of `_videos/`, but `transcode.sh` on a
   tag folder would convert them along with the real clips.
 
