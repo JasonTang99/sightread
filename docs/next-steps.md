@@ -802,10 +802,11 @@ video-only (§2). Remote curation stays gated on auth
   origin (`3822da7...18a92f8`, lease-checked); the other two branches were
   never on origin. A backup of the old history is in
   `~/Projects/sightread-prerewrite-2026-10-20.bundle` (69 MB).
-  - **Open:** the copy at `/mnt/h0/SSD/Projects/sightread` is on the old
-    history. Its commits are all in the bundle, and its working tree shows
-    node_modules deletions. Re-clone it, or delete it, if it is not needed.
-  - **Open:** once satisfied, the bundle can go to the trash.
+  - The old copy at `/mnt/h0/SSD/Projects/sightread` was deleted on
+    Jason's go-ahead. Its commits were in the bundle, and its untracked
+    files matched this repo or a commit (`2d5e687`).
+  - **Open, Jason is checking the rewrite:** once he is satisfied, the
+    bundle can go to the trash.
 - **Data folder:** `docs/data-storage.md`. Done on Jason's go-ahead:
   - The orphan sweep removed 8.4 GB.
   - The cold-cache root (`webapp/cachedirs.py`, configured in
@@ -815,8 +816,6 @@ video-only (§2). Remote curation stays gated on auth
     the rest hard links).
   - The NVMe data folder is now 5.3 GB (from 81 GB); `/` has 232 GB free
     (from 156 GB).
-  - **Open:** the benchmark copy is in `/mnt/h1/.Trash-1000` (2.7 GB) until
-    the trash is emptied.
   - **Open:** not yet tried in the browser. Open a big trip and step
     through clusters (compare renders now come from h1). First open after
     h1 spins down will wait a few seconds.
