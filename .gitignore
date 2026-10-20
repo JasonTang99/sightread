@@ -6,3 +6,6 @@ webapp/frontend/dist/
 webapp/frontend/*.tsbuildinfo
 graphify-out/
 .claude/settings.json
+*.pyc
+.pytest_cache/
+webapp/frontend/.vite/
