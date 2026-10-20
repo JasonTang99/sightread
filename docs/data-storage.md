@@ -86,42 +86,37 @@ What that means in use:
   `/mnt/h1/h0`, so the caches should go in a sibling folder like
   `/mnt/h1/sightread-cache`, never inside the mirror tree.
 
-## Recommendation
+## What was done (2026-10-20, on Jason's go-ahead)
+
+1. **Orphan sweep applied:** `sweep_orphan_caches.py --include-widthkeyed
+   --apply` removed 11,364 files, 8.4 GB.
+2. **Cold-cache root:** `webapp/cachedirs.py`. Configured by
+   `~/.config/sightread/cold_cache_root` (now `/mnt/h1/sightread-cache`),
+   or `$SIGHTREAD_COLD_CACHE_ROOT`, which wins when set; `""` turns the
+   split off. Widths above 800 px go to `<root>/<project>/thumb_cache/` and
+   transcodes to `<root>/<project>/video_cache/`. Grid tiles, posters,
+   highlights and all JSON stay on the NVMe. The config file exists so the
+   server and the pipeline always agree on where a key lives.
+   - If h1 is unmounted, the root folder is missing and nothing recreates
+     it, so nothing lands on the system disk under `/mnt/h1`. Compare
+     images render and are served uncached. The video probe answers 422
+     "Cache drive not mounted: …", and the file is not marked as a failed
+     transcode.
+   - Eviction on Finish, the finish preview's size, `clean_cache.py` and
+     the orphan sweep all include the cold copies.
+3. **Existing entries moved:** `scripts/migrate_cold_cache.py --apply`.
+   Thumbnails were picked by exact 2400 px key (computed from the source
+   folder), not by size. Hard links stay hard links on h1, and each file is
+   copied, size-checked, renamed, then unlinked.
+
+## The plan behind it
 
 Hot on NVMe (about 6 GB): every project's JSON files and embeddings, the
 grid-width thumbnails (≤ 800 px), posters and `video_highlights_cache`.
 
-Cold on h1 (about 78 GB, all regenerable): `video_cache` (21 GB) and the
-2400 px compare renders (56 GB).
+Cold on h1 (about 78 GB before the sweep, all regenerable): `video_cache`
+and the 2400 px compare renders.
 
-How, in order of effort:
-
-1. **First, free space without moving anything:** run the orphan sweep
-   (8.4 GB) and mark finished trips done. No code.
-2. **video_cache → h1, no code change:** per project, move `video_cache`
-   to `/mnt/h1/sightread-cache/<project>/video_cache` and leave a symlink.
-   The code only ever does `output_dir / "video_cache" / key`, so a symlinked
-   directory is transparent. That is 21 GB off the NVMe. If h1 is unmounted,
-   the symlink dangles: `cached.exists()` is false, the player's HEAD
-   probe queues a transcode, the write into the missing directory fails,
-   and the clip is probably marked "transcode failed; the file may be
-   corrupt" until the server restarts (from reading `/api/video`, not
-   tested). That message would be misleading, so step 3 should check that
-   the cold root is mounted and say so.
-3. **Compare renders → h1, small code change:** they share `thumb_cache`
-   with the grid tiles (same directory, width only inside the hash), so a
-   symlink cannot split them. Add an optional `SIGHTREAD_COLD_CACHE_ROOT`.
-   When it is set, `thumbs.cache_file` puts widths above `GRID_MAX_WIDTH` under
-   `<root>/<project>/thumb_cache_large/`, and `video.cache_path` puts
-   transcodes under the same root. Then move the existing > 800 px files
-   across once (by measured image width, not file size). That is another
-   56 GB, and it replaces step 2's symlinks with one config path.
-   `sweep_orphan_caches.py`, `clean_cache.py` and the done-project cleanup
-   (`DERIVED_CACHE_DIRS`) need to know the second root too.
-4. When moving anything, use `rsync -aH` (or `cp -a` of a whole tree):
-   40,708 thumbnails are hard links shared across projects, and a copy that
-   does not preserve them takes up far more space than the 86.7 GB in use.
-
-Not recommended: moving the whole `projects/` folder to h1 with one symlink.
-It works, but it puts the grid tiles and `decisions.json` (rewritten on every
+Not chosen: moving the whole `projects/` folder to h1 with one symlink. It
+works, but it puts the grid tiles and `decisions.json` (rewritten on every
 keypress) on a spinning disk to save the last 6 GB.

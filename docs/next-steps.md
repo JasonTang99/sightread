@@ -794,27 +794,29 @@ video-only (§2). Remote curation stays gated on auth
   `webapp/frontend/node_modules` (already in `.gitignore`, committed before
   the rule), plus `tsconfig.node.tsbuildinfo`. `npm ci && npm run build` from
   the lockfile passes in a clean checkout. History is unchanged.
-- **Open, Jason decides: rewrite history.** Measured on a scratch mirror
-  clone after `git gc --aggressive`: packed size 66 MiB now; 49 MiB with
-  `git filter-repo --invert-paths --path webapp/frontend/node_modules
-  --path-glob '*.tsbuildinfo'`; **0.7 MiB** if `--path demo_photos` is added
-  too (three 16–18 MB JPEGs dominate, untracked since `18e7bb6`, still in
-  every branch's history). Needs a force-push of main, `ui-cleanup` and
-  `mirror-aware-deletes`, and every other clone re-cloned. Local `.git` is
-  92 MB loose; a plain `git gc` alone gets it to about 66 MB with no
-  rewrite.
-- **Data folder audit:** `docs/data-storage.md`. 86.7 GB unique, all derived
-  except `decisions.json`; 56.5 GB are 2400 px compare renders and
-  21.3 GB are video transcodes. Measured cold reads on h1: video and compare
-  renders fine (about 50 ms); grid tiles about 50 times slower than NVMe
-  (25 ms median, 150 ms p95), so keep them hot. Nothing moved.
-- **Open, needs Jason's go-ahead:**
-  1. `scripts/sweep_orphan_caches.py --include-widthkeyed --apply`. The dry
-     run would remove 11,364 unreachable files, 8.4 GB.
-  2. Symlink each project's `video_cache` to `/mnt/h1/sightread-cache/…`
-     (21 GB, no code change; rsync -aH).
-  3. `SIGHTREAD_COLD_CACHE_ROOT` for widths above 800 px and for transcodes
-     (another 56 GB), including a mounted check so an unmounted h1 is not
-     reported as "file may be corrupt". Spec in `docs/data-storage.md`.
-  4. The benchmark copy is in `/mnt/h1/.Trash-1000` (2.7 GB) until the
-     trash is emptied.
+- **History rewritten and force-pushed** (Jason's go-ahead, 2026-10-20).
+  `git filter-repo` removed `webapp/frontend/node_modules`, `*.tsbuildinfo`
+  and `demo_photos` from every branch. `.git` went from 92 MB to 968 KB.
+  main's tip tree is unchanged, and `ui-cleanup` and `mirror-aware-deletes`
+  differ from their old tips only by the removed paths. Pushed main to
+  origin (`3822da7...18a92f8`, lease-checked); the other two branches were
+  never on origin. A backup of the old history is in
+  `~/Projects/sightread-prerewrite-2026-10-20.bundle` (69 MB).
+  - **Open:** the copy at `/mnt/h0/SSD/Projects/sightread` is on the old
+    history. Its commits are all in the bundle, and its working tree shows
+    node_modules deletions. Re-clone it, or delete it, if it is not needed.
+  - **Open:** once satisfied, the bundle can go to the trash.
+- **Data folder:** `docs/data-storage.md`. Done on Jason's go-ahead:
+  - The orphan sweep removed 8.4 GB.
+  - The cold-cache root (`webapp/cachedirs.py`, configured in
+    `~/.config/sightread/cold_cache_root` as `/mnt/h1/sightread-cache`)
+    now holds the compare renders and transcodes.
+  - `scripts/migrate_cold_cache.py` moved 40,014 files (72.1 GB copied,
+    the rest hard links).
+  - The NVMe data folder is now 5.3 GB (from 81 GB); `/` has 232 GB free
+    (from 156 GB).
+  - **Open:** the benchmark copy is in `/mnt/h1/.Trash-1000` (2.7 GB) until
+    the trash is emptied.
+  - **Open:** not yet tried in the browser. Open a big trip and step
+    through clusters (compare renders now come from h1). First open after
+    h1 spins down will wait a few seconds.
