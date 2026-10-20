@@ -1,6 +1,6 @@
 # sightread — next steps
 
-_Last updated: 2026-10-08._
+_Last updated: 2026-10-20._
 
 ## Done since the last update
 
@@ -787,3 +787,34 @@ arriving with 196 `to_delete` queued. Hoh has been opened, so its adoption is do
 with readable stills now has pipeline output; the 9 without are RAW- or
 video-only (§2). Remote curation stays gated on auth
 (`plan.md`). Clipfarm highlights stay off.
+
+## 11. Repo size and the data folder (2026-10-20)
+
+- **node_modules untracked** (`db10cba`). 3,634 of 3,740 tracked files were
+  `webapp/frontend/node_modules` (already in `.gitignore`, committed before
+  the rule), plus `tsconfig.node.tsbuildinfo`. `npm ci && npm run build` from
+  the lockfile passes in a clean checkout. History is unchanged.
+- **Open, Jason decides: rewrite history.** Measured on a scratch mirror
+  clone after `git gc --aggressive`: packed size 66 MiB now; 49 MiB with
+  `git filter-repo --invert-paths --path webapp/frontend/node_modules
+  --path-glob '*.tsbuildinfo'`; **0.7 MiB** if `--path demo_photos` is added
+  too (three 16–18 MB JPEGs dominate, untracked since `18e7bb6`, still in
+  every branch's history). Needs a force-push of main, `ui-cleanup` and
+  `mirror-aware-deletes`, and every other clone re-cloned. Local `.git` is
+  92 MB loose; a plain `git gc` alone gets it to about 66 MB with no
+  rewrite.
+- **Data folder audit:** `docs/data-storage.md`. 86.7 GB unique, all derived
+  except `decisions.json`; 56.5 GB are 2400 px compare renders and
+  21.3 GB are video transcodes. Measured cold reads on h1: video and compare
+  renders fine (about 50 ms); grid tiles about 50 times slower than NVMe
+  (25 ms median, 150 ms p95), so keep them hot. Nothing moved.
+- **Open, needs Jason's go-ahead:**
+  1. `scripts/sweep_orphan_caches.py --include-widthkeyed --apply`. The dry
+     run would remove 11,364 unreachable files, 8.4 GB.
+  2. Symlink each project's `video_cache` to `/mnt/h1/sightread-cache/…`
+     (21 GB, no code change; rsync -aH).
+  3. `SIGHTREAD_COLD_CACHE_ROOT` for widths above 800 px and for transcodes
+     (another 56 GB), including a mounted check so an unmounted h1 is not
+     reported as "file may be corrupt". Spec in `docs/data-storage.md`.
+  4. The benchmark copy is in `/mnt/h1/.Trash-1000` (2.7 GB) until the
+     trash is emptied.
