@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "webapp"))
 
 from webapp import projects as P  # noqa: E402
+import cachedirs  # noqa: E402
 from media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS  # noqa: E402
 
 # What the UI and the pipeline actually request: TrashPanel 200, FavoritesView
@@ -197,6 +198,23 @@ def orphans_in(cache_dir: Path, keys: set[str]) -> tuple[list[Path], int]:
     return found, total
 
 
+def _locations(out_dir: Path, dirs: tuple[str, ...]) -> list[tuple[str, Path]]:
+    """(cache name, directory) pairs: the project's own, plus the cold-cache
+    copy of thumb_cache and video_cache when $SIGHTREAD_COLD_CACHE_ROOT is set.
+    Keys are the same in both, so one reachable set covers each name."""
+    out = []
+    for name in dirs:
+        out.append((name, out_dir / name))
+        cold = cachedirs.cold_dir(out_dir)
+        if cold is not None and name in ("thumb_cache", "video_cache"):
+            out.append((name, cold / name))
+    return out
+
+
+def _label(name: str, cache_dir: Path, out_dir: Path) -> str:
+    return name if cache_dir.parent == out_dir else f"{name} (cold)"
+
+
 def sweep_project(out_dir: Path, dirs: tuple[str, ...], widths: tuple[int, ...],
                   apply: bool, stale_policy: bool = False) -> tuple[int, int]:
     folder = P._folder_for_output_dir(out_dir)
@@ -216,17 +234,16 @@ def sweep_project(out_dir: Path, dirs: tuple[str, ...], widths: tuple[int, ...],
     freed = 0
     count = 0
     print(f"  {label} -> {folder}")
-    for name in dirs:
-        cache_dir = out_dir / name
+    for name, cache_dir in _locations(out_dir, dirs):
         if not cache_dir.is_dir():
             continue
         live = sum(1 for f in cache_dir.iterdir()
                    if f.is_file() and f.stem in keys[name])
         dead, dead_bytes = orphans_in(cache_dir, keys[name])
         if not dead:
-            print(f"      {name:14} {live:6d} live, 0 orphaned")
+            print(f"      {_label(name, cache_dir, out_dir):14} {live:6d} live, 0 orphaned")
             continue
-        print(f"      {name:14} {live:6d} live, {len(dead):6d} orphaned "
+        print(f"      {_label(name, cache_dir, out_dir):14} {live:6d} live, {len(dead):6d} orphaned "
               f"({_human(dead_bytes)})")
         if apply:
             for f in dead:
@@ -237,8 +254,7 @@ def sweep_project(out_dir: Path, dirs: tuple[str, ...], widths: tuple[int, ...],
         freed += dead_bytes
         count += len(dead)
 
-    if stale_policy:
-        cache_dir = out_dir / "video_cache"
+    for _, cache_dir in (_locations(out_dir, ("video_cache",)) if stale_policy else []):
         stale, stale_bytes = stale_policy_in(cache_dir, keys["video_cache"])
         if stale:
             print(f"      video_cache    {len(stale):6d} reachable but written under "

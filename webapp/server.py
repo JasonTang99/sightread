@@ -21,6 +21,7 @@ from pydantic import BaseModel
 # the repo root, e.g. by the test suite) resolves them.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import cachedirs
 import thumbs
 from media import HEIF_EXTENSIONS, VIDEO_EXTENSIONS, motion_names
 from utils import (
@@ -169,6 +170,10 @@ def _transcode_bg(src: Path, dest: Path) -> None:
     try:
         transcode_for_web(src, dest)
         log.info("transcoded %s", src.name)
+    except cachedirs.ColdCacheUnavailable as exc:
+        # Not the file's fault: remembering it as failed would call it corrupt
+        # until a restart, even after the drive is back.
+        log.warning("transcode skipped %s: %s", src.name, exc)
     except Exception as exc:
         failed = True
         log.warning("transcode failed %s: %s", src.name, exc)
@@ -1110,6 +1115,8 @@ def serve_video(request: Request, path: str = Query(...), cached_only: bool = Fa
                 "Cannot play this video — transcode failed; the file may be corrupt",
             )
     if request.method == "HEAD":
+        if cachedirs.cold_missing():
+            raise HTTPException(422, cachedirs.missing_message())
         _transcode_executor.submit(_transcode_bg, abs_path, cached)
         raise HTTPException(
             503,
@@ -1219,7 +1226,10 @@ def serve_image(request: Request, path: str = Query(...), w: Optional[int] = Non
         if not mine:
             return FileResponse(cache_file, media_type="image/jpeg", headers=headers)
         data = _render_thumb(abs_path, w)
-        _write_thumb(cache_file, data)
+        try:
+            _write_thumb(cache_file, data)
+        except cachedirs.ColdCacheUnavailable:
+            pass  # cold drive unmounted: serve the render, cache nothing
     return Response(data, media_type="image/jpeg", headers=headers)
 
 
@@ -1681,8 +1691,7 @@ def finish_trip_preview():
     export = plan_export(ctx.output_dir, ctx.folder, EXPORTS_ROOT, ctx.subtrip)
     pipeline = pipeline_cache_inventory(ctx.output_dir)
     derived_bytes = 0
-    for name in ("thumb_cache", "poster_cache", "video_cache"):
-        d = ctx.output_dir / name
+    for d in cachedirs.derived_dirs(ctx.output_dir):
         if not d.is_dir():
             continue
         for f in d.rglob("*"):

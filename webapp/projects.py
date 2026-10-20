@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import cachedirs
 from media import (  # noqa: F401 — IMAGE_EXTENSIONS re-exported
     CITY_DIR_RE, IMAGE_EXTENSIONS, TRIP_EXPORTS_DIR, is_image, is_video, walk_media,
 )
@@ -757,7 +758,10 @@ def split_city_caches(trip: Path) -> list[dict]:
                     if not src.is_file():
                         continue
                     dest = thumb_file(out, src_p, w, st=st)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        cachedirs.ensure_parent(dest)
+                    except cachedirs.ColdCacheUnavailable:
+                        continue  # renders on demand once the drive is back
                     if dest.exists():
                         continue
                     try:
@@ -780,7 +784,10 @@ def split_city_caches(trip: Path) -> list[dict]:
                     dest = video_file(out, src_p)
                 except OSError:
                     continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    cachedirs.ensure_parent(dest)
+                except cachedirs.ColdCacheUnavailable:
+                    continue
                 if dest.exists():
                     continue
                 try:
@@ -908,8 +915,9 @@ def evict_derived_caches(output_dir: Path) -> int:
     """
     output_dir = Path(output_dir)
     freed = 0
-    for name in DERIVED_CACHE_DIRS:
-        d = output_dir / name
+    # Includes the cold-cache copies (cachedirs.py); an unmounted cold root
+    # just has nothing to free.
+    for d in cachedirs.derived_dirs(output_dir):
         if not d.is_dir():
             continue
         for f in d.rglob("*"):

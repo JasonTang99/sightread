@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import cachedirs
 import media
 
 # Both writers of this cache decode through here, so registering the HEIF
@@ -30,11 +31,16 @@ DETAIL_QUALITY = 95
 
 
 def cache_file(output_dir: Path, abs_path: Path, w: int, st: os.stat_result | None = None) -> Path:
-    """Where the w-wide thumbnail of abs_path lives. Keyed by path/mtime/width."""
+    """Where the w-wide thumbnail of abs_path lives. Keyed by path/mtime/width.
+
+    Widths above the grid's go to the cold-cache root when one is set
+    (cachedirs.py): they are 90% of the bytes and read one at a time.
+    """
     if st is None:
         st = abs_path.stat()
     key = hashlib.sha1(f"{abs_path}|{st.st_mtime_ns}|{w}".encode()).hexdigest()
-    return Path(output_dir) / "thumb_cache" / f"{key}.jpg"
+    d = cachedirs.large_thumb_dir(output_dir) if w > GRID_MAX_WIDTH else Path(output_dir) / "thumb_cache"
+    return d / f"{key}.jpg"
 
 
 def encode(img: Image.Image, w: int) -> bytes:
@@ -68,7 +74,7 @@ def render(abs_path: Path, w: int) -> bytes:
 
 
 def write(dest: Path, data: bytes) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    cachedirs.ensure_parent(dest)
     # Thread id as well as pid: the prewarm pool has several threads writing
     # thumbnails at once, and a shared temp name would let them clobber.
     tmp = dest.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")

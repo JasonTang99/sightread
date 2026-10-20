@@ -23,6 +23,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+import cachedirs
 from media import VIDEO_EXTENSIONS  # noqa: F401 — re-exported for convert_videos.py
 
 
@@ -35,7 +36,7 @@ def cache_path(output_dir: Path, src: Path) -> Path:
     key = hashlib.sha1(
         f"{src.resolve()}|{src.stat().st_mtime_ns}".encode()
     ).hexdigest()
-    return output_dir / "video_cache" / f"{key}.mp4"
+    return cachedirs.video_dir(output_dir) / f"{key}.mp4"
 
 
 def poster_path(
@@ -119,7 +120,7 @@ def transcode_for_web(src: Path, dest: Path) -> None:
     ff = _ffmpeg()
     if ff is None:
         raise RuntimeError("ffmpeg not found on PATH")
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    cachedirs.ensure_parent(dest)
     tmp = dest.with_suffix(".tmp.mp4")
     subprocess.run(
         [

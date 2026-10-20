@@ -8,7 +8,11 @@ Usage:
 
 import argparse
 import shutil
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "webapp"))
+import cachedirs  # noqa: E402
 
 CACHE_FILES = [
     "embeddings_dinov3_mpcls_tta.npy",
@@ -31,11 +35,12 @@ def clean(output_dir: str = "outputs") -> None:
             p.unlink()
             removed.append(str(p))
 
-    thumb_cache = out / "thumb_cache"
-    if thumb_cache.is_dir():
-        n = sum(1 for _ in thumb_cache.iterdir())
-        shutil.rmtree(thumb_cache)
-        removed.append(f"{thumb_cache}/ ({n} files)")
+    # Compare-width thumbnails may live under the cold-cache root instead.
+    for thumb_cache in dict.fromkeys([out / "thumb_cache", cachedirs.large_thumb_dir(out)]):
+        if thumb_cache.is_dir():
+            n = sum(1 for _ in thumb_cache.iterdir())
+            shutil.rmtree(thumb_cache)
+            removed.append(f"{thumb_cache}/ ({n} files)")
 
     vh_cache = out / "video_highlights_cache"
     if vh_cache.is_dir():

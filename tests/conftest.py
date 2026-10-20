@@ -28,3 +28,11 @@ def _no_poster_prewarm(monkeypatch):
     except ImportError:
         return  # pipeline-only test run; webapp isn't imported
     monkeypatch.setattr(server._poster_executor, "submit", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_cold_cache_root(monkeypatch):
+    """Tests address caches under their tmp output dir, whatever the shell has
+    $SIGHTREAD_COLD_CACHE_ROOT or ~/.config/sightread/cold_cache_root say.
+    test_cold_cache.py sets it itself."""
+    monkeypatch.setenv("SIGHTREAD_COLD_CACHE_ROOT", "")  # "" = off, even if the config file is set
